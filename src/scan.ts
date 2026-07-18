@@ -192,8 +192,78 @@ function detectGoRun(dir: string): string {
   return "go run ./...";
 }
 
+const DOTNET_SKIP = new Set([
+  "node_modules", ".git", "bin", "obj", ".toolchain", ".godot", ".vs", "dist", "build",
+]);
+
+/** Find .csproj files a few levels deep, skipping build/output dirs. */
+function findCsprojs(dir: string, depth = 3): string[] {
+  const out: string[] = [];
+  const walk = (d: string, left: number) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (left <= 0 || DOTNET_SKIP.has(e.name) || e.name.startsWith(".")) continue;
+        walk(path.join(d, e.name), left - 1);
+      } else if (e.name.endsWith(".csproj")) {
+        out.push(path.join(d, e.name));
+      }
+    }
+  };
+  walk(dir, depth);
+  return out;
+}
+
+/** Does the project ship a build.sh that dispatches a `run` subcommand? */
+function hasBuildRun(dir: string): boolean {
+  try {
+    return /(^|\n)\s*run\)/.test(fs.readFileSync(path.join(dir, "build.sh"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/** How to run a .NET project: its own build.sh run, else `dotnet run` on the app project. */
+function detectDotnetRun(dir: string): string | null {
+  const csprojs = findCsprojs(dir);
+  let hasSln = false;
+  try {
+    hasSln = fs.readdirSync(dir).some((f) => f.endsWith(".sln"));
+  } catch {
+    /* ignore */
+  }
+  if (!csprojs.length && !hasSln) return null;
+
+  // a project's own one-command launcher wins — e.g. a Godot game needs its
+  // runtime, which `dotnet run` can't provide but build.sh sets up
+  if (hasBuildRun(dir)) return "./build.sh run";
+
+  const rel = (p: string) => path.relative(dir, p);
+  const isTestOrTool = (p: string) =>
+    /(^|\/)(tests?|tools?|samples?|examples?|benchmarks?)(\/|$)/i.test(rel(p));
+  const isExe = (p: string) => {
+    try {
+      return /<OutputType>\s*(Win)?Exe/i.test(fs.readFileSync(p, "utf8"));
+    } catch {
+      return false;
+    }
+  };
+  const apps = csprojs.filter((p) => !isTestOrTool(p));
+  const runnable =
+    apps.find((p) => /(Host|App|Server|Api|Web|Cli|Console|Game|Desktop|Main)\.csproj$/i.test(p)) ||
+    apps.find(isExe) ||
+    apps[0] ||
+    csprojs[0];
+  return runnable ? `dotnet run --project ${rel(runnable)}` : "dotnet run";
+}
+
 /** Best guess at how to run a project — the user can override in the dashboard. */
-function detectRunCommand(dir: string, pkg: any | null): string | null {
+function detectRunCommand(dir: string, pkg: any | null, stack: string[]): string | null {
   if (pkg?.scripts) {
     const s = pkg.scripts;
     // prefer a long-running dev/serve script; fall back to start
@@ -203,6 +273,10 @@ function detectRunCommand(dir: string, pkg: any | null): string | null {
   }
   if (fs.existsSync(path.join(dir, "Cargo.toml"))) return "cargo run";
   if (fs.existsSync(path.join(dir, "go.mod"))) return detectGoRun(dir);
+  if (stack.includes(".NET/C#")) {
+    const dn = detectDotnetRun(dir);
+    if (dn) return dn;
+  }
   for (const entry of ["server.js", "index.js", "app.js", "main.py", "app.py"]) {
     if (fs.existsSync(path.join(dir, entry)))
       return entry.endsWith(".py") ? `python ${entry}` : `node ${entry}`;
@@ -298,7 +372,7 @@ export function scanOne(dir: string, name: string): Signals {
     hasReadme:
       fs.existsSync(path.join(dir, "README.md")) ||
       fs.existsSync(path.join(dir, "readme.md")),
-    runCommand: detectRunCommand(dir, pkg),
+    runCommand: detectRunCommand(dir, pkg, stack),
     port: detectPort(dir, pkg, stack),
   };
 }
