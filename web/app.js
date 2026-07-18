@@ -276,7 +276,7 @@ async function saveDrawer() {
 /* ---------- workspace / cockpit ---------- */
 let WS = {
   name: null, es: null, port: null, pane: "logs",
-  engine: "claude", fullAccess: false, aiEs: null, aiBusy: false,
+  engine: "claude", fullAccess: false, aiEs: null, aiBusy: false, pendingUser: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
 
@@ -322,6 +322,7 @@ function openWorkspace(p) {
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
   WS.depTarget = "staging";
   WS.depArmed = false;
+  WS.pendingUser = null;
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
@@ -403,6 +404,7 @@ function connectLogs(name) {
   if (WS.es) WS.es.close();
   const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
   WS.es = es;
+  es.onopen = () => ($("#ws-console").innerHTML = ""); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
     try {
       appendLine(JSON.parse(e.data));
@@ -434,7 +436,7 @@ function closeWorkspace() {
   if (WS.depEs) WS.depEs.close();
   WS = {
     name: null, es: null, port: null, pane: "logs",
-    engine: "claude", fullAccess: false, aiEs: null, aiBusy: false,
+    engine: "claude", fullAccess: false, aiEs: null, aiBusy: false, pendingUser: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
   };
   $("#ws-backdrop").hidden = true;
@@ -458,17 +460,27 @@ function activityFor(ev) {
   return null;
 }
 
-function appendAiEvent(ev) {
+function renderAiBubble(ev) {
   const t = $("#ws-transcript");
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
   const b = el("div", "ai-msg ai-" + ev.role);
   b.textContent = ev.text;
   t.append(b);
+  if (nearBottom) t.scrollTop = t.scrollHeight;
+  return b;
+}
+
+function appendAiEvent(ev) {
+  // we render the just-sent message optimistically — skip its server echo
+  if (ev.role === "user" && ev.text === WS.pendingUser) {
+    WS.pendingUser = null;
+    return;
+  }
+  renderAiBubble(ev);
   if (WS.aiBusy) {
     const label = activityFor(ev);
     if (label) setAiActivity(label);
   }
-  if (nearBottom) t.scrollTop = t.scrollHeight;
 }
 
 function setAiBusy(busy) {
@@ -486,6 +498,13 @@ function connectAi(name) {
     `/api/projects/${encodeURIComponent(name)}/ai/stream?engine=${encodeURIComponent(WS.engine)}`,
   );
   WS.aiEs = es;
+  // on every (re)connection the server replays the whole transcript, so wipe
+  // first — this makes a dropped/reconnected stream rebuild cleanly instead of
+  // duplicating or going blank
+  es.onopen = () => {
+    WS.pendingUser = null;
+    $("#ws-transcript").innerHTML = "";
+  };
   es.onmessage = (e) => {
     try {
       appendAiEvent(JSON.parse(e.data));
@@ -505,6 +524,9 @@ async function sendAi() {
   const message = box.value.trim();
   if (!message) return;
   box.value = "";
+  // show the message immediately — never depend on the round-trip for feedback
+  WS.pendingUser = message;
+  const optimistic = renderAiBubble({ role: "user", text: message });
   setAiBusy(true);
   const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai`, {
     method: "POST",
@@ -516,6 +538,8 @@ async function sendAi() {
     toast(e.error || "AI request failed");
     setAiBusy(false);
     box.value = message; // don't lose the message
+    WS.pendingUser = null;
+    optimistic.remove(); // undo the optimistic bubble
   }
 }
 
@@ -562,6 +586,7 @@ function connectDeployLogs() {
     `/api/projects/${encodeURIComponent(WS.name)}/logs/stream?kind=${encodeURIComponent(depKind())}`,
   );
   WS.depEs = es;
+  es.onopen = () => ($("#ws-depconsole").innerHTML = ""); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
     try {
       appendLine(JSON.parse(e.data), $("#ws-depconsole"));
