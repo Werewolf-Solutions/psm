@@ -10,7 +10,7 @@ import { loadConfig, workspaceRoot } from "../scan.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
-import { activeSessions, aiLimit, aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
+import { activeSessions, aiLimit, aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, WORKSPACE_NAME, type AiEngine } from "./ai.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -162,6 +162,12 @@ app.get("/api/ai/limit", (req, res) => {
   res.json({ limit: aiLimit(parseEngine(req.query.engine, "claude")) });
 });
 
+// the workspace-wide chat target (its saved engine / full-access defaults)
+app.get("/api/workspace", (_req, res) => {
+  const o = loadOverrides()[WORKSPACE_NAME] || {};
+  res.json({ name: WORKSPACE_NAME, aiEngine: o.aiEngine || "claude", aiFullAccess: !!o.aiFullAccess });
+});
+
 // snapshot status for one project+kind
 app.get("/api/projects/:name/proc", (req, res) => {
   res.json(procState(req.params.name, parseKind(req.query.kind)));
@@ -197,20 +203,52 @@ function parseEngine(v: unknown, fallback: AiEngine): AiEngine {
   return v === "codex" || v === "claude" ? v : fallback;
 }
 
+// The AI target: a real project, or the workspace-wide chat (cwd = workspace root).
+function aiTarget(name: string) {
+  if (name === WORKSPACE_NAME) {
+    const o = loadOverrides()[WORKSPACE_NAME] || {};
+    return {
+      name: WORKSPACE_NAME,
+      path: workspaceRoot(loadConfig()),
+      aiEngine: (o.aiEngine as AiEngine) || "claude",
+      aiFullAccess: !!o.aiFullAccess,
+    };
+  }
+  return findProject(name);
+}
+
+// a compact rundown of every project, so the workspace chat knows what exists
+function workspaceRundown(): string {
+  const lines = getProjects()
+    .filter((p) => !p.archived)
+    .map(
+      (p) =>
+        `- ${p.name} [${p.status}${p.stack && p.stack !== "—" ? `, ${p.stack}` : ""}] — ${p.description}`,
+    );
+  return (
+    "You are the workspace-wide assistant for this folder of projects. Each project below is a " +
+    "subdirectory you can read and edit. The psm tool (in ./psm) tracks them all and generates " +
+    "psm/PROJECTS.md from psm/overrides.json — regenerate it with `npm run build:md` in ./psm " +
+    "after anything that changes a project's description or status.\n\nProjects:\n" +
+    lines.join("\n")
+  );
+}
+
 // transcript stream (replays history, then live)
 app.get("/api/projects/:name/ai/stream", (req, res) => {
-  const proj = findProject(req.params.name);
-  if (!proj) return res.status(404).end();
-  subscribeAi(res, proj.name, proj.path, parseEngine(req.query.engine, proj.aiEngine));
+  const t = aiTarget(req.params.name);
+  if (!t) return res.status(404).end();
+  subscribeAi(res, t.name, t.path, parseEngine(req.query.engine, t.aiEngine));
 });
 
-// send one message to the project's AI
+// send one message to the project's (or workspace's) AI
 app.post("/api/projects/:name/ai", (req, res) => {
-  const proj = findProject(req.params.name);
-  if (!proj) return res.status(404).json({ error: "unknown project" });
-  const engine = parseEngine(req.body?.engine, proj.aiEngine);
-  const fullAccess = req.body?.fullAccess ?? proj.aiFullAccess;
-  const r = aiSend(proj.name, proj.path, engine, String(req.body?.message ?? ""), !!fullAccess);
+  const t = aiTarget(req.params.name);
+  if (!t) return res.status(404).json({ error: "unknown project" });
+  const engine = parseEngine(req.body?.engine, t.aiEngine);
+  const fullAccess = req.body?.fullAccess ?? t.aiFullAccess;
+  const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
+  const r = aiSend(t.name, t.path, engine, String(req.body?.message ?? ""), !!fullAccess, extra);
   res.status(r.ok ? 200 : 409).json(r);
 });
 

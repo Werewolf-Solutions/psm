@@ -335,7 +335,7 @@ async function saveDrawer() {
 
 /* ---------- workspace / cockpit ---------- */
 let WS = {
-  name: null, es: null, port: null, pane: "logs",
+  name: null, es: null, port: null, pane: "logs", chatOnly: false,
   engine: "claude", fullAccess: false, aiEs: null, aiBusy: false, pendingUser: null, aiLimited: false,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
@@ -374,7 +374,9 @@ function appendLine(entry, con = $("#ws-console")) {
   if (nearBottom) con.scrollTop = con.scrollHeight;
 }
 
-function openWorkspace(p, pane = "logs") {
+function openWorkspace(p, pane = "logs", opts = {}) {
+  const chat = !!opts.chatOnly; // the workspace-wide chat: AI pane only
+  WS.chatOnly = chat;
   WS.name = p.name;
   WS.port = p.port ?? null;
   WS.engine = p.aiEngine || "claude";
@@ -389,7 +391,11 @@ function openWorkspace(p, pane = "logs") {
   $("#ws-ai-recap").innerHTML = "";
   $("#ws-ai-limit").hidden = true;
   $("#ws-ai-limit").innerHTML = "";
-  $("#ws-name").textContent = p.name;
+  $("#ws-name").textContent = opts.title || p.name;
+  // hide the run/web/deploy cockpit when this is the workspace-wide chat
+  $("#ws-runbar").hidden = chat;
+  $("#ws-status").hidden = chat;
+  for (const t of document.querySelectorAll(".ws-tab")) t.hidden = chat && t.dataset.pane !== "ai";
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
   $("#ws-depconsole").innerHTML = "";
@@ -399,11 +405,24 @@ function openWorkspace(p, pane = "logs") {
   $("#ws-full").checked = WS.fullAccess;
   setWsStatus("idle");
   setAiBusy(false);
-  switchPane(pane);
+  switchPane(chat ? "ai" : pane);
   $("#ws-backdrop").hidden = false;
   $("#workspace").hidden = false;
-  connectLogs(p.name);
+  if (!chat) connectLogs(p.name);
   connectAi(p.name);
+}
+
+async function openWorkspaceChat() {
+  let w = { aiEngine: "claude", aiFullAccess: false };
+  try {
+    w = await (await fetch("/api/workspace")).json();
+  } catch {}
+  openWorkspace(
+    { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null,
+      aiEngine: w.aiEngine || "claude", aiFullAccess: !!w.aiFullAccess },
+    "ai",
+    { chatOnly: true, title: "psm · all projects" },
+  );
 }
 
 function switchPane(pane) {
@@ -512,6 +531,10 @@ function closeWorkspace() {
   };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
+  // restore the full cockpit for the next (normal) workspace
+  $("#ws-runbar").hidden = false;
+  $("#ws-status").hidden = false;
+  for (const t of document.querySelectorAll(".ws-tab")) t.hidden = false;
   fetchSessions(); // the "Working on" lane may have gained/updated a session
 }
 
@@ -974,6 +997,7 @@ $("#new-name").addEventListener("keydown", (e) => {
   }
 });
 $("#rules-open").onclick = openRules;
+$("#ws-chat-open").onclick = openWorkspaceChat;
 $("#rules-close").onclick = closeModals;
 $("#rules-cancel").onclick = closeModals;
 $("#rules-save").onclick = saveRules;

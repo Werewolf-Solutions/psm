@@ -16,6 +16,7 @@
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
+        <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
         <button id="rules-open" class="btn" title="Edit the shared AI house rules">House&nbsp;rules</button>
         <button id="new-open" class="btn" title="Create a new project">＋&nbsp;New</button>
         <button id="export" class="btn" title="Regenerate PROJECTS.md">Export&nbsp;MD</button>
@@ -105,7 +106,7 @@
         </div>
         <button class="icon-btn" id="ws-close" aria-label="Close workspace">✕</button>
       </header>
-      <div class="ws-runbar">
+      <div class="ws-runbar" id="ws-runbar">
         <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" />
         <button class="btn btn-primary" id="ws-run">▶ Run</button>
         <button class="btn" id="ws-stop">■ Stop</button>

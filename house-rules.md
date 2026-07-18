@@ -35,3 +35,19 @@ You have the full context of the project you're launched in — read before you 
 
 ## Deployment
 - Treat production deploys with extra care; confirm before anything irreversible.
+
+## Keeping the workspace in sync
+
+When you change a project, keep its documentation and the workspace's view of it accurate:
+
+- **The project's own docs.** If a change affects how the project is set up, run, or what it
+  does, update that project's README (and any other docs it keeps) in the same breath.
+- **The workspace reference.** These projects live in one workspace managed by **psm** (in
+  `./psm`). `psm/PROJECTS.md` is a generated rundown of every project — do **not** hand-edit
+  it. Its per-project description, status, and next-step come from `psm/overrides.json` (and
+  fall back to the project's README/package.json). When your change makes a project's
+  description, status, or "what's next" out of date, update that project's README/package.json
+  (or the entry in `psm/overrides.json`) and regenerate the rundown with `npm run build:md`
+  in `./psm`.
+- **Cross-references.** If other projects or docs mention the one you changed, update those
+  mentions too. Leave the workspace internally consistent.

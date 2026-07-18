@@ -18,6 +18,9 @@ const SESSIONS_FILE = path.resolve(__dirname, "..", "..", ".psm-sessions.json");
 
 export type AiEngine = "claude" | "codex";
 
+/** Reserved session key for the workspace-wide chat (cwd = workspace root). */
+export const WORKSPACE_NAME = "__workspace__";
+
 export interface AiEvent {
   t: number;
   role: "user" | "assistant" | "system";
@@ -201,6 +204,7 @@ export function aiState(name: string) {
 export function activeSessions() {
   const out = [];
   for (const [name, s] of sessions) {
+    if (name === WORKSPACE_NAME) continue; // the workspace chat isn't a project
     if (!s.sessionId && !s.log.length) continue;
     const lastUser = [...s.log].reverse().find((e) => e.role === "user");
     const lastEvent = s.log[s.log.length - 1];
@@ -217,8 +221,13 @@ export function activeSessions() {
 }
 
 /** Build the argv for one turn (no shell — args are passed literally). */
-function buildCommand(s: AiSession, message: string, fullAccess: boolean): { cmd: string; args: string[] } {
-  const rules = houseRules();
+function buildCommand(
+  s: AiSession,
+  message: string,
+  fullAccess: boolean,
+  extraContext = "",
+): { cmd: string; args: string[] } {
+  const rules = [houseRules(), extraContext].filter(Boolean).join("\n\n");
   if (s.engine === "codex") {
     const sandbox = fullAccess
       ? ["--dangerously-bypass-approvals-and-sandbox"]
@@ -337,6 +346,7 @@ export function send(
   engine: AiEngine,
   message: string,
   fullAccess: boolean,
+  extraContext = "",
 ): { ok: boolean; error?: string; limited?: boolean } {
   const s = getSession(name, cwd, engine);
   if (s.busy) return { ok: false, error: "the AI is still working on the previous turn" };
@@ -353,7 +363,7 @@ export function send(
   pushEvent(s, { t: Date.now(), role: "user", text: message });
   broadcast(s, "status", { busy: true, engine });
 
-  const { cmd, args } = buildCommand(s, message, fullAccess);
+  const { cmd, args } = buildCommand(s, message, fullAccess, extraContext);
   const handleLine = engine === "codex" ? handleCodexLine : handleClaudeLine;
 
   let child: ChildProcess;
