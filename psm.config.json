@@ -1,6 +1,6 @@
 {
   "workspaceRoot": "..",
-  "ignore": ["psm", "docs", "imgs", "text-files", ".github", "node_modules", ".git"],
+  "ignore": ["docs", "imgs", "text-files", ".github", "node_modules", ".git"],
   "activeDays": 45,
   "archivePatterns": ["-old$", "backup", "-template$", "template$"]
 }
