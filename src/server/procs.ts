@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import type { Response } from "express";
 
-/** A managed long-running process (a project's dev server, a deploy, …). */
-export type ProcKind = "run" | "deploy";
+/** A managed process: a project's dev server, or a deploy to a target. */
+export type ProcKind = "run" | "deploy:staging" | "deploy:production";
 export type ProcStatus = "running" | "exited" | "error";
 
 export interface LogLine {
@@ -180,7 +180,9 @@ export function subscribe(res: Response, name: string, kind: ProcKind): void {
 
   // replay buffered lines
   for (const entry of p.log) res.write(`data: ${JSON.stringify(entry)}\n\n`);
-  res.write(`event: status\ndata: ${JSON.stringify({ status: p.status, exitCode: p.exitCode })}\n\n`);
+  // a process that never started should read as "idle", not "exited"
+  const initial = p.startedAt === 0 ? "idle" : p.status;
+  res.write(`event: status\ndata: ${JSON.stringify({ status: initial, exitCode: p.exitCode })}\n\n`);
 
   p.subscribers.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);

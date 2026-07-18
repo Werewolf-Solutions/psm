@@ -218,6 +218,8 @@ function openDrawer(p) {
   $("#d-port").placeholder = p.port ? String(p.port) : "e.g. 3000";
   $("#d-engine").value = p.overridden.includes("aiEngine") ? p.aiEngine : "";
   $("#d-full").checked = !!p.aiFullAccess;
+  $("#d-deploy-staging").value = p.deployStaging || "";
+  $("#d-deploy-production").value = p.deployProduction || "";
   $("#d-category").value = p.overridden.includes("category") ? p.category : "";
   $("#d-category").placeholder = p.category || "Category";
 
@@ -253,6 +255,8 @@ async function saveDrawer() {
     port: $("#d-port").value.trim() ? Number($("#d-port").value.trim()) : "",
     aiEngine: $("#d-engine").value,
     aiFullAccess: $("#d-full").checked,
+    deployStaging: $("#d-deploy-staging").value.trim(),
+    deployProduction: $("#d-deploy-production").value.trim(),
   };
   // don't send pinned:false as a stored override unless it was set; keep simple: always send
   const r = await fetch(`/api/projects/${encodeURIComponent(editing.name)}`, {
@@ -270,7 +274,11 @@ async function saveDrawer() {
 }
 
 /* ---------- workspace / cockpit ---------- */
-let WS = { name: null, es: null, port: null, pane: "logs", engine: "claude", fullAccess: false, aiEs: null, aiBusy: false };
+let WS = {
+  name: null, es: null, port: null, pane: "logs",
+  engine: "claude", fullAccess: false, aiEs: null, aiBusy: false,
+  deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
+};
 
 function isRunning(name) {
   return STATE.procs[`${name}::run`]?.status === "running";
@@ -285,8 +293,7 @@ function setWsStatus(status) {
   $("#ws-stop").disabled = !running;
 }
 
-function appendLine(entry) {
-  const con = $("#ws-console");
+function appendLine(entry, con = $("#ws-console")) {
   const nearBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 60;
   const line = el("div", "logline s-" + entry.stream);
   line.textContent = entry.line;
@@ -301,9 +308,13 @@ function openWorkspace(p) {
   WS.port = p.port ?? null;
   WS.engine = p.aiEngine || "claude";
   WS.fullAccess = !!p.aiFullAccess;
+  WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
+  WS.depTarget = "staging";
+  WS.depArmed = false;
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
+  $("#ws-depconsole").innerHTML = "";
   $("#ws-webframe").innerHTML = "";
   $("#ws-transcript").innerHTML = "";
   $("#ws-engine").value = WS.engine;
@@ -324,6 +335,7 @@ function switchPane(pane) {
   for (const el of document.querySelectorAll(".ws-panes > [data-pane]"))
     el.hidden = el.dataset.pane !== pane;
   if (pane === "web") renderWebPane();
+  if (pane === "deploy") openDeployPane();
 }
 
 const webUrl = () => (WS.port ? `http://localhost:${WS.port}` : null);
@@ -396,7 +408,12 @@ function connectLogs(name) {
 function closeWorkspace() {
   if (WS.es) WS.es.close();
   if (WS.aiEs) WS.aiEs.close();
-  WS = { name: null, es: null, port: null, pane: "logs", engine: "claude", fullAccess: false, aiEs: null, aiBusy: false };
+  if (WS.depEs) WS.depEs.close();
+  WS = {
+    name: null, es: null, port: null, pane: "logs",
+    engine: "claude", fullAccess: false, aiEs: null, aiBusy: false,
+    deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
+  };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
 }
@@ -460,6 +477,111 @@ async function sendAi() {
 async function cancelAi() {
   if (!WS.name) return;
   await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/cancel`, { method: "POST" });
+}
+
+/* ---- Deploy pane ---- */
+const depKind = () => `deploy:${WS.depTarget}`;
+
+function openDeployPane() {
+  for (const b of document.querySelectorAll(".ws-target"))
+    b.classList.toggle("on", b.dataset.target === WS.depTarget);
+  renderDeployControls();
+  connectDeployLogs();
+}
+
+function renderDeployControls() {
+  const cmd = WS.deploy[WS.depTarget];
+  $("#ws-depcmd").textContent = cmd || "no command set — use “Guide me with AI”, or set one in the project’s edit drawer";
+  $("#ws-depcmd").classList.toggle("unset", !cmd);
+  const run = $("#ws-dep-run");
+  run.disabled = !cmd;
+  run.textContent = "Deploy";
+  run.classList.toggle("danger", WS.depTarget === "production");
+  WS.depArmed = false;
+}
+
+function setDepStatus(status) {
+  const badge = $("#ws-dep-status");
+  badge.textContent = status === "idle" ? "" : status;
+  badge.dataset.state = status;
+  const running = status === "running";
+  $("#ws-dep-run").hidden = running;
+  $("#ws-dep-stop").hidden = !running;
+}
+
+function connectDeployLogs() {
+  if (WS.depEs) WS.depEs.close();
+  $("#ws-depconsole").innerHTML = "";
+  setDepStatus("idle");
+  const es = new EventSource(
+    `/api/projects/${encodeURIComponent(WS.name)}/logs/stream?kind=${encodeURIComponent(depKind())}`,
+  );
+  WS.depEs = es;
+  es.onmessage = (e) => {
+    try {
+      appendLine(JSON.parse(e.data), $("#ws-depconsole"));
+    } catch {}
+  };
+  es.addEventListener("status", (e) => {
+    try {
+      setDepStatus(JSON.parse(e.data).status);
+    } catch {}
+  });
+  es.onerror = () => {};
+}
+
+function selectDeployTarget(target) {
+  if (target === WS.depTarget) return;
+  WS.depTarget = target;
+  openDeployPane();
+}
+
+async function deployRun() {
+  const target = WS.depTarget;
+  const cmd = WS.deploy[target];
+  if (!cmd) return toast("No deploy command set for " + target);
+  // production needs a second, confirming click
+  if (target === "production" && !WS.depArmed) {
+    WS.depArmed = true;
+    $("#ws-dep-run").textContent = "⚠ Confirm production deploy";
+    return;
+  }
+  WS.depArmed = false;
+  $("#ws-dep-run").textContent = "Deploy";
+  setDepStatus("running");
+  const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: depKind() }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    toast(e.error || "Deploy failed to start");
+    setDepStatus("error");
+  }
+}
+
+async function deployStop() {
+  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: depKind() }),
+  });
+}
+
+function guideWithAI() {
+  const target = WS.depTarget;
+  const cmd = WS.deploy[target];
+  switchPane("ai");
+  const prompt =
+    `I want to deploy this project to ${target}. ` +
+    (cmd
+      ? `The deploy command configured in psm is: \`${cmd}\`. Walk me through what it does, then run it when I confirm.`
+      : `No deploy command is configured yet. Figure out how this project should be deployed to ${target}, explain the steps briefly, and once I confirm, carry it out.`) +
+    (target === "production" ? " This is PRODUCTION — be careful and confirm with me before anything irreversible." : "");
+  $("#ws-msg").value = prompt;
+  $("#ws-msg").focus();
+  toast("Loaded a deploy prompt into the AI — review and Send");
 }
 
 async function wsRun() {
@@ -530,6 +652,13 @@ $("#ws-msg").addEventListener("keydown", (e) => {
     sendAi();
   }
 });
+$("#ws-targets").onclick = (e) => {
+  const b = e.target.closest(".ws-target");
+  if (b) selectDeployTarget(b.dataset.target);
+};
+$("#ws-dep-run").onclick = deployRun;
+$("#ws-dep-stop").onclick = deployStop;
+$("#ws-dep-ai").onclick = guideWithAI;
 
 /* ---------- actions ---------- */
 let toastTimer;

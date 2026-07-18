@@ -28,7 +28,8 @@ const OVERRIDE_KEYS: (keyof Override)[] = [
   "archived",
   "note",
   "runCommand",
-  "deployCommand",
+  "deployStaging",
+  "deployProduction",
   "port",
   "aiEngine",
   "aiFullAccess",
@@ -69,7 +70,14 @@ function findProject(name: string) {
 }
 
 function parseKind(v: unknown): ProcKind {
-  return v === "deploy" ? "deploy" : "run";
+  return v === "deploy:staging" || v === "deploy:production" ? v : "run";
+}
+
+// the command a given process kind should run for a project
+function commandForKind(proj: ReturnType<typeof findProject> & {}, kind: ProcKind): string | null {
+  if (kind === "deploy:staging") return proj.deployStaging;
+  if (kind === "deploy:production") return proj.deployProduction;
+  return proj.runCommand;
 }
 
 // live status of every managed process (for dashboard "running" dots)
@@ -88,8 +96,7 @@ app.post("/api/projects/:name/run", (req, res) => {
   const proj = findProject(req.params.name);
   if (!proj) return res.status(404).json({ error: "unknown project" });
   const command =
-    (req.body?.command && String(req.body.command).trim()) ||
-    (kind === "deploy" ? proj.deployCommand : proj.runCommand);
+    (req.body?.command && String(req.body.command).trim()) || commandForKind(proj, kind);
   if (!command)
     return res.status(400).json({ error: `no ${kind} command set for ${proj.name}` });
   const p = start(proj.name, kind, command, proj.path);

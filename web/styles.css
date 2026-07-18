@@ -316,6 +316,31 @@ table.arch td.date { color: var(--faint); white-space: nowrap; }
 }
 .ws-composer textarea:focus { outline: none; border-color: var(--accent); }
 
+/* Deploy pane */
+.ws-deploy { display: flex; flex-direction: column; }
+.ws-deploybar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.ws-targets { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.ws-target {
+  padding: 7px 14px; border: none; background: var(--card); color: var(--muted);
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.ws-target + .ws-target { border-left: 1px solid var(--line); }
+.ws-target:hover { color: var(--text); }
+.ws-target.on { background: var(--accent); color: var(--accent-ink); }
+.ws-target[data-target="production"].on { background: #f85149; color: #fff; }
+.ws-depcmd {
+  flex: 1; min-width: 160px; font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ws-depcmd.unset { color: var(--faint); font-style: italic; font-family: inherit; }
+.ws-dep-status { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
+.ws-dep-status[data-state="running"] { color: var(--st-active); }
+.ws-dep-status[data-state="error"] { color: #f85149; }
+.ws-dep-status[data-state="exited"] { color: var(--muted); }
+.btn.danger { background: #f85149; color: #fff; border-color: transparent; }
+.btn.danger:hover { filter: brightness(1.07); }
+
 /* ---- toast ---- */
 .toast {
   position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);

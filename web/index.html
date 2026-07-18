@@ -66,6 +66,12 @@
         <label>Web port
           <input id="d-port" type="number" min="1" max="65535" placeholder="e.g. 3000" />
         </label>
+        <label>Deploy → staging
+          <input id="d-deploy-staging" type="text" placeholder="e.g. npm run deploy:staging" />
+        </label>
+        <label>Deploy → production
+          <input id="d-deploy-production" type="text" placeholder="e.g. npm run deploy" />
+        </label>
         <label>AI engine
           <select id="d-engine">
             <option value="">— default (Claude Code) —</option>
@@ -107,6 +113,7 @@
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
         <button class="ws-tab" data-pane="ai">AI</button>
+        <button class="ws-tab" data-pane="deploy">Deploy</button>
       </div>
       <div class="ws-panes">
         <div class="ws-console" id="ws-console" data-pane="logs"></div>
@@ -135,6 +142,20 @@
             <button class="btn" id="ws-openext" title="Open in a new tab">Open&nbsp;↗</button>
           </div>
           <div class="ws-webframe" id="ws-webframe"></div>
+        </div>
+        <div class="ws-deploy" data-pane="deploy" hidden>
+          <div class="ws-deploybar">
+            <div class="ws-targets" id="ws-targets">
+              <button class="ws-target on" data-target="staging">Staging</button>
+              <button class="ws-target" data-target="production">Production</button>
+            </div>
+            <code class="ws-depcmd" id="ws-depcmd">—</code>
+            <span class="ws-dep-status" id="ws-dep-status"></span>
+            <button class="btn" id="ws-dep-ai" title="Ask the AI to walk you through deploying">Guide me with AI</button>
+            <button class="btn" id="ws-dep-stop" hidden>■ Stop</button>
+            <button class="btn btn-primary" id="ws-dep-run">Deploy</button>
+          </div>
+          <div class="ws-console" id="ws-depconsole"></div>
         </div>
       </div>
     </section>

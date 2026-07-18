@@ -42,7 +42,8 @@ export interface Override {
   note?: string; // short archive/context note
   // cockpit fields
   runCommand?: string; // overrides the auto-detected run command
-  deployCommand?: string; // how to deploy this project
+  deployStaging?: string; // how to deploy this project to staging
+  deployProduction?: string; // how to deploy this project to production
   port?: number; // dev-server port, for the web-preview pane
   aiEngine?: "claude" | "codex"; // which CLI the AI pane shells out to
   aiFullAccess?: boolean; // let the AI run commands, not just edit files
@@ -69,7 +70,8 @@ export interface Project {
   hasGit: boolean;
   // cockpit
   runCommand: string | null; // merged: override ?? auto-detected
-  deployCommand: string | null;
+  deployStaging: string | null;
+  deployProduction: string | null;
   port: number | null;
   aiEngine: "claude" | "codex";
   aiFullAccess: boolean;
