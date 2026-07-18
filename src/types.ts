@@ -25,6 +25,7 @@ export interface Signals {
   readmeSummary: string | null;
   notesNext: string | null; // first actionable line from notes/todo
   hasReadme: boolean;
+  runCommand: string | null; // auto-detected way to run it (e.g. "npm run dev")
 }
 
 /** Human-curated layer, stored in overrides.json. All fields optional. */
@@ -38,6 +39,11 @@ export interface Override {
   pinned?: boolean;
   archived?: boolean;
   note?: string; // short archive/context note
+  // cockpit fields
+  runCommand?: string; // overrides the auto-detected run command
+  deployCommand?: string; // how to deploy this project
+  port?: number; // dev-server port, for the web-preview pane
+  aiEngine?: "claude" | "codex"; // which CLI the AI pane shells out to
 }
 
 /** The merged view served to the UI and used to render markdown. */
@@ -59,6 +65,11 @@ export interface Project {
   gitVersion: string | null;
   gitLastSubject: string | null;
   hasGit: boolean;
+  // cockpit
+  runCommand: string | null; // merged: override ?? auto-detected
+  deployCommand: string | null;
+  port: number | null;
+  aiEngine: "claude" | "codex";
   // provenance so the UI can show what's auto vs overridden
   overridden: (keyof Override)[];
 }

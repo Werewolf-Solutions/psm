@@ -90,6 +90,10 @@ export function merge(
       gitVersion: s.gitVersion,
       gitLastSubject: s.gitLastSubject,
       hasGit: s.hasGit,
+      runCommand: o.runCommand || s.runCommand,
+      deployCommand: o.deployCommand || null,
+      port: o.port ?? null,
+      aiEngine: o.aiEngine ?? "claude",
       overridden,
     };
   });

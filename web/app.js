@@ -6,7 +6,7 @@ const CAT_ORDER = [
   "Apps, libraries & other",
 ];
 
-let STATE = { projects: [], meta: {}, filter: "all", query: "" };
+let STATE = { projects: [], meta: {}, filter: "all", query: "", procs: {} };
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => {
@@ -98,15 +98,25 @@ function renderFilters() {
 function card(p) {
   const c = el("div", "card" + (p.pinned ? " pinned" : ""));
   c.style.setProperty("--sc", scVar(p.status));
+  c.dataset.name = p.name;
+  if (isRunning(p.name)) c.classList.add("is-running");
   const m = STATE.meta[p.status] || { emoji: "", label: p.status };
 
   const top = el("div", "card-top");
   const name = el("div", "card-name");
-  name.append(document.createTextNode(p.name));
+  const rdot = el("span", "run-dot");
+  rdot.title = "running";
+  name.append(rdot, document.createTextNode(p.name));
   if (p.pinned) name.append(el("span", "pin", "📌"));
   const badge = el("div", "badge");
   badge.append(el("span", "dot"), document.createTextNode(m.label));
-  top.append(name, badge);
+  const open = el("button", "card-open", "▶");
+  open.title = "Open workspace";
+  open.onclick = (e) => {
+    e.stopPropagation();
+    openWorkspace(p);
+  };
+  top.append(name, badge, open);
 
   const desc = el("div", "card-desc clamp", esc(p.description));
 
@@ -202,6 +212,8 @@ function openDrawer(p) {
   $("#d-description").placeholder = p.description || "Override the auto description…";
   $("#d-next").value = p.overridden.includes("next") ? p.next || "" : "";
   $("#d-next").placeholder = p.next || "What's the next action?";
+  $("#d-run").value = p.overridden.includes("runCommand") ? p.runCommand || "" : "";
+  $("#d-run").placeholder = p.runCommand || "e.g. npm run dev";
   $("#d-category").value = p.overridden.includes("category") ? p.category : "";
   $("#d-category").placeholder = p.category || "Category";
 
@@ -233,6 +245,7 @@ async function saveDrawer() {
     description: $("#d-description").value.trim(),
     next: $("#d-next").value.trim(),
     category: $("#d-category").value.trim(),
+    runCommand: $("#d-run").value.trim(),
   };
   // don't send pinned:false as a stored override unless it was set; keep simple: always send
   const r = await fetch(`/api/projects/${encodeURIComponent(editing.name)}`, {
@@ -248,6 +261,115 @@ async function saveDrawer() {
     toast("Save failed");
   }
 }
+
+/* ---------- workspace / cockpit ---------- */
+let WS = { name: null, es: null };
+
+function isRunning(name) {
+  return STATE.procs[`${name}::run`]?.status === "running";
+}
+
+function setWsStatus(status) {
+  const badge = $("#ws-status");
+  badge.textContent = status;
+  badge.dataset.state = status;
+  const running = status === "running";
+  $("#ws-run").disabled = running;
+  $("#ws-stop").disabled = !running;
+}
+
+function appendLine(entry) {
+  const con = $("#ws-console");
+  const nearBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 60;
+  const line = el("div", "logline s-" + entry.stream);
+  line.textContent = entry.line;
+  con.append(line);
+  // keep the DOM from growing without bound
+  while (con.childElementCount > 4000) con.firstElementChild.remove();
+  if (nearBottom) con.scrollTop = con.scrollHeight;
+}
+
+function openWorkspace(p) {
+  WS.name = p.name;
+  $("#ws-name").textContent = p.name;
+  $("#ws-cmd").value = p.runCommand || "";
+  $("#ws-console").innerHTML = "";
+  setWsStatus("idle");
+  $("#ws-backdrop").hidden = false;
+  $("#workspace").hidden = false;
+  connectLogs(p.name);
+}
+
+function connectLogs(name) {
+  if (WS.es) WS.es.close();
+  const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
+  WS.es = es;
+  es.onmessage = (e) => {
+    try {
+      appendLine(JSON.parse(e.data));
+    } catch {}
+  };
+  es.addEventListener("status", (e) => {
+    try {
+      setWsStatus(JSON.parse(e.data).status);
+    } catch {}
+  });
+  es.onerror = () => {}; // EventSource auto-reconnects
+}
+
+function closeWorkspace() {
+  if (WS.es) WS.es.close();
+  WS = { name: null, es: null };
+  $("#ws-backdrop").hidden = true;
+  $("#workspace").hidden = true;
+}
+
+async function wsRun() {
+  if (!WS.name) return;
+  const command = $("#ws-cmd").value.trim();
+  if (!command) return toast("Set a run command first");
+  setWsStatus("running");
+  const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    toast(e.error || "Run failed");
+    setWsStatus("error");
+  }
+  pollProcs();
+}
+
+async function wsStop() {
+  if (!WS.name) return;
+  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ kind: "run" }),
+  });
+  pollProcs();
+}
+
+async function pollProcs() {
+  try {
+    const r = await fetch("/api/procs");
+    STATE.procs = (await r.json()).procs || {};
+  } catch {
+    return;
+  }
+  // update card running indicators without a full re-render
+  for (const c of document.querySelectorAll(".card[data-name]")) {
+    c.classList.toggle("is-running", isRunning(c.dataset.name));
+  }
+}
+
+$("#ws-close").onclick = closeWorkspace;
+$("#ws-backdrop").onclick = closeWorkspace;
+$("#ws-run").onclick = wsRun;
+$("#ws-stop").onclick = wsStop;
+$("#ws-clear").onclick = () => ($("#ws-console").innerHTML = "");
 
 /* ---------- actions ---------- */
 let toastTimer;
@@ -277,7 +399,10 @@ $("#d-cancel").onclick = closeDrawer;
 $("#backdrop").onclick = closeDrawer;
 $("#d-save").onclick = saveDrawer;
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeDrawer();
+  if (e.key !== "Escape") return;
+  if (!$("#workspace").hidden) closeWorkspace();
+  else closeDrawer();
 });
 
-load();
+load().then(pollProcs);
+setInterval(pollProcs, 3000);

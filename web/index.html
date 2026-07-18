@@ -60,6 +60,9 @@
         <label>Next step
           <textarea id="d-next" rows="2" placeholder="What's the next action?"></textarea>
         </label>
+        <label>Run command
+          <input id="d-run" type="text" placeholder="e.g. npm run dev" />
+        </label>
         <label>Category
           <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
         </label>
@@ -70,6 +73,25 @@
         <button class="btn btn-primary" id="d-save">Save</button>
       </div>
     </aside>
+
+    <!-- workspace / cockpit -->
+    <div class="ws-backdrop" id="ws-backdrop" hidden></div>
+    <section class="workspace" id="workspace" hidden>
+      <header class="ws-head">
+        <div class="ws-title">
+          <span class="ws-name" id="ws-name">—</span>
+          <span class="ws-status" id="ws-status">idle</span>
+        </div>
+        <button class="icon-btn" id="ws-close" aria-label="Close workspace">✕</button>
+      </header>
+      <div class="ws-runbar">
+        <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" />
+        <button class="btn btn-primary" id="ws-run">▶ Run</button>
+        <button class="btn" id="ws-stop">■ Stop</button>
+        <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
+      </div>
+      <div class="ws-console" id="ws-console"></div>
+    </section>
 
     <div class="toast" id="toast" hidden></div>
 

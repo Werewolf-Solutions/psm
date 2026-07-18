@@ -120,6 +120,23 @@ function detectStack(dir: string): string[] {
   return stack;
 }
 
+/** Best guess at how to run a project — the user can override in the dashboard. */
+function detectRunCommand(dir: string, pkg: any | null): string | null {
+  if (pkg?.scripts) {
+    const s = pkg.scripts;
+    // prefer a long-running dev/serve script; fall back to start
+    for (const name of ["dev", "server", "serve", "start"]) {
+      if (s[name]) return name === "start" ? "npm start" : `npm run ${name}`;
+    }
+  }
+  if (fs.existsSync(path.join(dir, "Cargo.toml"))) return "cargo run";
+  for (const entry of ["server.js", "index.js", "app.js", "main.py", "app.py"]) {
+    if (fs.existsSync(path.join(dir, entry)))
+      return entry.endsWith(".py") ? `python ${entry}` : `node ${entry}`;
+  }
+  return null;
+}
+
 function firstMeaningfulLine(text: string, max = 320): string | null {
   const lines = text.split(/\r?\n/);
   let title = "";
@@ -207,6 +224,7 @@ export function scanOne(dir: string, name: string): Signals {
     hasReadme:
       fs.existsSync(path.join(dir, "README.md")) ||
       fs.existsSync(path.join(dir, "readme.md")),
+    runCommand: detectRunCommand(dir, pkg),
   };
 }
 
