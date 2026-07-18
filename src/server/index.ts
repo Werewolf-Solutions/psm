@@ -10,7 +10,7 @@ import { loadConfig, workspaceRoot } from "../scan.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
-import { aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
+import { activeSessions, aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -150,6 +150,11 @@ function commandForKind(proj: ReturnType<typeof findProject> & {}, kind: ProcKin
 // live status of every managed process (for dashboard "running" dots)
 app.get("/api/procs", (_req, res) => {
   res.json({ procs: allProcStates() });
+});
+
+// projects with an ongoing AI conversation — the "Working on" lane
+app.get("/api/sessions", (_req, res) => {
+  res.json({ sessions: activeSessions() });
 });
 
 // snapshot status for one project+kind

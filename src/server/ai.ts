@@ -152,6 +152,25 @@ export function aiState(name: string) {
   return { busy: !!s?.busy, engine: s?.engine ?? "claude", hasSession: !!s?.sessionId };
 }
 
+/** Every project with an ongoing AI conversation, most-recently-active first. */
+export function activeSessions() {
+  const out = [];
+  for (const [name, s] of sessions) {
+    if (!s.sessionId && !s.log.length) continue;
+    const lastUser = [...s.log].reverse().find((e) => e.role === "user");
+    const lastEvent = s.log[s.log.length - 1];
+    out.push({
+      name,
+      engine: s.engine,
+      messages: s.log.filter((e) => e.role === "user").length,
+      lastActive: lastEvent ? lastEvent.t : 0,
+      snippet: (lastUser?.text ?? s.summary ?? "").replace(/\s+/g, " ").slice(0, 140),
+      busy: s.busy,
+    });
+  }
+  return out.sort((a, b) => b.lastActive - a.lastActive);
+}
+
 /** Build the argv for one turn (no shell — args are passed literally). */
 function buildCommand(s: AiSession, message: string, fullAccess: boolean): { cmd: string; args: string[] } {
   const rules = houseRules();

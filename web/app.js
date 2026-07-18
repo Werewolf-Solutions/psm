@@ -6,7 +6,7 @@ const CAT_ORDER = [
   "Apps, libraries & other",
 ];
 
-let STATE = { projects: [], meta: {}, filter: "all", query: "", procs: {} };
+let STATE = { projects: [], meta: {}, filter: "all", query: "", procs: {}, sessions: [], sessionsSig: "" };
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => {
@@ -24,7 +24,29 @@ async function load() {
   const data = await r.json();
   STATE.projects = data.projects;
   STATE.meta = data.statusMeta;
+  await fetchSessions(false);
   render();
+}
+
+// refresh the "Working on" lane; re-render only when it actually changed
+async function fetchSessions(rerender = true) {
+  try {
+    const r = await fetch("/api/sessions");
+    const sessions = (await r.json()).sessions || [];
+    const sig = sessions.map((s) => `${s.name}:${s.lastActive}:${s.busy}`).join("|");
+    STATE.sessions = sessions;
+    if (rerender && sig !== STATE.sessionsSig) renderBoard();
+    STATE.sessionsSig = sig;
+  } catch {}
+}
+
+function relTime(ms) {
+  if (!ms) return "";
+  const s = (Date.now() - ms) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 function statusList() {
@@ -144,9 +166,37 @@ function card(p) {
   return c;
 }
 
+function sessionCard(sess, proj) {
+  const c = el("div", "sess-card" + (sess.busy ? " busy" : ""));
+  const top = el("div", "sess-top");
+  const name = el("div", "sess-name");
+  name.append(el("span", "sess-dot"), document.createTextNode(sess.name));
+  const when = el("span", "sess-when", sess.busy ? "working…" : relTime(sess.lastActive));
+  top.append(name, when);
+  const snippet = el("div", "sess-snippet", esc(sess.snippet || "…"));
+  const meta = el("div", "sess-meta");
+  meta.innerHTML = `<span class="pill">${esc(sess.engine)}</span><span>${sess.messages} message${sess.messages === 1 ? "" : "s"}</span>`;
+  c.append(top, snippet, meta);
+  c.title = proj ? "Open AI chat" : "Session for a project no longer in the workspace";
+  if (proj) c.onclick = () => openWorkspace(proj, "ai");
+  else c.classList.add("orphan");
+  return c;
+}
+
+function renderWorkLane(board) {
+  if (STATE.filter !== "all" || STATE.query.trim() || !STATE.sessions.length) return;
+  board.append(el("div", "group-title", `Working on (${STATE.sessions.length})`));
+  const grid = el("div", "sess-grid");
+  for (const sess of STATE.sessions) {
+    grid.append(sessionCard(sess, STATE.projects.find((p) => p.name === sess.name)));
+  }
+  board.append(grid);
+}
+
 function renderBoard() {
   const board = $("#board");
   board.innerHTML = "";
+  renderWorkLane(board);
   const vis = visible();
   const active = vis.filter((p) => !p.archived);
   const archived = vis.filter((p) => p.archived);
@@ -314,7 +364,7 @@ function appendLine(entry, con = $("#ws-console")) {
   if (nearBottom) con.scrollTop = con.scrollHeight;
 }
 
-function openWorkspace(p) {
+function openWorkspace(p, pane = "logs") {
   WS.name = p.name;
   WS.port = p.port ?? null;
   WS.engine = p.aiEngine || "claude";
@@ -336,7 +386,7 @@ function openWorkspace(p) {
   $("#ws-full").checked = WS.fullAccess;
   setWsStatus("idle");
   setAiBusy(false);
-  switchPane("logs");
+  switchPane(pane);
   $("#ws-backdrop").hidden = false;
   $("#workspace").hidden = false;
   connectLogs(p.name);
@@ -448,6 +498,7 @@ function closeWorkspace() {
   };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
+  fetchSessions(); // the "Working on" lane may have gained/updated a session
 }
 
 /* ---- AI pane ---- */
@@ -895,4 +946,7 @@ document.addEventListener("keydown", (e) => {
 });
 
 load().then(pollProcs);
-setInterval(pollProcs, 3000);
+setInterval(() => {
+  pollProcs();
+  if ($("#workspace").hidden) fetchSessions(); // keep the lane fresh while on the board
+}, 3000);
