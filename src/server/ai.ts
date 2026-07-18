@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,11 +8,13 @@ import type { Response } from "express";
  * The AI pane: shells out to a coding CLI (`claude` by default, `codex`
  * optionally) running inside a project's directory, parses its JSON event
  * stream, and relays a transcript to the browser over SSE. One conversation
- * per project, resumed across turns via the provider's session id.
+ * per project, resumed across turns (and across restarts) via the provider's
+ * session id, with the transcript + a recap persisted to disk.
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOUSE_RULES = path.resolve(__dirname, "..", "..", "house-rules.md");
+const SESSIONS_FILE = path.resolve(__dirname, "..", "..", ".psm-sessions.json");
 
 export type AiEngine = "claude" | "codex";
 
@@ -31,10 +33,74 @@ interface AiSession {
   child: ChildProcess | null;
   log: AiEvent[];
   subscribers: Set<Response>;
+  summary: string | null; // "where we left off" recap
+  summaryAt: number; // log length the summary was generated at
 }
 
 const MAX_LOG = 2000;
+const MAX_PERSIST = 400; // transcript lines kept on disk per project
 const sessions = new Map<string, AiSession>();
+
+/** Persisted shape (no live child/subscribers). */
+interface PersistedSession {
+  engine: AiEngine;
+  sessionId: string | null;
+  log: AiEvent[];
+  summary: string | null;
+  summaryAt: number;
+  updatedAt: number;
+}
+
+function loadSessions(): void {
+  let data: Record<string, PersistedSession>;
+  try {
+    data = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8"));
+  } catch {
+    return; // no saved sessions yet
+  }
+  for (const [name, p] of Object.entries(data)) {
+    sessions.set(name, {
+      name,
+      cwd: "", // filled in when the client next subscribes
+      engine: p.engine || "claude",
+      sessionId: p.sessionId ?? null,
+      busy: false,
+      child: null,
+      log: p.log || [],
+      subscribers: new Set(),
+      summary: p.summary ?? null,
+      summaryAt: p.summaryAt ?? 0,
+    });
+  }
+}
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+function saveSessionsSoon(): void {
+  if (saveTimer) return;
+  saveTimer = setTimeout(saveSessions, 500);
+}
+function saveSessions(): void {
+  saveTimer = null;
+  const out: Record<string, PersistedSession> = {};
+  for (const [name, s] of sessions) {
+    if (!s.sessionId && !s.log.length) continue;
+    out[name] = {
+      engine: s.engine,
+      sessionId: s.sessionId,
+      log: s.log.slice(-MAX_PERSIST),
+      summary: s.summary,
+      summaryAt: s.summaryAt,
+      updatedAt: Date.now(),
+    };
+  }
+  try {
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(out));
+  } catch {
+    /* best effort */
+  }
+}
+
+loadSessions();
 
 function houseRules(): string {
   try {
@@ -50,13 +116,18 @@ const short = (id: string | null) => (id ? id.slice(0, 8) : "—");
 function getSession(name: string, cwd: string, engine: AiEngine): AiSession {
   let s = sessions.get(name);
   if (!s) {
-    s = { name, cwd, engine, sessionId: null, busy: false, child: null, log: [], subscribers: new Set() };
+    s = {
+      name, cwd, engine, sessionId: null, busy: false, child: null,
+      log: [], subscribers: new Set(), summary: null, summaryAt: 0,
+    };
     sessions.set(name, s);
   }
   if (s.engine !== engine) {
     // switching engines starts a fresh conversation
     s.engine = engine;
     s.sessionId = null;
+    s.summary = null;
+    s.summaryAt = 0;
     pushEvent(s, sys(`— switched to ${engine}; starting a new conversation —`));
   }
   s.cwd = cwd;
@@ -68,6 +139,7 @@ function pushEvent(s: AiSession, ev: AiEvent) {
   if (s.log.length > MAX_LOG) s.log.shift();
   const payload = `data: ${JSON.stringify(ev)}\n\n`;
   for (const res of s.subscribers) res.write(payload);
+  saveSessionsSoon();
 }
 
 function broadcast(s: AiSession, event: string, data: unknown) {
@@ -232,6 +304,59 @@ function finishTurn(s: AiSession) {
   s.child = null;
   broadcast(s, "status", { busy: false, engine: s.engine });
   broadcast(s, "done", {});
+  saveSessions(); // flush now so the session id / transcript survive a restart
+}
+
+/** A short "where we left off" recap, regenerated only when the log has grown. */
+export async function recap(name: string): Promise<string | null> {
+  const s = sessions.get(name);
+  if (!s || !s.log.length) return null;
+  if (s.summary && s.summaryAt >= s.log.length) return s.summary; // still current
+
+  const transcript = s.log
+    .map((e) =>
+      e.role === "user" ? `User: ${e.text}` : e.role === "assistant" ? `Assistant: ${e.text}` : e.text,
+    )
+    .join("\n")
+    .slice(-8000);
+  const prompt =
+    "Summarise the AI coding session transcript below so I can pick up where I left off. " +
+    "Output ONLY 2-4 bullet points, each starting with '- ', covering what was done and what " +
+    "we were working on. No introduction, no sign-off, no other text — just the bullets. " +
+    "Do not use any tools; answer directly from the transcript.\n\n<transcript>\n" +
+    transcript +
+    "\n</transcript>";
+
+  const raw = await claudeOneShot(prompt, s.cwd);
+  if (raw) {
+    // drop any preamble before the first bullet the model may have added anyway
+    let clean = raw.trim();
+    const firstBullet = clean.search(/^[-•*]\s/m);
+    if (firstBullet > 0) clean = clean.slice(firstBullet).trim();
+    s.summary = clean;
+    s.summaryAt = s.log.length;
+    saveSessionsSoon();
+  }
+  return s.summary;
+}
+
+/** Run claude headlessly for a plain text answer (used for the recap). */
+function claudeOneShot(prompt: string, cwd: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "claude",
+      ["-p", "--output-format", "json", prompt],
+      { cwd: cwd || process.cwd(), timeout: 90_000, maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        try {
+          resolve(JSON.parse(stdout).result ?? null);
+        } catch {
+          resolve(null);
+        }
+      },
+    );
+  });
 }
 
 /** Cancel an in-flight turn. */
@@ -258,6 +383,8 @@ export function subscribeAi(res: Response, name: string, cwd: string, engine: Ai
 
   for (const ev of s.log) res.write(`data: ${JSON.stringify(ev)}\n\n`);
   res.write(`event: status\ndata: ${JSON.stringify({ busy: s.busy, engine: s.engine })}\n\n`);
+  if (s.summary) // show the last recap instantly; the client refreshes it if stale
+    res.write(`event: recap\ndata: ${JSON.stringify({ summary: s.summary })}\n\n`);
 
   s.subscribers.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);

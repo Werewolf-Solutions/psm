@@ -10,7 +10,7 @@ import { loadConfig, workspaceRoot } from "../scan.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
-import { aiState, cancel as aiCancel, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
+import { aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -211,6 +211,15 @@ app.post("/api/projects/:name/ai/cancel", (req, res) => {
 
 app.get("/api/projects/:name/ai/state", (req, res) => {
   res.json(aiState(req.params.name));
+});
+
+// "where we left off" recap — regenerated only when the transcript has grown
+app.get("/api/projects/:name/ai/recap", async (req, res) => {
+  try {
+    res.json({ summary: await aiRecap(req.params.name) });
+  } catch {
+    res.json({ summary: null });
+  }
 });
 
 app.use(express.static(WEB_DIR));

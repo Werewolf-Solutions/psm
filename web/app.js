@@ -323,6 +323,9 @@ function openWorkspace(p) {
   WS.depTarget = "staging";
   WS.depArmed = false;
   WS.pendingUser = null;
+  WS.recapFetched = false;
+  $("#ws-ai-recap").hidden = true;
+  $("#ws-ai-recap").innerHTML = "";
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
@@ -348,6 +351,10 @@ function switchPane(pane) {
     el.hidden = el.dataset.pane !== pane;
   if (pane === "web") renderWebPane();
   if (pane === "deploy") openDeployPane();
+  if (pane === "ai" && !WS.recapFetched) {
+    WS.recapFetched = true;
+    fetchRecap(); // refresh "where we left off" (regenerates only if stale)
+  }
 }
 
 const webUrl = () => (WS.port ? `http://localhost:${WS.port}` : null);
@@ -515,7 +522,44 @@ function connectAi(name) {
       setAiBusy(JSON.parse(e.data).busy);
     } catch {}
   });
+  // the server sends the last saved recap on (re)connect
+  es.addEventListener("recap", (e) => {
+    try {
+      setRecap(JSON.parse(e.data).summary);
+    } catch {}
+  });
   es.onerror = () => {};
+}
+
+function setRecap(summary) {
+  const banner = $("#ws-ai-recap");
+  banner.classList.remove("loading");
+  if (!summary) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+    return;
+  }
+  banner.innerHTML = "";
+  const body = el("div", "ai-recap-body");
+  body.textContent = summary;
+  banner.append(el("div", "ai-recap-title", "↩ Where we left off"), body);
+  banner.hidden = false;
+}
+
+async function fetchRecap() {
+  if (!WS.name) return;
+  const banner = $("#ws-ai-recap");
+  if (banner.hidden) {
+    banner.hidden = false;
+    banner.classList.add("loading");
+    banner.textContent = "Recalling where we left off…";
+  }
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/recap`);
+    setRecap((await r.json()).summary);
+  } catch {
+    banner.classList.remove("loading");
+  }
 }
 
 async function sendAi() {
