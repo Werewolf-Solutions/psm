@@ -94,6 +94,7 @@ export function merge(
       deployCommand: o.deployCommand || null,
       port: o.port ?? s.port,
       aiEngine: o.aiEngine ?? "claude",
+      aiFullAccess: o.aiFullAccess ?? false,
       overridden,
     };
   });

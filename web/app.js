@@ -216,6 +216,8 @@ function openDrawer(p) {
   $("#d-run").placeholder = p.runCommand || "e.g. npm run dev";
   $("#d-port").value = p.overridden.includes("port") ? p.port || "" : "";
   $("#d-port").placeholder = p.port ? String(p.port) : "e.g. 3000";
+  $("#d-engine").value = p.overridden.includes("aiEngine") ? p.aiEngine : "";
+  $("#d-full").checked = !!p.aiFullAccess;
   $("#d-category").value = p.overridden.includes("category") ? p.category : "";
   $("#d-category").placeholder = p.category || "Category";
 
@@ -249,6 +251,8 @@ async function saveDrawer() {
     category: $("#d-category").value.trim(),
     runCommand: $("#d-run").value.trim(),
     port: $("#d-port").value.trim() ? Number($("#d-port").value.trim()) : "",
+    aiEngine: $("#d-engine").value,
+    aiFullAccess: $("#d-full").checked,
   };
   // don't send pinned:false as a stored override unless it was set; keep simple: always send
   const r = await fetch(`/api/projects/${encodeURIComponent(editing.name)}`, {
@@ -266,7 +270,7 @@ async function saveDrawer() {
 }
 
 /* ---------- workspace / cockpit ---------- */
-let WS = { name: null, es: null, port: null, pane: "logs" };
+let WS = { name: null, es: null, port: null, pane: "logs", engine: "claude", fullAccess: false, aiEs: null, aiBusy: false };
 
 function isRunning(name) {
   return STATE.procs[`${name}::run`]?.status === "running";
@@ -295,15 +299,22 @@ function appendLine(entry) {
 function openWorkspace(p) {
   WS.name = p.name;
   WS.port = p.port ?? null;
+  WS.engine = p.aiEngine || "claude";
+  WS.fullAccess = !!p.aiFullAccess;
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
   $("#ws-webframe").innerHTML = "";
+  $("#ws-transcript").innerHTML = "";
+  $("#ws-engine").value = WS.engine;
+  $("#ws-full").checked = WS.fullAccess;
   setWsStatus("idle");
+  setAiBusy(false);
   switchPane("logs");
   $("#ws-backdrop").hidden = false;
   $("#workspace").hidden = false;
   connectLogs(p.name);
+  connectAi(p.name);
 }
 
 function switchPane(pane) {
@@ -384,9 +395,71 @@ function connectLogs(name) {
 
 function closeWorkspace() {
   if (WS.es) WS.es.close();
-  WS = { name: null, es: null };
+  if (WS.aiEs) WS.aiEs.close();
+  WS = { name: null, es: null, port: null, pane: "logs", engine: "claude", fullAccess: false, aiEs: null, aiBusy: false };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
+}
+
+/* ---- AI pane ---- */
+function appendAiEvent(ev) {
+  const t = $("#ws-transcript");
+  const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
+  const b = el("div", "ai-msg ai-" + ev.role);
+  b.textContent = ev.text;
+  t.append(b);
+  if (nearBottom) t.scrollTop = t.scrollHeight;
+}
+
+function setAiBusy(busy) {
+  WS.aiBusy = busy;
+  $("#ws-ai-status").textContent = busy ? "working…" : "";
+  $("#ws-send").hidden = busy;
+  $("#ws-cancel").hidden = !busy;
+}
+
+function connectAi(name) {
+  if (WS.aiEs) WS.aiEs.close();
+  const es = new EventSource(
+    `/api/projects/${encodeURIComponent(name)}/ai/stream?engine=${encodeURIComponent(WS.engine)}`,
+  );
+  WS.aiEs = es;
+  es.onmessage = (e) => {
+    try {
+      appendAiEvent(JSON.parse(e.data));
+    } catch {}
+  };
+  es.addEventListener("status", (e) => {
+    try {
+      setAiBusy(JSON.parse(e.data).busy);
+    } catch {}
+  });
+  es.onerror = () => {};
+}
+
+async function sendAi() {
+  if (!WS.name || WS.aiBusy) return;
+  const box = $("#ws-msg");
+  const message = box.value.trim();
+  if (!message) return;
+  box.value = "";
+  setAiBusy(true);
+  const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, engine: WS.engine, fullAccess: WS.fullAccess }),
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    toast(e.error || "AI request failed");
+    setAiBusy(false);
+    box.value = message; // don't lose the message
+  }
+}
+
+async function cancelAi() {
+  if (!WS.name) return;
+  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/cancel`, { method: "POST" });
 }
 
 async function wsRun() {
@@ -447,6 +520,16 @@ $("#ws-openext").onclick = () => {
   const url = webUrl();
   if (url) window.open(url, "_blank");
 };
+$("#ws-engine").onchange = (e) => (WS.engine = e.target.value);
+$("#ws-full").onchange = (e) => (WS.fullAccess = e.target.checked);
+$("#ws-send").onclick = sendAi;
+$("#ws-cancel").onclick = cancelAi;
+$("#ws-msg").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendAi();
+  }
+});
 
 /* ---------- actions ---------- */
 let toastTimer;

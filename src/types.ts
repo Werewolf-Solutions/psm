@@ -45,6 +45,7 @@ export interface Override {
   deployCommand?: string; // how to deploy this project
   port?: number; // dev-server port, for the web-preview pane
   aiEngine?: "claude" | "codex"; // which CLI the AI pane shells out to
+  aiFullAccess?: boolean; // let the AI run commands, not just edit files
 }
 
 /** The merged view served to the UI and used to render markdown. */
@@ -71,6 +72,7 @@ export interface Project {
   deployCommand: string | null;
   port: number | null;
   aiEngine: "claude" | "codex";
+  aiFullAccess: boolean;
   // provenance so the UI can show what's auto vs overridden
   overridden: (keyof Override)[];
 }

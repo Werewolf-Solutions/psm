@@ -7,6 +7,7 @@ import { loadOverrides, saveOverrides } from "../classify.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
+import { aiState, cancel as aiCancel, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -30,6 +31,7 @@ const OVERRIDE_KEYS: (keyof Override)[] = [
   "deployCommand",
   "port",
   "aiEngine",
+  "aiFullAccess",
 ];
 
 app.get("/api/projects", (_req, res) => {
@@ -103,6 +105,38 @@ app.post("/api/projects/:name/stop", (req, res) => {
 // SSE log stream (replays buffer, then live)
 app.get("/api/projects/:name/logs/stream", (req, res) => {
   subscribe(res, req.params.name, parseKind(req.query.kind));
+});
+
+/* ---------- cockpit: AI pane ---------- */
+
+function parseEngine(v: unknown, fallback: AiEngine): AiEngine {
+  return v === "codex" || v === "claude" ? v : fallback;
+}
+
+// transcript stream (replays history, then live)
+app.get("/api/projects/:name/ai/stream", (req, res) => {
+  const proj = findProject(req.params.name);
+  if (!proj) return res.status(404).end();
+  subscribeAi(res, proj.name, proj.path, parseEngine(req.query.engine, proj.aiEngine));
+});
+
+// send one message to the project's AI
+app.post("/api/projects/:name/ai", (req, res) => {
+  const proj = findProject(req.params.name);
+  if (!proj) return res.status(404).json({ error: "unknown project" });
+  const engine = parseEngine(req.body?.engine, proj.aiEngine);
+  const fullAccess = req.body?.fullAccess ?? proj.aiFullAccess;
+  const r = aiSend(proj.name, proj.path, engine, String(req.body?.message ?? ""), !!fullAccess);
+  res.status(r.ok ? 200 : 409).json(r);
+});
+
+// cancel the in-flight turn
+app.post("/api/projects/:name/ai/cancel", (req, res) => {
+  res.json({ ok: true, cancelled: aiCancel(req.params.name) });
+});
+
+app.get("/api/projects/:name/ai/state", (req, res) => {
+  res.json(aiState(req.params.name));
 });
 
 app.use(express.static(WEB_DIR));

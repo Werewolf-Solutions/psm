@@ -66,6 +66,16 @@
         <label>Web port
           <input id="d-port" type="number" min="1" max="65535" placeholder="e.g. 3000" />
         </label>
+        <label>AI engine
+          <select id="d-engine">
+            <option value="">— default (Claude Code) —</option>
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="d-full" /> AI full access (run commands, not just edit)
+        </label>
         <label>Category
           <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
         </label>
@@ -96,9 +106,28 @@
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
+        <button class="ws-tab" data-pane="ai">AI</button>
       </div>
       <div class="ws-panes">
         <div class="ws-console" id="ws-console" data-pane="logs"></div>
+        <div class="ws-ai" data-pane="ai" hidden>
+          <div class="ws-aibar">
+            <select id="ws-engine" title="Which AI engine to use">
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+            <label class="ws-full" title="Let the AI run shell commands, not just edit files">
+              <input type="checkbox" id="ws-full" /> Full access
+            </label>
+            <span class="ws-ai-status" id="ws-ai-status"></span>
+          </div>
+          <div class="ws-transcript" id="ws-transcript"></div>
+          <div class="ws-composer">
+            <textarea id="ws-msg" rows="2" placeholder="Ask the project's AI to make a change…  (Enter to send, Shift+Enter for newline)"></textarea>
+            <button class="btn btn-primary" id="ws-send">Send</button>
+            <button class="btn" id="ws-cancel" hidden>Stop</button>
+          </div>
+        </div>
         <div class="ws-web" id="ws-web" data-pane="web" hidden>
           <div class="ws-webbar">
             <span class="ws-url" id="ws-url">—</span>
