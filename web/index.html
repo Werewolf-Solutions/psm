@@ -16,6 +16,8 @@
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
+        <button id="rules-open" class="btn" title="Edit the shared AI house rules">House&nbsp;rules</button>
+        <button id="new-open" class="btn" title="Create a new project">＋&nbsp;New</button>
         <button id="export" class="btn" title="Regenerate PROJECTS.md">Export&nbsp;MD</button>
         <button id="rescan" class="btn btn-primary" title="Re-scan the workspace">Rescan</button>
       </div>
@@ -159,6 +161,48 @@
         </div>
       </div>
     </section>
+
+    <!-- shared modal backdrop -->
+    <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+
+    <!-- new project -->
+    <div class="modal" id="new-modal" hidden>
+      <div class="modal-head">
+        <h2>New project</h2>
+        <button class="icon-btn" id="new-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <label>Name
+          <input id="new-name" type="text" placeholder="my-project" spellcheck="false" />
+        </label>
+        <label>Description
+          <textarea id="new-desc" rows="2" placeholder="One line on what it is (optional)"></textarea>
+        </label>
+        <label class="check"><input type="checkbox" id="new-git" checked /> Initialize a git repo</label>
+        <label class="check"><input type="checkbox" id="new-rules" checked /> Add the house rules as CLAUDE.md</label>
+        <p class="hint">Creates a folder in the workspace, alongside the other projects.</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="new-cancel">Cancel</button>
+        <button class="btn btn-primary" id="new-create">Create &amp; open</button>
+      </div>
+    </div>
+
+    <!-- house rules editor -->
+    <div class="modal modal-wide" id="rules-modal" hidden>
+      <div class="modal-head">
+        <h2>House rules</h2>
+        <button class="icon-btn" id="rules-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="hint">Appended to every project's AI system prompt (and dropped into new projects as CLAUDE.md). Markdown.</p>
+        <textarea id="rules-text" class="rules-text" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="rules-cancel">Cancel</button>
+        <button class="btn btn-primary" id="rules-save">Save</button>
+      </div>
+    </div>
 
     <div class="toast" id="toast" hidden></div>
 

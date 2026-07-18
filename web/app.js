@@ -670,6 +670,84 @@ function toast(msg) {
   toastTimer = setTimeout(() => (t.hidden = true), 2200);
 }
 
+/* ---------- new project + house rules modals ---------- */
+function openModal(id) {
+  $("#modal-backdrop").hidden = false;
+  $(id).hidden = false;
+}
+function closeModals() {
+  $("#modal-backdrop").hidden = true;
+  $("#new-modal").hidden = true;
+  $("#rules-modal").hidden = true;
+}
+
+async function createProject() {
+  const name = $("#new-name").value.trim();
+  if (!name) return toast("Give the project a name");
+  const body = {
+    name,
+    description: $("#new-desc").value.trim(),
+    gitInit: $("#new-git").checked,
+    applyHouseRules: $("#new-rules").checked,
+  };
+  const r = await fetch("/api/projects/new", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(data.error || "Could not create project");
+  closeModals();
+  toast(`Created ${data.name}`);
+  await load();
+  const p = STATE.projects.find((x) => x.name === data.name);
+  if (p) openWorkspace(p); // jump straight into the new project
+}
+
+async function openRules() {
+  const r = await fetch("/api/house-rules");
+  const data = await r.json().catch(() => ({ content: "" }));
+  $("#rules-text").value = data.content || "";
+  openModal("#rules-modal");
+}
+
+async function saveRules() {
+  const r = await fetch("/api/house-rules", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: $("#rules-text").value }),
+  });
+  if (r.ok) {
+    closeModals();
+    toast("House rules saved");
+  } else {
+    toast("Could not save house rules");
+  }
+}
+
+$("#new-open").onclick = () => {
+  $("#new-name").value = "";
+  $("#new-desc").value = "";
+  $("#new-git").checked = true;
+  $("#new-rules").checked = true;
+  openModal("#new-modal");
+  $("#new-name").focus();
+};
+$("#new-close").onclick = closeModals;
+$("#new-cancel").onclick = closeModals;
+$("#new-create").onclick = createProject;
+$("#new-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    createProject();
+  }
+});
+$("#rules-open").onclick = openRules;
+$("#rules-close").onclick = closeModals;
+$("#rules-cancel").onclick = closeModals;
+$("#rules-save").onclick = saveRules;
+$("#modal-backdrop").onclick = closeModals;
+
 $("#rescan").onclick = async () => {
   toast("Rescanning…");
   await load();
@@ -689,7 +767,8 @@ $("#backdrop").onclick = closeDrawer;
 $("#d-save").onclick = saveDrawer;
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!$("#workspace").hidden) closeWorkspace();
+  if (!$("#modal-backdrop").hidden) closeModals();
+  else if (!$("#workspace").hidden) closeWorkspace();
   else closeDrawer();
 });
 

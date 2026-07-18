@@ -1,9 +1,12 @@
 import express from "express";
 import cors from "cors";
+import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { getProjects, writeMarkdown } from "../index.ts";
 import { loadOverrides, saveOverrides } from "../classify.ts";
+import { loadConfig, workspaceRoot } from "../scan.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
@@ -11,6 +14,7 @@ import { aiState, cancel as aiCancel, send as aiSend, subscribeAi, type AiEngine
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
+const HOUSE_RULES = path.resolve(__dirname, "..", "..", "house-rules.md");
 const PORT = Number(process.env.PORT || 4317);
 
 const app = express();
@@ -61,6 +65,69 @@ app.patch("/api/projects/:name", (req, res) => {
 app.post("/api/export", (_req, res) => {
   const file = writeMarkdown();
   res.json({ ok: true, file });
+});
+
+/* ---------- house rules (shared AI system prompt) ---------- */
+
+app.get("/api/house-rules", (_req, res) => {
+  let content = "";
+  try {
+    content = fs.readFileSync(HOUSE_RULES, "utf8");
+  } catch {
+    /* file may not exist yet */
+  }
+  res.json({ content });
+});
+
+app.put("/api/house-rules", (req, res) => {
+  fs.writeFileSync(HOUSE_RULES, String(req.body?.content ?? ""));
+  res.json({ ok: true });
+});
+
+/* ---------- create a new project ---------- */
+
+app.post("/api/projects/new", (req, res) => {
+  const name = String(req.body?.name ?? "").trim();
+  // folder-safe: starts alphanumeric, then letters/digits/._- ; no slashes/traversal
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))
+    return res.status(400).json({ error: "use letters, digits, dashes or underscores" });
+
+  const root = workspaceRoot(loadConfig());
+  const dir = path.join(root, name);
+  if (!dir.startsWith(root + path.sep))
+    return res.status(400).json({ error: "invalid name" });
+  if (fs.existsSync(dir))
+    return res.status(409).json({ error: "a folder with that name already exists" });
+
+  fs.mkdirSync(dir, { recursive: true });
+
+  const description = String(req.body?.description ?? "").trim();
+  fs.writeFileSync(path.join(dir, "README.md"), `# ${name}\n\n${description || "New project."}\n`);
+
+  // drop the house rules in as CLAUDE.md so the project's AI picks them up
+  if (req.body?.applyHouseRules !== false) {
+    try {
+      fs.writeFileSync(path.join(dir, "CLAUDE.md"), fs.readFileSync(HOUSE_RULES, "utf8"));
+    } catch {
+      /* no house rules yet — skip */
+    }
+  }
+
+  if (req.body?.gitInit !== false) {
+    try {
+      execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore" });
+    } catch {
+      /* git not available — the folder is still created */
+    }
+  }
+
+  if (description) {
+    const all = loadOverrides();
+    all[name] = { ...(all[name] || {}), description };
+    saveOverrides(all);
+  }
+
+  res.json({ ok: true, name });
 });
 
 /* ---------- cockpit: run a project & stream its logs ---------- */

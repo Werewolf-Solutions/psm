@@ -31,3 +31,7 @@ You have the full context of the project you're launched in — read before you 
 - Favor readable, boring code over clever code. Optimize only with a reason.
 - Handle errors explicitly; fail loudly in development, gracefully in production.
 - Leave the codebase a little better than you found it, without scope-creeping the task.
+
+
+## Deployment
+- Treat production deploys with extra care; confirm before anything irreversible.
