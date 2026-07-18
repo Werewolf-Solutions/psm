@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>psm · projects manager</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">psm</span>
+        <span class="tag">projects manager</span>
+      </div>
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
+      </div>
+      <div class="actions">
+        <button id="export" class="btn" title="Regenerate PROJECTS.md">Export&nbsp;MD</button>
+        <button id="rescan" class="btn btn-primary" title="Re-scan the workspace">Rescan</button>
+      </div>
+    </header>
+
+    <section class="stats" id="stats"></section>
+
+    <nav class="filters" id="filters"></nav>
+
+    <main id="board" class="board"></main>
+
+    <footer class="foot">
+      <span id="foot-note"></span>
+    </footer>
+
+    <!-- edit drawer -->
+    <div class="drawer-backdrop" id="backdrop" hidden></div>
+    <aside class="drawer" id="drawer" hidden>
+      <div class="drawer-head">
+        <h2 id="d-name">—</h2>
+        <button class="icon-btn" id="d-close" aria-label="Close">✕</button>
+      </div>
+      <div class="drawer-body">
+        <div class="auto-block" id="d-auto"></div>
+        <label>Status
+          <select id="d-status"></select>
+        </label>
+        <label>Priority
+          <select id="d-priority">
+            <option value="">— none —</option>
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="d-pinned" /> Pin to top
+        </label>
+        <label>Description
+          <textarea id="d-description" rows="3" placeholder="Override the auto description…"></textarea>
+        </label>
+        <label>Next step
+          <textarea id="d-next" rows="2" placeholder="What's the next action?"></textarea>
+        </label>
+        <label>Category
+          <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
+        </label>
+        <p class="hint">Blank fields fall back to auto-detected values.</p>
+      </div>
+      <div class="drawer-foot">
+        <button class="btn" id="d-cancel">Cancel</button>
+        <button class="btn btn-primary" id="d-save">Save</button>
+      </div>
+    </aside>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

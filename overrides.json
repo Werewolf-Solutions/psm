@@ -1,0 +1,275 @@
+{
+  "werewolf-dapp": {
+    "category": "Flagship & platform",
+    "status": "active",
+    "priority": "high",
+    "pinned": true,
+    "stack": "React/TS, API, blockchain/DeFi",
+    "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
+    "next": "Ongoing business/admin features (latest: audited admin override)."
+  },
+  "daedalus": {
+    "category": "Flagship & platform",
+    "status": "active",
+    "priority": "high",
+    "stack": "Node, AI agent, knowledge graph",
+    "description": "An AI-native Infrastructure Operating System — one control plane to observe, operate, and evolve infrastructure via dashboard, CLI, API, and an embedded AI agent with a live knowledge graph.",
+    "next": "dctl connector work (e.g. SSH server registration)."
+  },
+  "control-room": {
+    "category": "Flagship & platform",
+    "status": "active",
+    "stack": "Node, REST, Telegram",
+    "description": "The Open Autonomous Operations Platform — an AI control plane where AI proposes, deterministic systems execute, everything is observable, and an operator can approve/reject from dashboard, REST API, or Telegram. Phase 0 (alpha).",
+    "next": "Build out Phase 0 foundation (alignment gate, eventbus, stack, CI)."
+  },
+  "aurora": {
+    "category": "AI & automation",
+    "status": "active",
+    "stack": "Node CLI",
+    "description": "A research-grade AI chat in your terminal, opening with the 6-module Aurora Research Method. Engine-agnostic (Claude + Codex, switchable via /engine) with a two-way Telegram bridge.",
+    "next": "Fix per-session engine/model persistence; replace the opening voice questionnaire with starting templates."
+  },
+  "leads-search-skill": {
+    "category": "AI & automation",
+    "status": "active",
+    "stack": "TypeScript, Express",
+    "description": "Standalone cold-outreach pipeline for Werewolf Solutions: find local businesses, scrape + audit sites, draft personalised emails, send, and AI-triage replies. WhatsApp fallback + do-not-contact list. Runs as CLI and local web app.",
+    "next": "Make emails/messages more human; surface fuller company details (Google Maps link) on the draft-&-approve page."
+  },
+  "AI-social-media-autopilot": {
+    "category": "AI & automation",
+    "status": "paused",
+    "stack": "Node, AI",
+    "description": "AI social-media manager that creates, schedules, and optimises content across platforms. Transitioning to a multi-tenant agency architecture with workspace isolation and RBAC.",
+    "next": "Complete deploy steps; finish multi-tenant transition."
+  },
+  "workflow": {
+    "category": "AI & automation",
+    "status": "paused",
+    "stack": "Rust, web UI",
+    "description": "Hosts wfq, a Rust release-queue CLI, plus its web UI. Ships from master, developed on short-lived version branches.",
+    "next": "Merge outstanding cto-branch work back to a version branch."
+  },
+  "handymanservices": {
+    "category": "Client & business websites",
+    "status": "paused",
+    "stack": "React, TypeScript, Tailwind",
+    "description": "A professional, SEO/GEO-optimised website for a handyman business in Birmingham, UK.",
+    "next": "Finalise copy/SEO/GEO + cookie & privacy; wire main fields to real business data from the API."
+  },
+  "manu-ncc-website": {
+    "category": "Client & business websites",
+    "status": "paused",
+    "stack": "Express, MongoDB, React",
+    "description": "Full-stack site for 'NCC Ghidoni Emanuele', an Italian taxi/NCC (chauffeur) service in Albugnano, Italy. Monolithic Express backend + React front end.",
+    "next": "Add a theme context; enhance styling and modern-site SEO."
+  },
+  "local-lift": {
+    "category": "Client & business websites",
+    "status": "active",
+    "stack": "Express, SQLite",
+    "description": "LocalLift — a web app for local-business growth (multi-step onboarding, admin, persisted data). See HANDOVER.md for run/deploy details.",
+    "next": "Real case studies on the inspiration step; logo + socials; confirm required vs optional fields per step."
+  },
+  "dao-project": {
+    "category": "Blockchain & DeFi",
+    "status": "paused",
+    "stack": "Solidity, Hardhat",
+    "description": "The WLF DAO: WLF token and governance smart contracts. Deliberately kept separate from a Companies House company.",
+    "next": "Continue governance/proposal work."
+  },
+  "trading-bot": {
+    "category": "Blockchain & DeFi",
+    "status": "paused",
+    "stack": "Express, SQLite, SPA",
+    "description": "Trading-bot software for the Werewolf app: Express + SQLite backend running the bots, plus a web SPA to configure strategies, bots, and exchange credentials. Auto-migrating SQLite on first boot.",
+    "next": "Resume from the pre-merge cto sync."
+  },
+  "accounting": {
+    "category": "Apps, libraries & other",
+    "status": "library",
+    "stack": "TypeScript (npm)",
+    "description": "@werewolf-solutions/accounting — personal-finance library: budgeting, daily earning targets, and crypto capital-gains tax using the UK HMRC pooling method.",
+    "next": "Maintain as needed — small, stable library."
+  },
+  "ultimate-app": {
+    "category": "Apps, libraries & other",
+    "status": "paused",
+    "stack": "Vite/React, Express, MongoDB",
+    "description": "A multi-project MERN workspace with docs, tasks, files, and a project-scoped AI assistant.",
+    "next": "Auth (JWT/refresh/roles), RBAC + multi-tenant orgs, docs vault CRUD/search."
+  },
+  "bedrock-forge": {
+    "category": "Apps, libraries & other",
+    "status": "active",
+    "stack": ".NET/C#, Godot",
+    "description": "A voxel / block-based game engine (block system, camera system, etc.), built on .NET with Godot. A side/creative project rather than a business tool.",
+    "next": "Continue engine systems per its own docs/."
+  },
+  "blog": {
+    "category": "Apps, libraries & other",
+    "status": "active",
+    "stack": "Static / markdown",
+    "description": "The Werewolf Solutions dev blog — a builder's log about putting a whole business stack (governance, token, ERP) on Ethereum, written as it's built.",
+    "next": "Keep publishing alongside the ecosystem."
+  },
+  "todo": {
+    "category": "Apps, libraries & other",
+    "status": "planning",
+    "stack": "Markdown",
+    "description": "Planning/roadmap repo for the Werewolf ecosystem — dated milestones (Companies House, staking, token sale, DAO, testnet deploys) with pass/fail tracking.",
+    "next": "Reschedule slipped milestones (several marked failed/overdue)."
+  },
+  "github-api": {
+    "category": "Apps, libraries & other",
+    "status": "utility",
+    "stack": "Node, axios",
+    "description": "A Node script that fetches commit data from the GitHub API for repos in the Werewolf-Solutions org (outputs contributions.json, raw_commits.json).",
+    "next": "Run when you need fresh org commit data."
+  },
+  "mock-server": {
+    "category": "Apps, libraries & other",
+    "status": "utility",
+    "stack": "Express",
+    "description": "An Express mock API for local development, including a Stripe plugin (create-payment-intent) and mock user/inventory data.",
+    "next": "Extract hardcoded fixtures into mocks/; add /api/health; validate Stripe request bodies."
+  },
+  "qr-gen": {
+    "category": "Apps, libraries & other",
+    "status": "utility",
+    "stack": "Python GUI",
+    "description": "A simple Python GUI app that generates QR codes from URLs or text, exporting PNG and SVG.",
+    "next": "Small tool — essentially done."
+  },
+  "qr-pay": {
+    "category": "Apps, libraries & other",
+    "status": "experiment",
+    "description": "Early QR-payment prototype (bare package.json). Parked experiment.",
+    "next": "Decide whether to fold into a real payments feature or drop."
+  },
+  "qr-mobilepay": {
+    "category": "Apps, libraries & other",
+    "status": "experiment",
+    "description": "Nearly-empty QR/MobilePay prototype. Parked experiment.",
+    "next": "Decide whether to fold into a real payments feature or drop."
+  },
+  "ai-assistant": {
+    "category": "Apps, libraries & other",
+    "status": "experiment",
+    "description": "A parked idea — only a notes.md so far, no code.",
+    "next": "Flesh out or archive."
+  },
+  "werewolf-dapp-old": {
+    "archived": true,
+    "note": "Previous version of werewolf-dapp."
+  },
+  "werewolf-old": {
+    "archived": true,
+    "note": "Old Werewolf Solutions site/app."
+  },
+  "werewolf-web-app": {
+    "archived": true,
+    "note": "Old Werewolf web app."
+  },
+  "werewolf-web-app-old": {
+    "archived": true,
+    "note": "Old Werewolf web app (variant)."
+  },
+  "werewolf-website-old": {
+    "archived": true,
+    "note": "Old marketing website."
+  },
+  "werewolf-website-backup-old": {
+    "archived": true,
+    "note": "Backup of the old website."
+  },
+  "aurora-v0.4.1": {
+    "archived": true,
+    "note": "Version snapshot of aurora."
+  },
+  "dao-dapp": {
+    "archived": true,
+    "note": "Earlier DAO front end (v0.1.1)."
+  },
+  "dao-project-hardhat": {
+    "archived": true,
+    "note": "Earlier Hardhat version of the DAO project."
+  },
+  "dapp": {
+    "archived": true,
+    "note": "Create-React-App demo dapp."
+  },
+  "dapp-demo": {
+    "archived": true,
+    "note": "dApp demo."
+  },
+  "smart-contracts": {
+    "archived": true,
+    "note": "Standalone Hardhat contracts project."
+  },
+  "uniswap-liquidity-provider": {
+    "archived": true,
+    "note": "Uniswap LP tool/experiment."
+  },
+  "e-commerce": {
+    "archived": true,
+    "note": "MERN + Stripe e-commerce demo."
+  },
+  "mern-app": {
+    "archived": true,
+    "note": "MERN demo app."
+  },
+  "print-shop": {
+    "archived": true,
+    "note": "Print-shop app."
+  },
+  "print-shop-alpha-test": {
+    "archived": true,
+    "note": "Print-shop alpha test build."
+  },
+  "print-shop-template": {
+    "archived": true,
+    "note": "Print-shop template."
+  },
+  "custom-checkout-template": {
+    "archived": true,
+    "note": "Custom checkout template."
+  },
+  "next-demo-website": {
+    "archived": true,
+    "note": "Next.js demo website."
+  },
+  "react-demo-website": {
+    "archived": true,
+    "note": "React demo/template website."
+  },
+  "components": {
+    "archived": true,
+    "note": "Shared React components."
+  },
+  "helpers": {
+    "archived": true,
+    "note": "'Helpers for werewolf softwares' library."
+  },
+  "co-working": {
+    "archived": true,
+    "note": "Co-working space app."
+  },
+  "courses": {
+    "archived": true,
+    "note": "Course material (build-your-own-AI-chatbot)."
+  },
+  "cookie-server": {
+    "archived": true,
+    "note": "Cookie/consent server."
+  },
+  "desktop": {
+    "archived": true,
+    "note": "Old werewolf-desktop (CRA)."
+  },
+  "ws-desktop": {
+    "archived": true,
+    "note": "Werewolf desktop (CRA)."
+  }
+}

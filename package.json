@@ -1,0 +1,24 @@
+{
+  "name": "psm",
+  "version": "0.1.0",
+  "description": "Projects manager — scans the workspace, classifies every project, and serves a live dashboard (also regenerates PROJECTS.md).",
+  "type": "module",
+  "scripts": {
+    "server": "tsx src/server/index.ts",
+    "scan": "tsx src/cli.ts scan",
+    "build:md": "tsx src/cli.ts build",
+    "list": "tsx src/cli.ts list",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}
