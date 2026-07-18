@@ -6,7 +6,9 @@
     "pinned": true,
     "stack": "React/TS, API, blockchain/DeFi",
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
-    "next": "Ongoing business/admin features (latest: audited admin override)."
+    "next": "Ongoing business/admin features (latest: audited admin override).",
+    "runCommand": "npm run dev",
+    "port": 5173
   },
   "daedalus": {
     "category": "Flagship & platform",
@@ -271,5 +273,17 @@
   "ws-desktop": {
     "archived": true,
     "note": "Werewolf desktop (CRA)."
+  },
+  "screenshot": {
+    "description": "A simple screenshot tool",
+    "status": "utility",
+    "pinned": false,
+    "aiFullAccess": false
+  },
+  "psm": {
+    "status": "active",
+    "priority": "high",
+    "pinned": true,
+    "aiFullAccess": false
   }
 }
