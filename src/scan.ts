@@ -120,39 +120,76 @@ function detectStack(dir: string): string[] {
   return stack;
 }
 
-/** Best guess at the dev-server port — overridable in the dashboard. */
+/** Best guess at the dev-server port — overridable, and refined live from run logs. */
 function detectPort(dir: string, pkg: any | null, stack: string[]): number | null {
-  const grab = (text: string): number | null => {
-    // \bPORT avoids matching SMTP_PORT / IMAP_PORT / DB_PORT etc.
-    const m =
-      text.match(/\bPORT\s*[=:]\s*['"]?(\d{2,5})/i) ||
-      text.match(/(?:--port|-p)[=\s]+['"]?(\d{2,5})/);
-    if (m) {
-      const n = Number(m[1]);
-      if (n > 0 && n < 65536) return n;
-    }
-    return null;
+  const clamp = (n: number) => (n > 0 && n < 65536 ? n : null);
+  const flag = (t: string) => {
+    const m = t.match(/(?:--port|-p)[=\s]+['"]?(\d{2,5})/);
+    return m ? clamp(Number(m[1])) : null;
   };
-  // 1) port baked into a package.json script
-  if (pkg?.scripts) {
-    for (const v of Object.values(pkg.scripts) as string[]) {
-      const p = grab(v);
-      if (p) return p;
-    }
+  // \bPORT avoids matching SMTP_PORT / IMAP_PORT / DB_PORT etc.
+  const envPort = (t: string) => {
+    const m = t.match(/\bPORT\s*[=:]\s*['"]?(\d{2,5})/i);
+    return m ? clamp(Number(m[1])) : null;
+  };
+  const scripts = pkg?.scripts ? (Object.values(pkg.scripts) as string[]) : [];
+
+  // 1) an explicit --port flag in a script is authoritative
+  for (const v of scripts) {
+    const p = flag(v);
+    if (p) return p;
   }
-  // 2) PORT in an env file
+  // 2) the web preview targets the frontend dev server — prefer its framework default
+  //    over a stray PORT= (which is usually a backend/API port)
+  if (stack.includes("Next.js")) return 3000;
+  if (stack.includes("Vite")) return 5173;
+  // 3) PORT= in a script or an env file
+  for (const v of scripts) {
+    const p = envPort(v);
+    if (p) return p;
+  }
   for (const f of [".env", ".env.local", ".env.development"]) {
     try {
-      const p = grab(fs.readFileSync(path.join(dir, f), "utf8"));
+      const p = envPort(fs.readFileSync(path.join(dir, f), "utf8"));
       if (p) return p;
     } catch {
       /* no such file */
     }
   }
-  // 3) framework defaults
-  if (stack.includes("Next.js")) return 3000;
-  if (stack.includes("Vite")) return 5173;
   return null;
+}
+
+/** The Go module's short name, from go.mod. */
+function goModuleName(dir: string): string | null {
+  try {
+    const m = fs.readFileSync(path.join(dir, "go.mod"), "utf8").match(/^module\s+(\S+)/m);
+    return m ? m[1].split("/").pop() || null : null;
+  } catch {
+    return null;
+  }
+}
+
+/** How to `go run` a project: root main.go, else the most "server-like" cmd/<x>. */
+function detectGoRun(dir: string): string {
+  if (fs.existsSync(path.join(dir, "main.go"))) return "go run .";
+  const cmd = path.join(dir, "cmd");
+  try {
+    const dirs = fs
+      .readdirSync(cmd, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && fs.existsSync(path.join(cmd, e.name, "main.go")))
+      .map((e) => e.name);
+    if (dirs.length) {
+      const mod = goModuleName(dir);
+      const prefer =
+        dirs.find((n) => /(^|[-_])(core|server|serve|api|app|daemon|web|main)([-_]|$)/i.test(n)) ||
+        (mod ? dirs.find((n) => n === mod || n.startsWith(mod)) : undefined) ||
+        dirs[0];
+      return `go run ./cmd/${prefer}`;
+    }
+  } catch {
+    /* no cmd/ dir */
+  }
+  return "go run ./...";
 }
 
 /** Best guess at how to run a project — the user can override in the dashboard. */
@@ -160,11 +197,12 @@ function detectRunCommand(dir: string, pkg: any | null): string | null {
   if (pkg?.scripts) {
     const s = pkg.scripts;
     // prefer a long-running dev/serve script; fall back to start
-    for (const name of ["dev", "server", "serve", "start"]) {
+    for (const name of ["dev", "develop", "start:dev", "server", "serve", "start"]) {
       if (s[name]) return name === "start" ? "npm start" : `npm run ${name}`;
     }
   }
   if (fs.existsSync(path.join(dir, "Cargo.toml"))) return "cargo run";
+  if (fs.existsSync(path.join(dir, "go.mod"))) return detectGoRun(dir);
   for (const entry of ["server.js", "index.js", "app.js", "main.py", "app.py"]) {
     if (fs.existsSync(path.join(dir, entry)))
       return entry.endsWith(".py") ? `python ${entry}` : `node ${entry}`;

@@ -315,6 +315,9 @@ table.arch td.date { color: var(--faint); white-space: nowrap; }
   background: var(--card); color: var(--text); font: inherit; font-size: 13.5px; resize: vertical; max-height: 160px;
 }
 .ws-composer textarea:focus { outline: none; border-color: var(--accent); }
+.ai-activity { display: flex; align-items: center; gap: 9px; padding: 7px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
+.spinner { width: 13px; height: 13px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Deploy pane */
 .ws-deploy { display: flex; flex-direction: column; }

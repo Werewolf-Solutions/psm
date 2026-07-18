@@ -284,6 +284,17 @@ function isRunning(name) {
   return STATE.procs[`${name}::run`]?.status === "running";
 }
 
+// persist an override so per-project choices are remembered
+async function patchProject(name, body) {
+  try {
+    await fetch(`/api/projects/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {}
+}
+
 function setWsStatus(status) {
   const badge = $("#ws-status");
   badge.textContent = status;
@@ -402,6 +413,18 @@ function connectLogs(name) {
       setWsStatus(JSON.parse(e.data).status);
     } catch {}
   });
+  // the running project told us its real web port — trust it over the guess
+  es.addEventListener("port", (e) => {
+    try {
+      const { port } = JSON.parse(e.data);
+      if (port && port !== WS.port) {
+        WS.port = port;
+        patchProject(name, { port }); // remember it for next time
+        if (WS.pane === "web") renderWebPane();
+        toast(`Detected web port ${port}`);
+      }
+    } catch {}
+  });
   es.onerror = () => {}; // EventSource auto-reconnects
 }
 
@@ -419,12 +442,32 @@ function closeWorkspace() {
 }
 
 /* ---- AI pane ---- */
+function setAiActivity(text) {
+  $("#ws-ai-activity-text").textContent = text;
+  $("#ws-ai-activity").hidden = false;
+}
+
+// turn a system line into a short "what's happening now" label
+function activityFor(ev) {
+  if (ev.role === "assistant") return "Thinking…";
+  if (ev.role === "system") {
+    const m = ev.text.match(/^→\s*(.+)$/); // tool call, e.g. "→ Write(foo.ts)"
+    if (m) return "Working: " + m[1];
+    if (/session /.test(ev.text)) return "Thinking…";
+  }
+  return null;
+}
+
 function appendAiEvent(ev) {
   const t = $("#ws-transcript");
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
   const b = el("div", "ai-msg ai-" + ev.role);
   b.textContent = ev.text;
   t.append(b);
+  if (WS.aiBusy) {
+    const label = activityFor(ev);
+    if (label) setAiActivity(label);
+  }
   if (nearBottom) t.scrollTop = t.scrollHeight;
 }
 
@@ -433,6 +476,8 @@ function setAiBusy(busy) {
   $("#ws-ai-status").textContent = busy ? "working…" : "";
   $("#ws-send").hidden = busy;
   $("#ws-cancel").hidden = !busy;
+  if (busy) setAiActivity("Thinking…");
+  else $("#ws-ai-activity").hidden = true;
 }
 
 function connectAi(name) {
@@ -598,6 +643,8 @@ async function wsRun() {
     const e = await r.json().catch(() => ({}));
     toast(e.error || "Run failed");
     setWsStatus("error");
+  } else {
+    patchProject(WS.name, { runCommand: command }); // remember what actually runs it
   }
   pollProcs();
 }
@@ -642,8 +689,14 @@ $("#ws-openext").onclick = () => {
   const url = webUrl();
   if (url) window.open(url, "_blank");
 };
-$("#ws-engine").onchange = (e) => (WS.engine = e.target.value);
-$("#ws-full").onchange = (e) => (WS.fullAccess = e.target.checked);
+$("#ws-engine").onchange = (e) => {
+  WS.engine = e.target.value;
+  patchProject(WS.name, { aiEngine: WS.engine }); // remember per project
+};
+$("#ws-full").onchange = (e) => {
+  WS.fullAccess = e.target.checked;
+  patchProject(WS.name, { aiFullAccess: WS.fullAccess }); // remember per project
+};
 $("#ws-send").onclick = sendAi;
 $("#ws-cancel").onclick = cancelAi;
 $("#ws-msg").addEventListener("keydown", (e) => {

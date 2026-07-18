@@ -20,12 +20,19 @@ interface ProcEntry {
   status: ProcStatus;
   exitCode: number | null;
   startedAt: number;
+  detectedPort: number | null; // web port sniffed from the run output
   log: LogLine[];
   subscribers: Set<Response>;
 }
 
 const MAX_LOG = 3000; // ring-buffer cap per process
 const registry = new Map<string, ProcEntry>();
+
+// strip terminal colour/cursor escape sequences so logs read as plain text
+const ANSI_RE = /\u001b\[[0-9;?]*[A-Za-z]/g;
+const stripAnsi = (s: string) => s.replace(ANSI_RE, "");
+// a dev server announcing its URL, e.g. "Local: http://localhost:5173/"
+const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})/;
 
 const keyOf = (name: string, kind: ProcKind) => `${name}::${kind}`;
 
@@ -53,14 +60,27 @@ export function allProcStates() {
 }
 
 function pushLine(p: ProcEntry, stream: LogLine["stream"], text: string) {
-  for (const raw of text.split(/\r?\n/)) {
+  for (const raw of stripAnsi(text).split(/\r?\n/)) {
     if (raw === "") continue;
     const entry: LogLine = { t: Date.now(), stream, line: raw };
     p.log.push(entry);
     if (p.log.length > MAX_LOG) p.log.shift();
     const payload = `data: ${JSON.stringify(entry)}\n\n`;
     for (const res of p.subscribers) res.write(payload);
+    // sniff the dev-server URL from a run's own output (the reliable source of truth)
+    if (p.kind === "run" && p.detectedPort == null) {
+      const m = raw.match(URL_RE);
+      if (m) {
+        p.detectedPort = Number(m[1]);
+        broadcastPort(p, p.detectedPort);
+      }
+    }
   }
+}
+
+function broadcastPort(p: ProcEntry, port: number) {
+  const payload = `event: port\ndata: ${JSON.stringify({ port })}\n\n`;
+  for (const res of p.subscribers) res.write(payload);
 }
 
 function broadcastStatus(p: ProcEntry) {
@@ -83,6 +103,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     status: "running",
     exitCode: null,
     startedAt: Date.now(),
+    detectedPort: null,
     log: [],
     subscribers: new Set(),
   };
@@ -91,16 +112,18 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
   p.status = "running";
   p.exitCode = null;
   p.startedAt = Date.now();
+  p.detectedPort = null; // re-sniff on each run
   registry.set(key, p);
 
   pushLine(p, "sys", `$ ${command}`);
 
-  // detached so we can signal the whole process group (kills grandchildren too)
+  // detached so we can signal the whole process group (kills grandchildren too);
+  // NO_COLOR/FORCE_COLOR ask tools to skip escape codes (we also strip defensively)
   const child = spawn(command, {
     cwd,
     shell: true,
     detached: true,
-    env: { ...process.env, FORCE_COLOR: "0" },
+    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
   });
   p.child = child;
 
@@ -172,6 +195,7 @@ export function subscribe(res: Response, name: string, kind: ProcKind): void {
       status: "exited",
       exitCode: null,
       startedAt: 0,
+      detectedPort: null,
       log: [],
       subscribers: new Set(),
     };
@@ -183,6 +207,8 @@ export function subscribe(res: Response, name: string, kind: ProcKind): void {
   // a process that never started should read as "idle", not "exited"
   const initial = p.startedAt === 0 ? "idle" : p.status;
   res.write(`event: status\ndata: ${JSON.stringify({ status: initial, exitCode: p.exitCode })}\n\n`);
+  if (p.detectedPort != null) // catch up a late subscriber
+    res.write(`event: port\ndata: ${JSON.stringify({ port: p.detectedPort })}\n\n`);
 
   p.subscribers.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
