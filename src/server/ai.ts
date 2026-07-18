@@ -35,6 +35,10 @@ interface AiSession {
   subscribers: Set<Response>;
   summary: string | null; // "where we left off" recap
   summaryAt: number; // log length the summary was generated at
+  // per-turn scratch, so a limit-blocked turn doesn't corrupt the resume state
+  turnPrevSessionId?: string | null;
+  turnHadAssistant?: boolean;
+  turnLimited?: boolean;
 }
 
 const MAX_LOG = 2000;
@@ -52,13 +56,15 @@ interface PersistedSession {
 }
 
 function loadSessions(): void {
-  let data: Record<string, PersistedSession>;
+  let data: any;
   try {
     data = JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8"));
   } catch {
     return; // no saved sessions yet
   }
-  for (const [name, p] of Object.entries(data)) {
+  // new format is { sessions, limits }; old format was the sessions map directly
+  const map: Record<string, PersistedSession> = data.sessions ?? data;
+  for (const [name, p] of Object.entries(map)) {
     sessions.set(name, {
       name,
       cwd: "", // filled in when the client next subscribes
@@ -72,6 +78,7 @@ function loadSessions(): void {
       summaryAt: p.summaryAt ?? 0,
     });
   }
+  if (data.limits) Object.assign(limits, data.limits);
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -81,10 +88,10 @@ function saveSessionsSoon(): void {
 }
 function saveSessions(): void {
   saveTimer = null;
-  const out: Record<string, PersistedSession> = {};
+  const map: Record<string, PersistedSession> = {};
   for (const [name, s] of sessions) {
     if (!s.sessionId && !s.log.length) continue;
-    out[name] = {
+    map[name] = {
       engine: s.engine,
       sessionId: s.sessionId,
       log: s.log.slice(-MAX_PERSIST),
@@ -94,10 +101,48 @@ function saveSessions(): void {
     };
   }
   try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(out));
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: map, limits }));
   } catch {
     /* best effort */
   }
+}
+
+/* ---------- provider usage limits (per engine, not per project) ---------- */
+
+interface LimitState {
+  message: string;
+  until: number | null; // epoch ms the limit resets, if known
+  at: number; // when we recorded it
+}
+const limits: Partial<Record<AiEngine, LimitState>> = {};
+
+/** Parse a reset time out of a limit message, e.g. "try again at Jul 30th, 2026 12:40 PM". */
+function parseResetAt(message: string): number | null {
+  const m = message.match(/try again (?:at|after)\s+([^.\n]+)/i);
+  if (m) {
+    const cleaned = m[1].replace(/(\d+)(st|nd|rd|th)/gi, "$1").trim();
+    const t = Date.parse(cleaned);
+    if (!Number.isNaN(t)) return t;
+  }
+  return null;
+}
+
+function setLimit(engine: AiEngine, message: string, until: number | null): void {
+  limits[engine] = { message: message.slice(0, 300), until, at: Date.now() };
+  saveSessionsSoon();
+}
+
+/** The active limit for an engine, or null. Clears itself once the window passes. */
+export function aiLimit(engine: AiEngine): LimitState | null {
+  const l = limits[engine];
+  if (!l) return null;
+  const expired = l.until ? Date.now() >= l.until : Date.now() - l.at > 15 * 60_000;
+  if (expired) {
+    delete limits[engine];
+    saveSessionsSoon();
+    return null;
+  }
+  return l;
 }
 
 loadSessions();
@@ -212,22 +257,40 @@ function handleClaudeLine(s: AiSession, line: string) {
     return;
   }
   if (ev.session_id && !s.sessionId) s.sessionId = ev.session_id;
+  // a usage/rate limit reported mid-stream
+  if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status && ev.rate_limit_info.status !== "allowed") {
+    const info = ev.rate_limit_info;
+    noteLimit(s, "claude", "Claude usage limit reached.", info.resetsAt ? info.resetsAt * 1000 : null);
+  }
   if (ev.type === "system" && ev.subtype === "init") {
     pushEvent(s, sys(`● session ${short(ev.session_id)} · ${ev.model || ""} · ${ev.permissionMode || ""}`));
     return;
   }
   if (ev.type === "assistant" && ev.message?.content) {
     for (const b of ev.message.content) {
-      if (b.type === "text" && b.text?.trim()) pushEvent(s, { t: Date.now(), role: "assistant", text: b.text });
-      else if (b.type === "tool_use") pushEvent(s, sys(`→ ${b.name}(${toolSummary(b.input)})`));
+      if (b.type === "text" && b.text?.trim()) {
+        s.turnHadAssistant = true;
+        pushEvent(s, { t: Date.now(), role: "assistant", text: b.text });
+      } else if (b.type === "tool_use") pushEvent(s, sys(`→ ${b.name}(${toolSummary(b.input)})`));
     }
     return;
   }
   if (ev.type === "result") {
-    if (ev.is_error) pushEvent(s, sys(`[error] ${ev.result || ev.subtype || "failed"}`));
+    const text = String(ev.result || "");
+    if (ev.is_error) pushEvent(s, sys(`[error] ${text || ev.subtype || "failed"}`));
+    if (isLimitText(text)) noteLimit(s, "claude", text || "Claude usage limit reached.", parseResetAt(text));
     if (Array.isArray(ev.permission_denials) && ev.permission_denials.length)
       pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked — turn on Full access to let the AI run commands`));
   }
+}
+
+const isLimitText = (t: string) => /usage limit|rate limit|quota|too many requests|429/i.test(t);
+
+/** Record a limit hit during a turn, tell the open pane, and remember it. */
+function noteLimit(s: AiSession, engine: AiEngine, message: string, until: number | null): void {
+  s.turnLimited = true;
+  setLimit(engine, message, until);
+  broadcast(s, "limit", aiLimit(engine));
 }
 
 function handleCodexLine(s: AiSession, line: string) {
@@ -245,15 +308,21 @@ function handleCodexLine(s: AiSession, line: string) {
       break;
     case "error":
       pushEvent(s, sys(`[error] ${ev.message}`));
+      if (isLimitText(ev.message || "")) noteLimit(s, "codex", ev.message, parseResetAt(ev.message || ""));
       break;
-    case "turn.failed":
-      pushEvent(s, sys(`[error] ${ev.error?.message || "turn failed"}`));
+    case "turn.failed": {
+      const msg = ev.error?.message || "turn failed";
+      pushEvent(s, sys(`[error] ${msg}`));
+      if (isLimitText(msg)) noteLimit(s, "codex", msg, parseResetAt(msg));
       break;
+    }
     case "item.completed": {
       const it = ev.item || {};
       const t = it.item_type || it.type;
-      if ((t === "agent_message" || t === "assistant_message") && it.text)
+      if ((t === "agent_message" || t === "assistant_message") && it.text) {
+        s.turnHadAssistant = true;
         pushEvent(s, { t: Date.now(), role: "assistant", text: it.text });
+      }
       else if (t === "command_execution" && it.command) pushEvent(s, sys(`→ $ ${String(it.command).slice(0, 80)}`));
       else if (t === "file_change" || t === "patch") pushEvent(s, sys(`→ edited files`));
       break;
@@ -268,12 +337,19 @@ export function send(
   engine: AiEngine,
   message: string,
   fullAccess: boolean,
-): { ok: boolean; error?: string } {
+): { ok: boolean; error?: string; limited?: boolean } {
   const s = getSession(name, cwd, engine);
   if (s.busy) return { ok: false, error: "the AI is still working on the previous turn" };
   if (!message.trim()) return { ok: false, error: "empty message" };
+  // refuse to spawn a turn into a known usage limit — it would just fail and
+  // risk advancing the session id for nothing
+  const limit = aiLimit(engine);
+  if (limit) return { ok: false, limited: true, error: limit.message };
 
   s.busy = true;
+  s.turnPrevSessionId = s.sessionId;
+  s.turnHadAssistant = false;
+  s.turnLimited = false;
   pushEvent(s, { t: Date.now(), role: "user", text: message });
   broadcast(s, "status", { busy: true, engine });
 
@@ -321,6 +397,12 @@ export function send(
 function finishTurn(s: AiSession) {
   s.busy = false;
   s.child = null;
+  // a limit-blocked turn produced no real reply — don't let it advance the
+  // session id, so the next (post-limit) turn resumes the real conversation
+  if (s.turnLimited && !s.turnHadAssistant && s.turnPrevSessionId !== undefined) {
+    s.sessionId = s.turnPrevSessionId;
+    pushEvent(s, sys("[psm] usage limit — session kept; try again after it resets"));
+  }
   broadcast(s, "status", { busy: false, engine: s.engine });
   broadcast(s, "done", {});
   saveSessions(); // flush now so the session id / transcript survive a restart
@@ -404,6 +486,8 @@ export function subscribeAi(res: Response, name: string, cwd: string, engine: Ai
   res.write(`event: status\ndata: ${JSON.stringify({ busy: s.busy, engine: s.engine })}\n\n`);
   if (s.summary) // show the last recap instantly; the client refreshes it if stale
     res.write(`event: recap\ndata: ${JSON.stringify({ summary: s.summary })}\n\n`);
+  const limit = aiLimit(engine); // surface a usage limit before the user types anything
+  if (limit) res.write(`event: limit\ndata: ${JSON.stringify(limit)}\n\n`);
 
   s.subscribers.add(res);
   const ping = setInterval(() => res.write(": ping\n\n"), 25_000);

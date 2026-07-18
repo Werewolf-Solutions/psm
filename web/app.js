@@ -326,7 +326,7 @@ async function saveDrawer() {
 /* ---------- workspace / cockpit ---------- */
 let WS = {
   name: null, es: null, port: null, pane: "logs",
-  engine: "claude", fullAccess: false, aiEs: null, aiBusy: false, pendingUser: null,
+  engine: "claude", fullAccess: false, aiEs: null, aiBusy: false, pendingUser: null, aiLimited: false,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
 
@@ -374,8 +374,11 @@ function openWorkspace(p, pane = "logs") {
   WS.depArmed = false;
   WS.pendingUser = null;
   WS.recapFetched = false;
+  WS.aiLimited = false;
   $("#ws-ai-recap").hidden = true;
   $("#ws-ai-recap").innerHTML = "";
+  $("#ws-ai-limit").hidden = true;
+  $("#ws-ai-limit").innerHTML = "";
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
@@ -404,6 +407,7 @@ function switchPane(pane) {
   if (pane === "ai" && !WS.recapFetched) {
     WS.recapFetched = true;
     fetchRecap(); // refresh "where we left off" (regenerates only if stale)
+    fetchLimit(); // surface a usage limit before the user types anything
   }
 }
 
@@ -579,6 +583,12 @@ function connectAi(name) {
       setRecap(JSON.parse(e.data).summary);
     } catch {}
   });
+  // a usage limit — pushed on connect if already limited, or when a turn hits one
+  es.addEventListener("limit", (e) => {
+    try {
+      setAiLimit(JSON.parse(e.data));
+    } catch {}
+  });
   es.onerror = () => {};
 }
 
@@ -613,8 +623,44 @@ async function fetchRecap() {
   }
 }
 
+/* ---- usage limit ---- */
+function refreshComposer() {
+  const blocked = WS.aiLimited;
+  $("#ws-send").disabled = blocked;
+  $("#ws-msg").disabled = blocked;
+  $("#ws-msg").placeholder = blocked
+    ? "Sending paused — usage limit reached"
+    : "Ask the project's AI to make a change…  (Enter to send, Shift+Enter for newline)";
+}
+
+function setAiLimit(limit) {
+  const banner = $("#ws-ai-limit");
+  WS.aiLimited = !!limit;
+  if (!limit) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+  } else {
+    banner.innerHTML = "";
+    const body = el("div", "ai-limit-body");
+    const until = limit.until ? new Date(limit.until).toLocaleString() : null;
+    body.textContent = (limit.message || "Usage limit reached.") + (until ? `  Resets ${until}.` : "");
+    banner.append(el("div", "ai-limit-title", "⚠ Usage limit reached"), body);
+    banner.hidden = false;
+  }
+  refreshComposer();
+}
+
+async function fetchLimit() {
+  if (!WS.name) return;
+  try {
+    const r = await fetch(`/api/ai/limit?engine=${encodeURIComponent(WS.engine)}`);
+    setAiLimit((await r.json()).limit);
+  } catch {}
+}
+
 async function sendAi() {
   if (!WS.name || WS.aiBusy) return;
+  if (WS.aiLimited) return toast("Usage limit reached — sending is paused");
   const box = $("#ws-msg");
   const message = box.value.trim();
   if (!message) return;
@@ -635,6 +681,7 @@ async function sendAi() {
     box.value = message; // don't lose the message
     WS.pendingUser = null;
     optimistic.remove(); // undo the optimistic bubble
+    if (e.limited) fetchLimit(); // surface the limit banner + pause sending
   }
 }
 
@@ -812,6 +859,7 @@ $("#ws-openext").onclick = () => {
 $("#ws-engine").onchange = (e) => {
   WS.engine = e.target.value;
   patchProject(WS.name, { aiEngine: WS.engine }); // remember per project
+  fetchLimit(); // limits are per engine — re-check for the newly selected one
 };
 $("#ws-full").onchange = (e) => {
   WS.fullAccess = e.target.checked;

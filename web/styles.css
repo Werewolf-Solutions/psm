@@ -347,6 +347,13 @@ table.arch td.date { color: var(--faint); white-space: nowrap; }
   font-size: 12.8px; color: var(--text); flex-shrink: 0; max-height: 40%; overflow-y: auto;
 }
 .ai-recap.loading { color: var(--muted); font-style: italic; }
+.ai-limit {
+  margin: 12px 16px 0; padding: 11px 14px; border-radius: 10px; flex-shrink: 0;
+  background: color-mix(in srgb, #f85149 13%, transparent);
+  border: 1px solid color-mix(in srgb, #f85149 45%, var(--line)); color: var(--text); font-size: 12.8px;
+}
+.ai-limit-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #f85149; margin-bottom: 5px; }
+.ai-limit-body { line-height: 1.5; }
 .ai-recap-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--accent); margin-bottom: 5px; }
 .ai-recap-body { white-space: pre-wrap; line-height: 1.55; }
 .ai-activity { display: flex; align-items: center; gap: 9px; padding: 7px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }

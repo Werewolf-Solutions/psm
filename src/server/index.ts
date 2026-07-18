@@ -10,7 +10,7 @@ import { loadConfig, workspaceRoot } from "../scan.ts";
 import { STATUS_META } from "../render.ts";
 import type { Override } from "../types.ts";
 import { allProcStates, procState, start, stop, subscribe, type ProcKind } from "./procs.ts";
-import { activeSessions, aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
+import { activeSessions, aiLimit, aiState, cancel as aiCancel, recap as aiRecap, send as aiSend, subscribeAi, type AiEngine } from "./ai.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -155,6 +155,11 @@ app.get("/api/procs", (_req, res) => {
 // projects with an ongoing AI conversation — the "Working on" lane
 app.get("/api/sessions", (_req, res) => {
   res.json({ sessions: activeSessions() });
+});
+
+// current provider usage limit for an engine (so the AI pane can warn upfront)
+app.get("/api/ai/limit", (req, res) => {
+  res.json({ limit: aiLimit(parseEngine(req.query.engine, "claude")) });
 });
 
 // snapshot status for one project+kind
