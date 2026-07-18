@@ -201,13 +201,23 @@ function renderBoard() {
   const active = vis.filter((p) => !p.archived);
   const archived = vis.filter((p) => p.archived);
 
-  const cats = [...new Set(active.map((p) => p.category))].sort(
+  // pinned float to the very top, out of their category
+  const pinned = active.filter((p) => p.pinned);
+  const rest = active.filter((p) => !p.pinned);
+  if (pinned.length) {
+    board.append(el("div", "group-title", "📌 Pinned"));
+    const grid = el("div", "grid");
+    for (const p of pinned) grid.append(card(p));
+    board.append(grid);
+  }
+
+  const cats = [...new Set(rest.map((p) => p.category))].sort(
     (a, b) => catRank(a) - catRank(b),
   );
   for (const cat of cats) {
     board.append(el("div", "group-title", esc(cat)));
     const grid = el("div", "grid");
-    for (const p of active.filter((x) => x.category === cat)) grid.append(card(p));
+    for (const p of rest.filter((x) => x.category === cat)) grid.append(card(p));
     board.append(grid);
   }
 
