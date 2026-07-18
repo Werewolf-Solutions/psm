@@ -92,7 +92,7 @@ export function merge(
       hasGit: s.hasGit,
       runCommand: o.runCommand || s.runCommand,
       deployCommand: o.deployCommand || null,
-      port: o.port ?? null,
+      port: o.port ?? s.port,
       aiEngine: o.aiEngine ?? "claude",
       overridden,
     };

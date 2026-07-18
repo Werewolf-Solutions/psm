@@ -214,6 +214,8 @@ function openDrawer(p) {
   $("#d-next").placeholder = p.next || "What's the next action?";
   $("#d-run").value = p.overridden.includes("runCommand") ? p.runCommand || "" : "";
   $("#d-run").placeholder = p.runCommand || "e.g. npm run dev";
+  $("#d-port").value = p.overridden.includes("port") ? p.port || "" : "";
+  $("#d-port").placeholder = p.port ? String(p.port) : "e.g. 3000";
   $("#d-category").value = p.overridden.includes("category") ? p.category : "";
   $("#d-category").placeholder = p.category || "Category";
 
@@ -246,6 +248,7 @@ async function saveDrawer() {
     next: $("#d-next").value.trim(),
     category: $("#d-category").value.trim(),
     runCommand: $("#d-run").value.trim(),
+    port: $("#d-port").value.trim() ? Number($("#d-port").value.trim()) : "",
   };
   // don't send pinned:false as a stored override unless it was set; keep simple: always send
   const r = await fetch(`/api/projects/${encodeURIComponent(editing.name)}`, {
@@ -263,7 +266,7 @@ async function saveDrawer() {
 }
 
 /* ---------- workspace / cockpit ---------- */
-let WS = { name: null, es: null };
+let WS = { name: null, es: null, port: null, pane: "logs" };
 
 function isRunning(name) {
   return STATE.procs[`${name}::run`]?.status === "running";
@@ -291,13 +294,75 @@ function appendLine(entry) {
 
 function openWorkspace(p) {
   WS.name = p.name;
+  WS.port = p.port ?? null;
   $("#ws-name").textContent = p.name;
   $("#ws-cmd").value = p.runCommand || "";
   $("#ws-console").innerHTML = "";
+  $("#ws-webframe").innerHTML = "";
   setWsStatus("idle");
+  switchPane("logs");
   $("#ws-backdrop").hidden = false;
   $("#workspace").hidden = false;
   connectLogs(p.name);
+}
+
+function switchPane(pane) {
+  WS.pane = pane;
+  for (const t of document.querySelectorAll(".ws-tab"))
+    t.classList.toggle("on", t.dataset.pane === pane);
+  for (const el of document.querySelectorAll(".ws-panes > [data-pane]"))
+    el.hidden = el.dataset.pane !== pane;
+  if (pane === "web") renderWebPane();
+}
+
+const webUrl = () => (WS.port ? `http://localhost:${WS.port}` : null);
+
+function renderWebPane() {
+  const url = webUrl();
+  const frame = $("#ws-webframe");
+  $("#ws-url").textContent = url || "no port set";
+  $("#ws-openext").disabled = !url;
+  $("#ws-reload").disabled = !url;
+  if (!url) {
+    frame.innerHTML = "";
+    const box = el("div", "ws-noport");
+    box.append(
+      el("p", null, "No web port set for this project."),
+      el("p", "sub", "If it serves a page, enter the port to preview it here."),
+    );
+    const row = el("div", "ws-noport-row");
+    const inp = el("input");
+    inp.type = "number";
+    inp.placeholder = "e.g. 3000";
+    inp.min = "1";
+    inp.max = "65535";
+    const save = el("button", "btn btn-primary", "Save &amp; preview");
+    save.onclick = async () => {
+      const port = Number(inp.value.trim());
+      if (!port) return;
+      await fetch(`/api/projects/${encodeURIComponent(WS.name)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ port }),
+      });
+      WS.port = port;
+      load(); // refresh cards so the drawer/board pick up the new port
+      renderWebPane();
+    };
+    row.append(inp, save);
+    box.append(row);
+    frame.append(box);
+    return;
+  }
+  // (re)build the iframe only when the target url changed
+  const existing = frame.querySelector("iframe");
+  if (existing && existing.dataset.url === url) return;
+  frame.innerHTML = "";
+  const iframe = el("iframe");
+  iframe.dataset.url = url;
+  iframe.src = url;
+  iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups");
+  frame.append(iframe);
 }
 
 function connectLogs(name) {
@@ -370,6 +435,18 @@ $("#ws-backdrop").onclick = closeWorkspace;
 $("#ws-run").onclick = wsRun;
 $("#ws-stop").onclick = wsStop;
 $("#ws-clear").onclick = () => ($("#ws-console").innerHTML = "");
+$("#ws-tabs").onclick = (e) => {
+  const t = e.target.closest(".ws-tab");
+  if (t) switchPane(t.dataset.pane);
+};
+$("#ws-reload").onclick = () => {
+  const iframe = $("#ws-webframe").querySelector("iframe");
+  if (iframe) iframe.src = iframe.src; // reassigning src forces a reload
+};
+$("#ws-openext").onclick = () => {
+  const url = webUrl();
+  if (url) window.open(url, "_blank");
+};
 
 /* ---------- actions ---------- */
 let toastTimer;

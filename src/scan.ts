@@ -120,6 +120,41 @@ function detectStack(dir: string): string[] {
   return stack;
 }
 
+/** Best guess at the dev-server port — overridable in the dashboard. */
+function detectPort(dir: string, pkg: any | null, stack: string[]): number | null {
+  const grab = (text: string): number | null => {
+    // \bPORT avoids matching SMTP_PORT / IMAP_PORT / DB_PORT etc.
+    const m =
+      text.match(/\bPORT\s*[=:]\s*['"]?(\d{2,5})/i) ||
+      text.match(/(?:--port|-p)[=\s]+['"]?(\d{2,5})/);
+    if (m) {
+      const n = Number(m[1]);
+      if (n > 0 && n < 65536) return n;
+    }
+    return null;
+  };
+  // 1) port baked into a package.json script
+  if (pkg?.scripts) {
+    for (const v of Object.values(pkg.scripts) as string[]) {
+      const p = grab(v);
+      if (p) return p;
+    }
+  }
+  // 2) PORT in an env file
+  for (const f of [".env", ".env.local", ".env.development"]) {
+    try {
+      const p = grab(fs.readFileSync(path.join(dir, f), "utf8"));
+      if (p) return p;
+    } catch {
+      /* no such file */
+    }
+  }
+  // 3) framework defaults
+  if (stack.includes("Next.js")) return 3000;
+  if (stack.includes("Vite")) return 5173;
+  return null;
+}
+
 /** Best guess at how to run a project — the user can override in the dashboard. */
 function detectRunCommand(dir: string, pkg: any | null): string | null {
   if (pkg?.scripts) {
@@ -206,6 +241,7 @@ export function scanOne(dir: string, name: string): Signals {
   }
 
   const pkg = readJSON(path.join(dir, "package.json"));
+  const stack = detectStack(dir);
 
   return {
     name,
@@ -216,7 +252,7 @@ export function scanOne(dir: string, name: string): Signals {
     gitLastSubject,
     lastActivity,
     lastActivitySource,
-    stack: detectStack(dir),
+    stack,
     pkgName: pkg?.name ?? null,
     pkgDescription: pkg?.description ?? null,
     readmeSummary: readReadme(dir),
@@ -225,6 +261,7 @@ export function scanOne(dir: string, name: string): Signals {
       fs.existsSync(path.join(dir, "README.md")) ||
       fs.existsSync(path.join(dir, "readme.md")),
     runCommand: detectRunCommand(dir, pkg),
+    port: detectPort(dir, pkg, stack),
   };
 }
 

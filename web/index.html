@@ -63,6 +63,9 @@
         <label>Run command
           <input id="d-run" type="text" placeholder="e.g. npm run dev" />
         </label>
+        <label>Web port
+          <input id="d-port" type="number" min="1" max="65535" placeholder="e.g. 3000" />
+        </label>
         <label>Category
           <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
         </label>
@@ -90,7 +93,21 @@
         <button class="btn" id="ws-stop">■ Stop</button>
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
       </div>
-      <div class="ws-console" id="ws-console"></div>
+      <div class="ws-tabs" id="ws-tabs">
+        <button class="ws-tab on" data-pane="logs">Logs</button>
+        <button class="ws-tab" data-pane="web">Web</button>
+      </div>
+      <div class="ws-panes">
+        <div class="ws-console" id="ws-console" data-pane="logs"></div>
+        <div class="ws-web" id="ws-web" data-pane="web" hidden>
+          <div class="ws-webbar">
+            <span class="ws-url" id="ws-url">—</span>
+            <button class="btn" id="ws-reload" title="Reload the preview">↻</button>
+            <button class="btn" id="ws-openext" title="Open in a new tab">Open&nbsp;↗</button>
+          </div>
+          <div class="ws-webframe" id="ws-webframe"></div>
+        </div>
+      </div>
     </section>
 
     <div class="toast" id="toast" hidden></div>

@@ -26,6 +26,7 @@ export interface Signals {
   notesNext: string | null; // first actionable line from notes/todo
   hasReadme: boolean;
   runCommand: string | null; // auto-detected way to run it (e.g. "npm run dev")
+  port: number | null; // auto-detected dev-server port, if any
 }
 
 /** Human-curated layer, stored in overrides.json. All fields optional. */
