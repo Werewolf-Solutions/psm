@@ -1,0 +1,72 @@
+{
+  "capabilities": [
+    {
+      "id": "werewolf",
+      "kind": "mcp",
+      "providerProject": "werewolf-dapp",
+      "title": "Werewolf Solutions",
+      "summary": "Read the PSM business and validate its paid cloud billing and storage service through the Werewolf API.",
+      "usage": "Use Werewolf for authoritative PSM business and cloud-service readiness. Treat customer data and all money-moving operations as unavailable; this capability is read-only.",
+      "requiredEnv": [
+        "WEREWOLF_API_KEY"
+      ],
+      "mcp": {
+        "transport": "stdio",
+        "launch": {
+          "type": "npm-script",
+          "script": "mcp"
+        },
+        "env": {
+          "WEREWOLF_MCP_PROFILE": "psm-readonly"
+        }
+      }
+    },
+    {
+      "id": "feedback-hub",
+      "kind": "mcp",
+      "providerProject": "feedback-hub",
+      "title": "Feedback Hub",
+      "summary": "Work with registered apps, feedback clusters, and roadmap items.",
+      "usage": "Use Feedback Hub to inspect and triage feedback. Never dismiss or promote feedback without the user's approval.",
+      "requiredEnv": [],
+      "mcp": {
+        "transport": "stdio",
+        "launch": {
+          "type": "npm-script",
+          "script": "mcp"
+        },
+        "env": {
+          "DB_PATH": "${providerRoot}/data/feedback-hub.db"
+        }
+      }
+    },
+    {
+      "id": "daedalus",
+      "kind": "mcp",
+      "providerProject": "daedalus",
+      "title": "Daedalus",
+      "summary": "Inspect and operate infrastructure through Daedalus's governed MCP tools.",
+      "usage": "Use Daedalus for infrastructure context and operations. Treat write actions as proposals unless the user explicitly approves them.",
+      "requiredEnv": [
+        "DAEDALUS_MCP_TOKEN"
+      ],
+      "mcp": {
+        "transport": "http",
+        "url": "http://localhost:8080/mcp",
+        "bearerTokenEnvVar": "DAEDALUS_MCP_TOKEN"
+      }
+    },
+    {
+      "id": "control-room-spec",
+      "kind": "doc",
+      "providerProject": "control-room",
+      "title": "Control Room specification",
+      "summary": "Pinned architecture, interfaces, schemas, decisions, requirements, and roadmap for Control Room.",
+      "usage": "Consult the attached Control Room specification when designing integrations, event envelopes, approvals, or execution flows. It is reference material; do not assume an unimplemented design is already running.",
+      "requiredEnv": [],
+      "copy": {
+        "path": "specification"
+      }
+    }
+  ]
+}

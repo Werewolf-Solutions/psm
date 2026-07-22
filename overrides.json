@@ -6,9 +6,12 @@
     "pinned": true,
     "stack": "React/TS, API, blockchain/DeFi",
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
-    "next": "Ongoing business/admin features (latest: audited admin override).",
+    "next": "Continue AI builder workspace links so generated sites stay connected to their separate repos/projects.",
     "runCommand": "npm run dev",
-    "port": 5173
+    "port": 5173,
+    "aiFullAccess": true,
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.5"
   },
   "daedalus": {
     "category": "Flagship & platform",
@@ -16,7 +19,11 @@
     "priority": "high",
     "stack": "Node, AI agent, knowledge graph",
     "description": "An AI-native Infrastructure Operating System — one control plane to observe, operate, and evolve infrastructure via dashboard, CLI, API, and an embedded AI agent with a live knowledge graph.",
-    "next": "dctl connector work (e.g. SSH server registration)."
+    "next": "dctl connector work (e.g. SSH server registration).",
+    "runCommand": "go run ./cmd/daedalus-core",
+    "aiEngine": "codex",
+    "aiFullAccess": true,
+    "port": 5174
   },
   "control-room": {
     "category": "Flagship & platform",
@@ -30,14 +37,27 @@
     "status": "active",
     "stack": "Node CLI",
     "description": "A research-grade AI chat in your terminal, opening with the 6-module Aurora Research Method. Engine-agnostic (Claude + Codex, switchable via /engine) with a two-way Telegram bridge.",
-    "next": "Fix per-session engine/model persistence; replace the opening voice questionnaire with starting templates."
+    "next": "Fix per-session engine/model persistence; replace the opening voice questionnaire with starting templates.",
+    "runCommand": "npm start"
   },
   "leads-search-skill": {
     "category": "AI & automation",
     "status": "active",
     "stack": "TypeScript, Express",
     "description": "Standalone cold-outreach pipeline for Werewolf Solutions: find local businesses, scrape + audit sites, draft personalised emails, send, and AI-triage replies. WhatsApp fallback + do-not-contact list. Runs as CLI and local web app.",
-    "next": "Make emails/messages more human; surface fuller company details (Google Maps link) on the draft-&-approve page."
+    "next": "Make emails/messages more human; surface fuller company details (Google Maps link) on the draft-&-approve page.",
+    "runCommand": "npm run server",
+    "port": 8787
+  },
+  "feedback-hub": {
+    "category": "AI & automation",
+    "status": "active",
+    "stack": "Node/ESM, Express, SQLite, MCP",
+    "description": "Feedback Hub — register any app, collect user feedback through one ingestion API (drop-in widget or REST), cluster/triage it with Claude, promote to a roadmap, and semi-automatically draft implementation plans (always human-gated). Exposes an MCP server so AI agents can operate on the backlog.",
+    "next": "Wire 'promote to roadmap' into the todo repo; migrate the decision engine into control-room; add gh-based draft-PR creation behind confidence gates.",
+    "runCommand": "npm start",
+    "port": 4400,
+    "aiFullAccess": true
   },
   "AI-social-media-autopilot": {
     "category": "AI & automation",
@@ -107,7 +127,9 @@
     "status": "active",
     "stack": ".NET/C#, Godot",
     "description": "A voxel / block-based game engine (block system, camera system, etc.), built on .NET with Godot. A side/creative project rather than a business tool.",
-    "next": "Continue engine systems per its own docs/."
+    "next": "Continue engine systems per its own docs/.",
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.5"
   },
   "blog": {
     "category": "Apps, libraries & other",
@@ -278,12 +300,65 @@
     "description": "A simple screenshot tool",
     "status": "utility",
     "pinned": false,
-    "aiFullAccess": false
+    "aiFullAccess": true,
+    "aiEngine": "codex"
   },
   "psm": {
     "status": "active",
     "priority": "high",
     "pinned": true,
-    "aiFullAccess": false
+    "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
+    "next": "Turn the new-project brainstorm prompt into a structured reuse report that can preselect scaffold options and capability attachments.",
+    "aiFullAccess": true,
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.5",
+    "attachments": [
+      {
+        "capabilityRef": "workspace:werewolf",
+        "kind": "mcp",
+        "source": "workspace",
+        "mode": "reference",
+        "manifestDigest": "sha256:7a1b576fe20f0b150c60a5218960cd1cf74e5e9ea631fb6eff13edd09694b55a",
+        "attachedAt": 1784559897780
+      }
+    ]
+  },
+  "__workspace__": {
+    "aiFullAccess": true,
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.5"
+  },
+  "atlas": {
+    "status": "active",
+    "category": "Flagship & platform",
+    "description": "Atlas — secure family wealth workspace for assets, ownership, documents, succession planning, and adviser collaboration.",
+    "next": "Add real authentication/role enforcement, document file uploads, and production encryption/storage configuration.",
+    "priority": "high",
+    "runCommand": "npm run dev",
+    "port": 5176,
+    "aiEngine": "claude",
+    "aiFullAccess": true,
+    "attachments": [
+      {
+        "capabilityRef": "workspace:feedback-hub",
+        "kind": "mcp",
+        "source": "workspace",
+        "mode": "reference",
+        "manifestDigest": "sha256:38b320391123b8ae9e4be707b27bfcceae87c4a483f37ade7c79d14282a0a30d",
+        "attachedAt": 1784545389690
+      },
+      {
+        "capabilityRef": "workspace:control-room-spec",
+        "kind": "doc",
+        "source": "workspace",
+        "mode": "copy",
+        "manifestDigest": "sha256:0c021e8ee9ca4b9de59245ea5b8ce72d7b887816454620c92135da23e66db208",
+        "attachedAt": 1784545392580
+      }
+    ],
+    "aiModel": "fable"
+  },
+  "zzz-psm-smoke": {
+    "description": "smoke test"
   }
 }

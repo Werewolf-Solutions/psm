@@ -59,6 +59,18 @@ export function allProcStates() {
   return out;
 }
 
+/** Running project processes for the Working on lane. */
+export function activeProcesses() {
+  return [...registry.values()]
+    .filter((p) => p.status === "running")
+    .map((p) => ({
+      name: p.name,
+      kind: p.kind,
+      command: p.command,
+      startedAt: p.startedAt,
+    }));
+}
+
 function pushLine(p: ProcEntry, stream: LogLine["stream"], text: string) {
   for (const raw of stripAnsi(text).split(/\r?\n/)) {
     if (raw === "") continue;
@@ -173,6 +185,15 @@ export function stop(name: string, kind: ProcKind): boolean {
     }
   }, 4000);
   return true;
+}
+
+/** Stop every managed run/deploy process for a project. */
+export function stopAll(name: string): ProcKind[] {
+  const stopped: ProcKind[] = [];
+  for (const p of registry.values()) {
+    if (p.name === name && p.status === "running" && stop(name, p.kind)) stopped.push(p.kind);
+  }
+  return stopped;
 }
 
 /** Attach an SSE response: replay the buffered log, then stream live. */

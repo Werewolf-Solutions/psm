@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { Config, Override, Project, Signals, Status } from "./types.ts";
 
@@ -8,14 +9,25 @@ const OVERRIDES_FILE = path.resolve(__dirname, "..", "overrides.json");
 
 export function loadOverrides(): Record<string, Override> {
   try {
-    return JSON.parse(fs.readFileSync(OVERRIDES_FILE, "utf8"));
-  } catch {
-    return {};
+    const parsed = JSON.parse(fs.readFileSync(OVERRIDES_FILE, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("overrides root must be an object");
+    }
+    return parsed;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw new Error(`cannot read overrides.json: ${(err as Error).message}`);
   }
 }
 
 export function saveOverrides(all: Record<string, Override>): void {
-  fs.writeFileSync(OVERRIDES_FILE, JSON.stringify(all, null, 2) + "\n");
+  const temp = `${OVERRIDES_FILE}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  let mode = 0o600;
+  try {
+    mode = fs.statSync(OVERRIDES_FILE).mode & 0o777;
+  } catch {}
+  fs.writeFileSync(temp, JSON.stringify(all, null, 2) + "\n", { mode });
+  fs.renameSync(temp, OVERRIDES_FILE);
 }
 
 function daysSince(iso: string | null): number {
@@ -82,6 +94,8 @@ export function merge(
       next: o.next ?? s.notesNext ?? null,
       priority: o.priority ?? null,
       pinned: o.pinned ?? false,
+      workingOn: o.workingOn ?? false,
+      workingOnAt: o.workingOnAt ?? null,
       archived,
       note: o.note ?? null,
       lastActivity: s.lastActivity,
@@ -95,7 +109,9 @@ export function merge(
       deployProduction: o.deployProduction || null,
       port: o.port ?? s.port,
       aiEngine: o.aiEngine ?? "claude",
+      aiModel: o.aiModel?.trim() || null,
       aiFullAccess: o.aiFullAccess ?? false,
+      attachments: o.attachments ?? [],
       overridden,
     };
   });

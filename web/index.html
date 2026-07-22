@@ -3,36 +3,42 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>psm · projects manager</title>
+    <title>psm · workspace cockpit</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
         <span class="logo">psm</span>
-        <span class="tag">projects manager</span>
+        <span class="tag">workspace cockpit</span>
       </div>
       <div class="search-wrap">
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
+        <button id="cloud-open" class="btn" title="PSM Pro account, sync, and encrypted backups">☁&nbsp;Cloud</button>
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
-        <button id="rules-open" class="btn" title="Edit the shared AI house rules">House&nbsp;rules</button>
+        <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
+        <button id="skills-open" class="btn" title="Skills the agents have used">Skills</button>
         <button id="new-open" class="btn" title="Create a new project">＋&nbsp;New</button>
         <button id="export" class="btn" title="Regenerate PROJECTS.md">Export&nbsp;MD</button>
         <button id="rescan" class="btn btn-primary" title="Re-scan the workspace">Rescan</button>
       </div>
     </header>
 
-    <section class="stats" id="stats"></section>
+    <nav class="quick-switch" id="quick-switch" aria-label="Open workspaces"></nav>
 
-    <nav class="filters" id="filters"></nav>
+    <div id="home-page">
+      <section class="stats" id="stats"></section>
 
-    <main id="board" class="board"></main>
+      <nav class="filters" id="filters"></nav>
 
-    <footer class="foot">
-      <span id="foot-note"></span>
-    </footer>
+      <main id="board" class="board"></main>
+
+      <footer class="foot">
+        <span id="foot-note"></span>
+      </footer>
+    </div>
 
     <!-- edit drawer -->
     <div class="drawer-backdrop" id="backdrop" hidden></div>
@@ -56,6 +62,9 @@
         </label>
         <label class="check">
           <input type="checkbox" id="d-pinned" /> Pin to top
+        </label>
+        <label class="check">
+          <input type="checkbox" id="d-working" /> Working on now
         </label>
         <label>Description
           <textarea id="d-description" rows="3" placeholder="Override the auto description…"></textarea>
@@ -82,6 +91,9 @@
             <option value="codex">Codex</option>
           </select>
         </label>
+        <label>AI model
+          <input id="d-model" type="text" list="ai-models" placeholder="default for selected engine" spellcheck="false" />
+        </label>
         <label class="check">
           <input type="checkbox" id="d-full" /> AI full access (run commands, not just edit)
         </label>
@@ -104,7 +116,11 @@
           <span class="ws-name" id="ws-name">—</span>
           <span class="ws-status" id="ws-status">idle</span>
         </div>
-        <button class="icon-btn" id="ws-close" aria-label="Close workspace">✕</button>
+        <div class="ws-head-actions">
+          <button id="usage-open" class="btn" title="View usage for this project's selected AI model">Usage</button>
+          <button class="btn" id="ws-working" title="Manually show or hide this project in Working on">Mark working</button>
+          <button class="btn" id="ws-close" aria-label="Return home">← Home</button>
+        </div>
       </header>
       <div class="ws-runbar" id="ws-runbar">
         <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" />
@@ -113,12 +129,93 @@
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
       </div>
       <div class="ws-tabs" id="ws-tabs">
+        <button class="ws-tab" data-pane="plan">Plan</button>
+        <button class="ws-tab" data-pane="capabilities">Capabilities</button>
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
         <button class="ws-tab" data-pane="ai">AI</button>
+        <button class="ws-tab" data-pane="session">Session</button>
         <button class="ws-tab" data-pane="deploy">Deploy</button>
       </div>
       <div class="ws-panes">
+        <div class="ws-plan" id="ws-plan" data-pane="plan" hidden>
+          <div class="plan-toolbar">
+            <div class="plan-heading">
+              <div class="plan-heading-row">
+                <h2 id="plan-title">Implementation plan</h2>
+                <span class="plan-status" id="plan-status">none</span>
+                <span class="plan-revision" id="plan-revision"></span>
+              </div>
+              <p id="plan-notes"></p>
+            </div>
+            <div class="plan-actions">
+              <button class="btn" id="plan-new-session">＋ New planner session</button>
+              <button class="btn" id="plan-add-phase">＋ Phase</button>
+              <button class="btn" id="plan-discard" hidden>Discard</button>
+              <button class="btn btn-primary" id="plan-save" hidden>Save &amp; review</button>
+              <button class="btn btn-primary" id="plan-confirm" hidden>Confirm &amp; start working</button>
+            </div>
+          </div>
+          <div class="plan-review" id="plan-review" hidden></div>
+          <div class="plan-editor" id="plan-editor"></div>
+          <section class="planner-session" id="planner-session">
+            <header class="planner-session-head">
+              <div>
+                <div class="planner-session-title-row">
+                  <h3>Planning room</h3>
+                  <span class="planner-loop-status" id="planner-loop-status">idle</span>
+                </div>
+                <p id="planner-loop-message">Start a read-only planner session. A second model reviews each revision before confirmation.</p>
+              </div>
+              <button class="btn" id="planner-cancel" hidden>Stop planning</button>
+            </header>
+            <div class="planner-participants" id="planner-participants"></div>
+            <div class="planner-agent-tabs" id="planner-agent-tabs">
+              <button class="planner-agent-tab on" data-planner-role="planner">Planner</button>
+              <button class="planner-agent-tab" data-planner-role="reviewer">Reviewer</button>
+            </div>
+            <div class="planner-transcript" id="planner-transcript">
+              <div class="planner-empty">The planning transcript will appear here.</div>
+            </div>
+            <div class="planner-activity" id="planner-activity" hidden>
+              <span class="spinner"></span><span id="planner-activity-text">Planning…</span>
+            </div>
+            <div class="planner-composer">
+              <textarea id="planner-message" rows="3" placeholder="Describe the work to plan, or send feedback on the current plan…"></textarea>
+              <button class="btn btn-primary" id="planner-send">Start planning</button>
+            </div>
+            <p class="planner-safety">Planner and reviewer sessions are technically read-only. Confirmation starts a fresh normal project-agent session with implementation permissions.</p>
+          </section>
+        </div>
+        <div class="ws-capabilities" id="ws-capabilities" data-pane="capabilities" hidden>
+          <div class="cap-toolbar">
+            <div>
+              <h2>Capabilities</h2>
+              <p>Attach workspace tools to this project. psm writes project config; Claude or Codex runs the tool.</p>
+            </div>
+            <div class="cap-toolbar-actions">
+              <button class="btn" id="cap-refresh">Refresh catalog</button>
+              <button class="btn btn-primary" id="cap-custom-open">＋ Custom MCP</button>
+            </div>
+          </div>
+          <div class="cap-body">
+            <div class="cap-list" id="cap-list"></div>
+            <aside class="cap-preview" id="cap-preview" hidden>
+              <div class="cap-preview-head">
+                <div>
+                  <span class="cap-eyebrow">Review before writing</span>
+                  <h3 id="cap-preview-title">Attachment preview</h3>
+                </div>
+                <button class="icon-btn" id="cap-preview-close" aria-label="Close preview">✕</button>
+              </div>
+              <div id="cap-preview-body"></div>
+              <div class="cap-preview-actions">
+                <button class="btn" id="cap-preview-cancel">Cancel</button>
+                <button class="btn btn-primary" id="cap-preview-confirm">Confirm</button>
+              </div>
+            </aside>
+          </div>
+        </div>
         <div class="ws-console" id="ws-console" data-pane="logs"></div>
         <div class="ws-ai" data-pane="ai" hidden>
           <div class="ws-aibar">
@@ -126,6 +223,8 @@
               <option value="claude">Claude Code</option>
               <option value="codex">Codex</option>
             </select>
+            <input id="ws-model" class="ws-model" type="text" list="ai-models" placeholder="default model" title="Model id or alias" spellcheck="false" />
+            <span class="ws-model-current" id="ws-model-current" title="Model used by the current AI session">model: default</span>
             <label class="ws-full" title="Let the AI run shell commands, not just edit files">
               <input type="checkbox" id="ws-full" /> Full access
             </label>
@@ -142,6 +241,21 @@
             <button class="btn btn-primary" id="ws-send">Send</button>
             <button class="btn" id="ws-cancel" hidden>Stop</button>
           </div>
+        </div>
+        <div class="ws-session" id="ws-session" data-pane="session" hidden>
+          <div class="session-toolbar">
+            <div class="session-title">
+              <span id="session-state-dot" class="session-dot"></span>
+              <span id="session-state-text">idle</span>
+            </div>
+            <div class="session-toolbar-actions">
+              <button class="btn btn-primary" id="ws-session-answer" hidden>Answer</button>
+              <button class="btn" id="ws-session-refresh" title="Refresh session state">Refresh</button>
+            </div>
+          </div>
+          <div class="session-grid" id="ws-session-summary"></div>
+          <div class="session-current" id="ws-session-current"></div>
+          <div class="session-log" id="ws-session-log"></div>
         </div>
         <div class="ws-web" id="ws-web" data-pane="web" hidden>
           <div class="ws-webbar">
@@ -168,8 +282,62 @@
       </div>
     </section>
 
+    <!-- AI question popup -->
+    <div class="question-backdrop" id="question-backdrop" hidden></div>
+    <section class="modal question-modal" id="question-modal" role="dialog" aria-modal="true" aria-labelledby="question-title" hidden>
+      <div class="modal-head question-head">
+        <div>
+          <div class="question-project" id="question-project">AI question</div>
+          <h2 id="question-title">AI needs your input</h2>
+        </div>
+        <button class="icon-btn" id="question-close" aria-label="Answer later">✕</button>
+      </div>
+      <form class="question-form" id="question-form">
+        <div class="modal-body question-body" id="question-body"></div>
+        <div class="modal-foot">
+          <button class="btn" type="button" id="question-later">Later</button>
+          <button class="btn btn-primary" type="submit" id="question-submit">Answer</button>
+        </div>
+      </form>
+    </section>
+
     <!-- shared modal backdrop -->
     <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+
+    <!-- provider subscription usage -->
+    <section class="modal modal-wide usage-modal" id="usage-modal" role="dialog" aria-modal="true" aria-labelledby="usage-title" hidden>
+      <div class="modal-head">
+        <div class="usage-head-copy">
+          <h2 id="usage-title">Project model usage</h2>
+          <div class="usage-scope" id="usage-scope">No project selected</div>
+          <div class="usage-updated" id="usage-updated">Not refreshed</div>
+        </div>
+        <div class="usage-head-actions">
+          <button class="btn" type="button" id="usage-refresh">Refresh</button>
+          <button class="icon-btn" id="usage-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body usage-body" id="usage-body">
+        <div class="usage-empty">Reading provider usage...</div>
+      </div>
+    </section>
+
+    <!-- PSM paid cloud -->
+    <section class="modal modal-wide cloud-modal" id="cloud-modal" role="dialog" aria-modal="true" aria-labelledby="cloud-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="cloud-title">PSM Cloud</h2>
+          <p class="hint">Account, billing, metadata sync, and encrypted source backups.</p>
+        </div>
+        <div class="cloud-head-actions">
+          <button class="btn" id="cloud-refresh">Refresh</button>
+          <button class="icon-btn" id="cloud-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body cloud-body" id="cloud-body">
+        <div class="cloud-empty">Loading PSM Cloud…</div>
+      </div>
+    </section>
 
     <!-- new project -->
     <div class="modal" id="new-modal" hidden>
@@ -185,24 +353,102 @@
           <textarea id="new-desc" rows="2" placeholder="One line on what it is (optional)"></textarea>
         </label>
         <label class="check"><input type="checkbox" id="new-git" checked /> Initialize a git repo</label>
-        <label class="check"><input type="checkbox" id="new-rules" checked /> Add the house rules as CLAUDE.md</label>
+        <label class="check"><input type="checkbox" id="new-rules" checked /> Write the house rules into CLAUDE.md / AGENTS.md</label>
+        <fieldset class="practices" id="new-practices">
+          <legend>Adopt engineering practices</legend>
+          <p class="hint">Opt in per project — psm scaffolds starter files (VERSION, CHANGELOG, docs/adr, CI) and folds each into the AI's rules.</p>
+          <div id="new-practices-list" class="practice-list"></div>
+        </fieldset>
         <p class="hint">Creates a folder in the workspace, alongside the other projects.</p>
       </div>
       <div class="modal-foot">
         <button class="btn" id="new-cancel">Cancel</button>
+        <button class="btn" id="new-brainstorm">Brainstorm first</button>
         <button class="btn btn-primary" id="new-create">Create &amp; open</button>
+      </div>
+    </div>
+
+    <!-- custom MCP catalog entry -->
+    <div class="modal modal-wide cap-custom-modal" id="cap-custom-modal" hidden>
+      <div class="modal-head">
+        <div>
+          <h2>Add custom MCP</h2>
+          <p class="hint">Untrusted: psm will show the exact executable or URL before it stores anything.</p>
+        </div>
+        <button class="icon-btn" id="cap-custom-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body cap-custom-form">
+        <div class="cap-custom-grid">
+          <label>ID
+            <input id="cap-custom-id" type="text" placeholder="my-mcp" spellcheck="false" />
+          </label>
+          <label>Transport
+            <select id="cap-custom-transport">
+              <option value="stdio">Local executable (stdio)</option>
+              <option value="http">HTTP endpoint</option>
+            </select>
+          </label>
+        </div>
+        <label>Title
+          <input id="cap-custom-title" type="text" placeholder="My MCP server" />
+        </label>
+        <label>Summary
+          <textarea id="cap-custom-summary" rows="2" placeholder="What this capability exposes"></textarea>
+        </label>
+        <div id="cap-custom-stdio">
+          <label>Executable
+            <input id="cap-custom-command" type="text" placeholder="node" spellcheck="false" />
+          </label>
+          <label>Arguments — JSON array
+            <textarea id="cap-custom-args" rows="3" spellcheck="false" placeholder='["/absolute/path/server.js"]'></textarea>
+          </label>
+        </div>
+        <div id="cap-custom-http" hidden>
+          <label>HTTP URL
+            <input id="cap-custom-url" type="url" placeholder="https://example.com/mcp" spellcheck="false" />
+          </label>
+          <label>Bearer token environment variable (optional)
+            <input id="cap-custom-bearer" type="text" placeholder="MY_MCP_TOKEN" spellcheck="false" />
+          </label>
+        </div>
+        <label>Required environment variable names — comma separated
+          <input id="cap-custom-env" type="text" placeholder="TOKEN_NAME, ACCOUNT_ID" spellcheck="false" />
+        </label>
+        <label>Usage guidance
+          <textarea id="cap-custom-usage" rows="3" placeholder="When should the AI use this capability?"></textarea>
+        </label>
+        <p class="cap-secret-warning">Do not paste secret values. Only variable names are accepted and stored.</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="cap-custom-cancel">Cancel</button>
+        <button class="btn btn-primary" id="cap-custom-review">Review exact command</button>
       </div>
     </div>
 
     <!-- house rules editor -->
     <div class="modal modal-wide" id="rules-modal" hidden>
       <div class="modal-head">
-        <h2>House rules</h2>
+        <div>
+          <h2>House rules</h2>
+          <p class="hint">Layered: the workspace baseline plus an optional per-project overlay, both injected into that project's AI system prompt.</p>
+        </div>
         <button class="icon-btn" id="rules-close" aria-label="Close">✕</button>
       </div>
       <div class="modal-body">
-        <p class="hint">Appended to every project's AI system prompt (and dropped into new projects as CLAUDE.md). Markdown.</p>
+        <div class="rules-scope">
+          <label>Scope
+            <select id="rules-scope">
+              <option value="__global__">Workspace baseline (all projects)</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint" id="rules-hint">Applied to every project's AI system prompt. Markdown.</p>
         <textarea id="rules-text" class="rules-text" spellcheck="false"></textarea>
+        <fieldset class="practices" id="rules-practices" hidden>
+          <legend>Engineering practices for this project</legend>
+          <p class="hint">Toggling a practice updates <code>.psm/profile.json</code>, scaffolds any missing starter files, and refreshes the managed CLAUDE.md / AGENTS.md region.</p>
+          <div id="rules-practices-list" class="practice-list"></div>
+        </fieldset>
       </div>
       <div class="modal-foot">
         <button class="btn" id="rules-cancel">Cancel</button>
@@ -210,8 +456,39 @@
       </div>
     </div>
 
+    <!-- skills used by the agents -->
+    <div class="modal modal-wide" id="skills-modal" hidden>
+      <div class="modal-head">
+        <div>
+          <h2>Skills used by the agents</h2>
+          <p class="hint">Mined from Claude Code transcripts (<code>~/.claude/projects</code>). Shows which skills have actually been invoked, how often, and where.</p>
+        </div>
+        <button class="icon-btn" id="skills-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="skills-scope">
+          <label>Scope
+            <select id="skills-scope">
+              <option value="">Whole workspace</option>
+            </select>
+          </label>
+          <button class="btn" id="skills-refresh">Refresh</button>
+        </div>
+        <div id="skills-body" class="skills-body"><div class="cloud-empty">Loading…</div></div>
+      </div>
+    </div>
+
+    <datalist id="ai-models">
+      <option value="opus"></option>
+      <option value="sonnet"></option>
+      <option value="fable"></option>
+      <option value="gpt-5.5"></option>
+      <option value="gpt-5"></option>
+    </datalist>
+
     <div class="toast" id="toast" hidden></div>
 
     <script src="./app.js"></script>
+    <script src="./cloud.js"></script>
   </body>
 </html>

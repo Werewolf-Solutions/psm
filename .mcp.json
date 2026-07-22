@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "psm-werewolf": {
+      "command": "npm",
+      "args": [
+        "--prefix",
+        "/home/oznerol/projects/werewolf-solutions/werewolf-dapp",
+        "run",
+        "mcp"
+      ],
+      "env": {
+        "WEREWOLF_MCP_PROFILE": "psm-readonly",
+        "WEREWOLF_API_KEY": "${WEREWOLF_API_KEY}"
+      }
+    }
+  }
+}

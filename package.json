@@ -1,13 +1,14 @@
 {
   "name": "psm",
   "version": "0.1.0",
-  "description": "Projects manager — scans the workspace, classifies every project, and serves a live dashboard (also regenerates PROJECTS.md).",
+  "description": "Workspace cockpit and project glue — scans every project, runs work sessions, and helps reuse capabilities before creating new projects.",
   "type": "module",
   "scripts": {
     "server": "tsx src/server/index.ts",
     "scan": "tsx src/cli.ts scan",
     "build:md": "tsx src/cli.ts build",
     "list": "tsx src/cli.ts list",
+    "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -1,5 +1,11 @@
 node_modules/
 *.log
 .psm-sessions.json
+.psm-plans/
+.psm-attachments-state.json
+.psm-catalog-cache.json
+.psm-catalog.json
+.psm-cloud-device.json
+.psm-cloud.json
 
 notes.md
