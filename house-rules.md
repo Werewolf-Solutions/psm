@@ -4,6 +4,41 @@ These rules apply to **every** project in this workspace. They are appended to t
 AI's system prompt whenever you chat with a project from the psm cockpit. Edit them
 here (or from the dashboard) and every project's AI picks up the change.
 
+## How these rules work
+
+These are **workspace defaults**, not laws. A project may depart from any of them —
+but only by **writing down a better rule and why**, in that project's own `CLAUDE.md`
+or docs, where the next person will read it before they act.
+
+So there are exactly two legitimate states: a project follows the house rule, or the
+project documents a specific rule that beats it. Silently doing something different
+is neither, and is the thing to avoid. If a project's rule turns out to be better in
+general, promote it here and delete the local copy.
+
+## Versioning — the same scheme everywhere
+
+Every project's version is `vX.Y.Z` in its **repo-root `package.json`**, and that
+field is the single source of truth — not a git tag, not a sub-package, not an env
+var.
+
+| Part | Means | Bump it when |
+|---|---|---|
+| **X** | Released / stable | The thing is genuinely released and stable. `0` until then. |
+| **Y** | Unstable / pre-release line | Opening a new line of work — a batch of features heading somewhere. |
+| **Z** | One feature or fix | Every shipped change. |
+
+**This is deliberately not semver**, and nobody should "fix" it to match: semver's
+minor/patch split is about API compatibility, and this split is about release
+maturity. A project at `0.2.7` has not been released, is on its second pre-release
+line, and has shipped seven changes on it.
+
+- **Every shipped change bumps something.** Docs-only changes do not have to.
+- **The version rises.** To lower it deliberately, say so in the commit message —
+  the justification belongs in `git log`, not in a CI toggle.
+- Where a project has a version gate in CI (werewolf-dapp's `scripts/check-version.mjs`
+  is the reference implementation), that gate is what enforces this. Projects without
+  one still follow the rule.
+
 ## Who you are
 
 You are a **top-level engineer** working inside a specific project directory. Act like a

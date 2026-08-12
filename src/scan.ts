@@ -1,7 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readProjectId } from "./identity.ts";
+import { activeLinks } from "./links.ts";
 import type { Config, Signals } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -358,6 +361,7 @@ export function scanOne(dir: string, name: string): Signals {
   return {
     name,
     path: dir,
+    psmId: readProjectId(dir),
     hasGit,
     gitBranch,
     gitVersion,
@@ -377,16 +381,58 @@ export function scanOne(dir: string, name: string): Signals {
   };
 }
 
-export function scanWorkspace(cfg: Config): Signals[] {
-  const root = workspaceRoot(cfg);
-  const ignore = new Set(cfg.ignore);
-  const out: Signals[] = [];
-  for (const e of fs.readdirSync(root, { withFileTypes: true })) {
+/** Project folders directly inside a linked directory-of-projects. */
+function childProjectDirs(root: string, ignore: Set<string>): string[] {
+  let entries: fs.Dirent[] = [];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return []; // a linked folder can vanish; the link list reports that separately
+  }
+  const dirs: string[] = [];
+  for (const e of entries) {
     if (!e.isDirectory()) continue;
     if (e.name.startsWith(".")) continue;
     if (ignore.has(e.name)) continue;
-    out.push(scanOne(path.join(root, e.name), e.name));
+    dirs.push(path.join(root, e.name));
+  }
+  return dirs;
+}
+
+/**
+ * Project names are the key for overrides and for the AI session store, so two
+ * linked sources holding a folder of the same name must not collapse into one.
+ * Qualify the newcomer with its parent folder, and fall back to a path digest in
+ * the (rare) case that still collides.
+ */
+function uniqueName(dir: string, taken: Map<string, string>): string {
+  const base = path.basename(dir);
+  if (!taken.has(base)) return base;
+  const qualified = `${path.basename(path.dirname(dir))}/${base}`;
+  if (!taken.has(qualified)) return qualified;
+  return `${base}#${createHash("sha256").update(dir).digest("hex").slice(0, 6)}`;
+}
+
+/** Scan every linked source: config's workspace root in dev, links everywhere. */
+export function scanSources(cfg: Config): Signals[] {
+  const ignore = new Set(cfg.ignore);
+  const out: Signals[] = [];
+  const seenDirs = new Set<string>();
+  const takenNames = new Map<string, string>();
+
+  for (const link of activeLinks(cfg)) {
+    const dirs = link.kind === "project" ? [link.path] : childProjectDirs(link.path, ignore);
+    for (const dir of dirs) {
+      if (seenDirs.has(dir)) continue; // linked twice (e.g. project inside a linked workspace)
+      seenDirs.add(dir);
+      const name = uniqueName(dir, takenNames);
+      takenNames.set(name, dir);
+      out.push(scanOne(dir, name));
+    }
   }
   out.sort((a, b) => (b.lastActivity || "").localeCompare(a.lastActivity || ""));
   return out;
 }
+
+/** @deprecated the workspace root is now one link among several — use scanSources. */
+export const scanWorkspace = scanSources;

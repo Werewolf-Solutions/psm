@@ -10,8 +10,18 @@
     "runCommand": "npm run dev",
     "port": 5173,
     "aiFullAccess": true,
-    "aiEngine": "codex",
-    "aiModel": "gpt-5.5"
+    "aiEngine": "claude",
+    "aiModel": "sonnet",
+    "aiEffort": "medium"
+  },
+  "nfc-pay": {
+    "category": "Flagship & platform",
+    "status": "active",
+    "priority": "high",
+    "stack": "Flutter, Android/iOS, Stripe Terminal",
+    "description": "Werewolf NFC Pay — Android-first merchant app for Werewolf users and businesses to accept contactless payments through Stripe Terminal Tap to Pay.",
+    "next": "Install the Android SDK/JDK/ADB, register nfc-pay against the test Werewolf database, then validate simulated and physical Tap to Pay on a compatible Android phone.",
+    "runCommand": "flutter run"
   },
   "daedalus": {
     "category": "Flagship & platform",
@@ -321,12 +331,14 @@
         "manifestDigest": "sha256:7a1b576fe20f0b150c60a5218960cd1cf74e5e9ea631fb6eff13edd09694b55a",
         "attachedAt": 1784559897780
       }
-    ]
+    ],
+    "runCommand": "npm run dev"
   },
   "__workspace__": {
     "aiFullAccess": true,
     "aiEngine": "codex",
-    "aiModel": "gpt-5.5"
+    "aiModel": "gpt-5.6-sol",
+    "aiEffort": "ultra"
   },
   "atlas": {
     "status": "active",
@@ -360,5 +372,15 @@
   },
   "zzz-psm-smoke": {
     "description": "smoke test"
+  },
+  "todo-app": {
+    "status": "active",
+    "pinned": true,
+    "aiFullAccess": false,
+    "runCommand": "npm run dev",
+    "port": 5200,
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.6-sol",
+    "aiEffort": "high"
   }
 }

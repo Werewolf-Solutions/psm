@@ -7,6 +7,18 @@ import { fileURLToPath } from "node:url";
 import { getProjects, writeMarkdown } from "../index.ts";
 import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
+import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
+import {
+  acceptsPairedOrigins,
+  canRunCommands,
+  describeMode,
+  isLocal,
+  psmMode,
+  requiresAuth,
+  scansImplicitly,
+} from "../mode.ts";
+import { ensureProjectId } from "../identity.ts";
+import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
 import type { Attachment, Capability, Override, Project } from "../types.ts";
 import { activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, type ProcKind } from "./procs.ts";
@@ -41,7 +53,23 @@ import {
   saveCustomCapability,
 } from "./catalog.ts";
 import { PlanConflictError, PlanNotFoundError, PlanValidationError, planStore } from "./plans.ts";
+import { ensurePreviewProxy } from "./preview.ts";
+import { BrowseError, browse } from "./browse.ts";
+import { StopError, machineProcesses, stopProcess } from "./machine.ts";
+import {
+  agentGuard,
+  agentIdentity,
+  agentSecret,
+  hostedOrigins,
+  isLoopbackHost,
+  rotateAgentToken,
+} from "./agent.ts";
+import { authConfigured, currentUserId, hostedAuth, identify, werewolfAuthEnabled } from "./auth.ts";
+import { AuthError, SESSION_COOKIE, cookieOptions, sessionContext, signOut } from "./session.ts";
+import { SSO_CALLBACK_PATH, completeSso, ssoAuthorizeUrl, ssoAvailability } from "./sso.ts";
+import { runAsUser } from "../store.ts";
 import { subscriptionUsage } from "./usage.ts";
+import { modelCatalog } from "./models.ts";
 import {
   applyManagedRegion,
   PRACTICES,
@@ -57,12 +85,11 @@ import { collectSkillUsage } from "./skills.ts";
 import { runtimeServices, startRuntimeDiscovery } from "./runtime.ts";
 import {
   account as cloudAccount,
-  authenticate as cloudAuthenticate,
   billingPortal as cloudBillingPortal,
   checkout as cloudCheckout,
   cloudAvailable,
   devices as cloudDevices,
-  logout as cloudLogout,
+  projectTodos as cloudProjectTodos,
   pullSync,
   pushSync,
   revokeDevice as cloudRevokeDevice,
@@ -83,22 +110,131 @@ const PORT = Number(process.env.PORT || 4317);
 
 const app = express();
 app.disable("x-powered-by");
-const isLoopback = (hostname: string) =>
-  hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-app.use((req, res, next) => {
+
+/**
+ * Everything that touches this machine — running commands, streaming logs, AI
+ * turns, reading folders, writing project files — is registered on `local` and
+ * mounted only when the process has a machine under it.
+ *
+ * The distinction matters more than a flag would: in hosted mode `local` is
+ * never mounted, so those routes do not exist at all and a routing mistake
+ * cannot reach a shell. See docs/hosted-psm-plan.md, "Nothing that shells out".
+ */
+const local = express.Router();
+
+// Local modes keep the loopback guard, now with one deliberate hole for a paired
+// hosted origin (see server/agent.ts). Hosted mode is a public server: it has no
+// loopback guard and requires a session on every route instead.
+if (isLocal()) {
+  app.use(agentGuard({ publicPaths: ["/api/agent"] }));
+} else {
+  app.use(hostedAuth());
+}
+app.use(express.json({ limit: "2mb" }));
+
+// Everything downstream reads and writes state through src/store.ts, which
+// resolves paths against whoever this request belongs to. Locally that is always
+// the one owner; hosted it is the verified session's subject, so an account can
+// only ever reach its own rows.
+app.use((req, _res, next) => {
+  // Resolve the signed-in session once, here, and carry both the owner and the
+  // Werewolf access token for the rest of the request. Cloud calls borrow the
+  // token from this context rather than keeping a second session of their own.
+  sessionContext(req)
+    .then(({ userId, accessToken }) => runAsUser(userId || currentUserId(req), next, accessToken))
+    .catch(() => runAsUser(currentUserId(req), next));
+});
+
+/* ---------- signing in (werewolf-dapp) ----------
+ * Registered in every mode: hosted psm needs it to let anyone in at all, and
+ * local psm uses the same account for cloud sync and backups. psm never stores
+ * a password — it forwards the pair to dapp once and keeps only the session.
+ * -------------------------------------------------------------------------- */
+
+/* ---- Sign in with Werewolf (authorization code + PKCE) ----
+ * A full-page handoff, the way todo-app does it: leave for dapp's consent
+ * screen, come back with a code, redeem it here. The verifier stays server-side.
+ */
+app.get("/api/cloud/sso/start", async (req, res) => {
+  const availability = ssoAvailability(req);
+  if (!availability.available) return res.status(400).json({ error: availability.reason });
   try {
-    const host = new URL(`http://${req.headers.host || "invalid"}`).hostname;
-    if (!isLoopback(host)) return res.status(403).json({ error: "psm only accepts loopback requests" });
-    const origin = req.headers.origin;
-    if (origin && !isLoopback(new URL(origin).hostname)) {
-      return res.status(403).json({ error: "cross-origin requests are not allowed" });
-    }
-    next();
-  } catch {
-    return res.status(400).json({ error: "invalid Host or Origin header" });
+    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
+      ? req.query.returnTo // same-origin paths only — never an open redirect
+      : "/";
+    res.redirect(await ssoAuthorizeUrl(req, returnTo));
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message || "Could not reach Werewolf" });
   }
 });
-app.use(express.json({ limit: "2mb" }));
+
+app.get(SSO_CALLBACK_PATH, async (req, res) => {
+  try {
+    const { cookie, returnTo } = await completeSso(req);
+    res.cookie(SESSION_COOKIE, cookie, cookieOptions());
+    res.redirect(returnTo);
+  } catch (err) {
+    const message = (err as AuthError).message || "Sign-in failed";
+    // Hand the reason back through the page rather than a bare error body: the
+    // user is mid-redirect and has nowhere else to read it.
+    res.redirect(`/?sso_error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  await signOut(req).catch(() => undefined);
+  res.clearCookie(SESSION_COOKIE, { ...cookieOptions(), maxAge: undefined });
+  res.json({ ok: true });
+});
+
+// Who am I — the page asks this on load to decide between the board and the
+// login screen. Never 401s: "nobody" is a valid answer, and the only one a
+// signed-out local psm can give.
+app.get("/api/auth/session", async (req, res) => {
+  const user = await identify(req).catch(() => null);
+  const sso = ssoAvailability(req);
+  res.json({
+    user,
+    required: requiresAuth(),
+    provider: werewolfAuthEnabled() ? "werewolf" : "jwt",
+    // the page offers "Sign in with Werewolf" only where it can actually work
+    sso: { available: sso.available, reason: sso.reason },
+  });
+});
+
+/* ---------- agent identity + pairing ---------- */
+
+/** True when the caller is the local cockpit rather than a paired remote origin. */
+function localRequest(req: express.Request): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true; // same-origin navigations send no Origin
+  try {
+    return isLoopbackHost(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Discovery: a hosted page fetches this to find out whether an agent is running
+// on this machine. Public by design, and deliberately says nothing about
+// projects — only that psm is here and what version it is.
+local.get("/api/agent", (_req, res) => {
+  res.json({ ...agentIdentity(), pairingRequired: acceptsPairedOrigins() });
+});
+
+// The token itself is loopback-only: the local cockpit shows it so the user can
+// paste it into the hosted page. A paired origin can never read it back.
+local.get("/api/agent/token", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "read the pairing token from the local cockpit" });
+  const secret = agentSecret();
+  res.json({ token: secret.token, createdAt: secret.createdAt, origins: hostedOrigins() });
+});
+
+local.post("/api/agent/token/rotate", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "rotate the pairing token from the local cockpit" });
+  const secret = rotateAgentToken();
+  res.json({ ok: true, token: secret.token, createdAt: secret.createdAt });
+});
 
 const OVERRIDE_KEYS: (keyof Override)[] = [
   "status",
@@ -117,14 +253,108 @@ const OVERRIDE_KEYS: (keyof Override)[] = [
   "port",
   "aiEngine",
   "aiModel",
+  "aiEffort",
   "aiFullAccess",
 ];
 
 app.get("/api/projects", (_req, res) => {
-  res.json({ projects: getProjects(), statusMeta: STATUS_META });
+  // version rides along on the dashboard's bootstrap payload — psm has no build
+  // step, so the footer reads it from here rather than from a baked-in constant.
+  // The mode rides along too: the dashboard shows a different empty state when
+  // nothing is scanned implicitly, and hides what this posture cannot do.
+  res.json({
+    projects: getProjects(),
+    statusMeta: STATUS_META,
+    version: APP_VERSION,
+    mode: psmMode(),
+    capabilities: {
+      runsCommands: canRunCommands(),
+      scansImplicitly: scansImplicitly(),
+      canLink: isLocal(),
+    },
+  });
 });
 
-app.get("/api/runtime/services", async (req, res) => {
+/* ---------- linked sources ---------- */
+
+// What psm is looking at. In dev this includes the configured workspace root,
+// flagged `implicit` so the UI does not offer to unlink something it cannot.
+app.get("/api/links", (_req, res) => {
+  res.json({
+    mode: psmMode(),
+    canLink: isLocal(),
+    links: isLocal() ? describeLinks(loadConfig()) : [],
+  });
+});
+
+app.post("/api/links", (req, res) => {
+  if (!isLocal()) return res.status(400).json({ error: "this psm has no local filesystem to link" });
+  const kind = String(req.body?.kind ?? "");
+  if (kind !== "workspace" && kind !== "project")
+    return res.status(400).json({ error: "kind must be 'workspace' or 'project'" });
+  try {
+    const link = addLink(kind, String(req.body?.path ?? ""), req.body?.label);
+    res.json({ ok: true, link, links: describeLinks(loadConfig()) });
+  } catch (err) {
+    if (err instanceof LinkError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: (err as Error).message || "could not link that folder" });
+  }
+});
+
+app.delete("/api/links/:id", (req, res) => {
+  if (!isLocal()) return res.status(400).json({ error: "this psm has no local filesystem to link" });
+  const removed = removeLink(req.params.id);
+  res.status(removed ? 200 : 404).json({
+    ok: removed,
+    ...(removed ? { links: describeLinks(loadConfig()) } : { error: "no such link" }),
+  });
+});
+
+/* ---------- what is running on this machine ----------
+ * psm knows about the processes it started; this is about the ones it did not —
+ * yesterday's dev server still holding 5173 so today's climbs to 5176. Local
+ * modes only: a hosted psm has no machine to look at.
+ * -------------------------------------------------------------------------- */
+
+// project roots, so a process's cwd can be named rather than just shown
+const machineRoots = () =>
+  getProjects().map((project) => ({
+    name: project.name,
+    path: project.path,
+    // so a dead dev server can still say which port it was meant to serve
+    port: project.port ?? null,
+  }));
+
+local.get("/api/machine/processes", (_req, res) => {
+  try {
+    res.json({ processes: machineProcesses({ roots: machineRoots() }) });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message || "could not read the process list" });
+  }
+});
+
+local.post("/api/machine/processes/:pid/stop", (req, res) => {
+  try {
+    res.json(stopProcess(Number(req.params.pid), req.body?.force === true));
+  } catch (err) {
+    if (err instanceof StopError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: (err as Error).message || "could not stop that process" });
+  }
+});
+
+// Read-only directory listing for the link picker. Local modes only: a hosted
+// psm has no disk, and must not pretend otherwise.
+local.get("/api/fs/browse", (req, res) => {
+  if (!isLocal()) return res.status(404).json({ error: "not available in hosted mode" });
+  try {
+    res.json(browse(typeof req.query.path === "string" ? req.query.path : undefined));
+  } catch (err) {
+    if (err instanceof BrowseError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: (err as Error).message || "could not read that folder" });
+  }
+});
+
+local.get("/api/runtime/services", async (req, res) => {
   try {
     res.json({ services: await runtimeServices(req.query.refresh === "1") });
   } catch (err) {
@@ -154,29 +384,6 @@ app.get("/api/cloud/status", async (_req, res) => {
   }
 });
 
-app.post("/api/cloud/:action(login|register)", async (req, res) => {
-  try {
-    const action = req.params.action as "login" | "register";
-    const email = String(req.body?.email || "").trim();
-    const password = String(req.body?.password || "");
-    const name = String(req.body?.name || "").trim();
-    if (!email || !password) return res.status(400).json({ error: "email and password are required" });
-    const value = await cloudAuthenticate(action, { email, password, ...(name ? { name } : {}) });
-    res.status(action === "register" ? 201 : 200).json({ signedIn: true, account: value, settings: cloudSettings() });
-  } catch (err) {
-    cloudError(res, err);
-  }
-});
-
-app.post("/api/cloud/logout", async (_req, res) => {
-  try {
-    await cloudLogout();
-    res.json({ ok: true });
-  } catch (err) {
-    cloudError(res, err);
-  }
-});
-
 app.post("/api/cloud/billing/:action(checkout|portal)", async (req, res) => {
   try {
     const url = req.params.action === "portal"
@@ -198,9 +405,38 @@ app.delete("/api/cloud/devices/:id", async (req, res) => {
   catch (err) { cloudError(res, err); }
 });
 
+/**
+ * A project's todos, from the Werewolf board. Read-only — the Todos pane links
+ * out to the todo app for anything that changes a task.
+ *
+ * Not being signed in to Werewolf is a normal state here, not a failure: most
+ * of psm works without a cloud session. It answers 200 with `signedIn: false`
+ * so the pane can offer the Cloud sign-in rather than render an error.
+ */
+/* Where "Open in Todo" points. Defaults to the local dev server because the
+ * todo app is not deployed yet and psm is a localhost tool; set TODO_APP_URL to
+ * https://todo.werewolf.solutions once it is. */
+const todoAppUrl = () =>
+  (process.env.TODO_APP_URL || "http://localhost:5200").replace(/\/+$/, "");
+
+app.get("/api/projects/:name/todos", async (req, res) => {
+  try {
+    const data = await cloudProjectTodos(req.params.name);
+    res.json({ signedIn: true, appUrl: todoAppUrl(), ...data });
+  } catch (err: any) {
+    // refreshSession throws a bare 401 ("Reconnect this device to PSM Cloud")
+    // when there is no stored refresh token — see cloud.ts:275-283.
+    if (err?.status === 401) {
+      res.json({ signedIn: false, appUrl: todoAppUrl(), project: req.params.name, tasks: [] });
+      return;
+    }
+    cloudError(res, err);
+  }
+});
+
 const CLOUD_OVERRIDE_KEYS: (keyof Override)[] = [
   "status", "category", "description", "stack", "next", "priority", "pinned",
-  "workingOn", "workingOnAt", "archived", "note", "port", "aiEngine", "aiModel",
+  "workingOn", "workingOnAt", "archived", "note", "port", "aiEngine", "aiModel", "aiEffort",
 ];
 
 function safeCloudState() {
@@ -419,7 +655,7 @@ function desiredAttachmentChange(
   return { capabilities, attachments };
 }
 
-app.get("/api/catalog", (_req, res) => {
+local.get("/api/catalog", (_req, res) => {
   try {
     const projects = getProjects();
     const attachments = new Map(
@@ -477,7 +713,7 @@ app.get("/api/catalog", (_req, res) => {
   }
 });
 
-app.post("/api/catalog/custom/preview", (req, res) => {
+local.post("/api/catalog/custom/preview", (req, res) => {
   try {
     const { manifest, capability } = prepareCustomCapability(req.body);
     const command = manifest.mcp.transport === "stdio"
@@ -517,7 +753,7 @@ app.post("/api/catalog/custom/preview", (req, res) => {
   }
 });
 
-app.post("/api/catalog/custom", (req, res) => {
+local.post("/api/catalog/custom", (req, res) => {
   if (req.body?.confirmed !== true) {
     return res.status(400).json({ error: "custom capabilities require an explicit confirmed preview" });
   }
@@ -533,7 +769,7 @@ app.post("/api/catalog/custom", (req, res) => {
   }
 });
 
-app.post("/api/projects/:name/attachments/preview", (req, res) => {
+local.post("/api/projects/:name/attachments/preview", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
@@ -557,7 +793,7 @@ app.post("/api/projects/:name/attachments/preview", (req, res) => {
   }
 });
 
-app.post("/api/projects/:name/attachments", (req, res) => {
+local.post("/api/projects/:name/attachments", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   if (req.body?.confirmed !== true) {
@@ -585,7 +821,7 @@ app.post("/api/projects/:name/attachments", (req, res) => {
   }
 });
 
-app.delete("/api/projects/:name/attachments/:ref", (req, res) => {
+local.delete("/api/projects/:name/attachments/:ref", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   if (req.body?.confirmed !== true) {
@@ -618,7 +854,7 @@ app.delete("/api/projects/:name/attachments/:ref", (req, res) => {
 });
 
 // Update the human-curated override for one project.
-app.patch("/api/projects/:name", (req, res) => {
+local.patch("/api/projects/:name", (req, res) => {
   const name = req.params.name;
   const all = loadOverrides();
   const current: Override = all[name] || {};
@@ -645,30 +881,43 @@ app.patch("/api/projects/:name", (req, res) => {
   res.json({ ok: true, override: all[name] || null });
 });
 
+// Assign a stable id to a project (writes <project>/.psm/identity.json). Idempotent:
+// a project that already has an id keeps it.
+local.post("/api/projects/:name/id", (req, res) => {
+  const project = findProject(String(req.params.name));
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    const identity = ensureProjectId(project.path, project.name);
+    res.json({ ok: true, id: identity.id, createdAt: identity.createdAt });
+  } catch (err) {
+    res.status(500).json({ error: `could not assign an id: ${(err as Error).message}` });
+  }
+});
+
 // Regenerate PROJECTS.md from the current merged state.
-app.post("/api/export", (_req, res) => {
+local.post("/api/export", (_req, res) => {
   const file = writeMarkdown();
   res.json({ ok: true, file });
 });
 
 /* ---------- house rules (workspace-wide AI system prompt baseline) ---------- */
 
-app.get("/api/house-rules", (_req, res) => {
+local.get("/api/house-rules", (_req, res) => {
   res.json({ content: readGlobalRules() });
 });
 
-app.put("/api/house-rules", (req, res) => {
+local.put("/api/house-rules", (req, res) => {
   writeGlobalRules(String(req.body?.content ?? ""));
   res.json({ ok: true });
 });
 
 /* the practices catalog (static reference for the UI) */
-app.get("/api/practices", (_req, res) => {
+local.get("/api/practices", (_req, res) => {
   res.json({ practices: PRACTICES });
 });
 
 /* per-project rules overlay + adopted practices */
-app.get("/api/projects/:name/rules", (req, res) => {
+local.get("/api/projects/:name/rules", (req, res) => {
   const project = findProject(String(req.params.name));
   if (!project) return res.status(404).json({ error: "unknown project" });
   const profile = readProfile(project.path);
@@ -680,7 +929,7 @@ app.get("/api/projects/:name/rules", (req, res) => {
   });
 });
 
-app.put("/api/projects/:name/rules", (req, res) => {
+local.put("/api/projects/:name/rules", (req, res) => {
   const project = findProject(String(req.params.name));
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
@@ -691,7 +940,7 @@ app.put("/api/projects/:name/rules", (req, res) => {
   }
 });
 
-app.put("/api/projects/:name/practices", (req, res) => {
+local.put("/api/projects/:name/practices", (req, res) => {
   const project = findProject(String(req.params.name));
   if (!project) return res.status(404).json({ error: "unknown project" });
   const requested = Array.isArray(req.body?.practices) ? req.body.practices.map(String) : [];
@@ -706,7 +955,7 @@ app.put("/api/projects/:name/practices", (req, res) => {
 
 /* ---------- skills used by the agents (mined from Claude Code transcripts) ---------- */
 
-app.get("/api/skills-usage", (req, res) => {
+local.get("/api/skills-usage", (req, res) => {
   const name = req.query.project ? String(req.query.project) : "";
   let dir: string | undefined;
   if (name) {
@@ -719,13 +968,36 @@ app.get("/api/skills-usage", (req, res) => {
 
 /* ---------- create a new project ---------- */
 
-app.post("/api/projects/new", (req, res) => {
+/**
+ * Where a new project folder goes. Dev has the configured workspace root; agent
+ * mode has only what was linked, so a directory-of-projects link is required —
+ * a single-project link is not somewhere new projects can be created.
+ */
+function newProjectRoot(linkId?: unknown): string {
+  const links = describeLinks(loadConfig()).filter((link) => link.kind === "workspace" && link.exists);
+  if (linkId) {
+    const chosen = links.find((link) => link.id === String(linkId));
+    if (!chosen) throw new Error("that linked folder is not available");
+    return chosen.path;
+  }
+  if (scansImplicitly()) return workspaceRoot(loadConfig());
+  if (!links.length)
+    throw new Error("link a directory of projects first — new projects need somewhere to live");
+  return links[0].path;
+}
+
+local.post("/api/projects/new", (req, res) => {
   const name = String(req.body?.name ?? "").trim();
   // folder-safe: starts alphanumeric, then letters/digits/._- ; no slashes/traversal
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))
     return res.status(400).json({ error: "use letters, digits, dashes or underscores" });
 
-  const root = workspaceRoot(loadConfig());
+  let root: string;
+  try {
+    root = newProjectRoot(req.body?.linkId);
+  } catch (err) {
+    return res.status(400).json({ error: (err as Error).message });
+  }
   const dir = path.join(root, name);
   if (!dir.startsWith(root + path.sep))
     return res.status(400).json({ error: "invalid name" });
@@ -793,7 +1065,7 @@ function commandForKind(proj: ReturnType<typeof findProject> & {}, kind: ProcKin
 }
 
 // live status of every managed process (for dashboard "running" dots)
-app.get("/api/procs", (_req, res) => {
+local.get("/api/procs", (_req, res) => {
   res.json({ procs: allProcStates() });
 });
 
@@ -815,6 +1087,7 @@ function upsertWorkingItem(items: Map<string, any>, name: string) {
       snippet: "",
       engine: null,
       model: null,
+      effort: null,
       actualModel: null,
     };
     items.set(name, item);
@@ -837,6 +1110,7 @@ function workingItems() {
       snippet: ai.snippet || item.snippet,
       engine: ai.engine,
       model: ai.model,
+      effort: ai.effort,
       actualModel: ai.actualModel,
     });
     if (ai.waiting) item.reasons.push("Needs answer");
@@ -869,12 +1143,12 @@ function workingItems() {
 }
 
 // projects currently being worked on — live AI, running process, or manual mark
-app.get("/api/sessions", (_req, res) => {
+local.get("/api/sessions", (_req, res) => {
   res.json({ sessions: workingItems() });
 });
 
 // Leave the Working on lane completely: clear the human mark and stop live work.
-app.post("/api/projects/:name/working/stop", (req, res) => {
+local.post("/api/projects/:name/working/stop", (req, res) => {
   const name = req.params.name;
   const all = loadOverrides();
   const current = all[name];
@@ -894,11 +1168,11 @@ app.post("/api/projects/:name/working/stop", (req, res) => {
 });
 
 // current provider usage limit for an engine (so the AI pane can warn upfront)
-app.get("/api/ai/limit", (req, res) => {
+local.get("/api/ai/limit", (req, res) => {
   res.json({ limit: aiLimit(parseEngine(req.query.engine, "claude")) });
 });
 
-app.get("/api/projects/:name/ai/usage", async (req, res) => {
+local.get("/api/projects/:name/ai/usage", async (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   const force = req.query.refresh === "1";
@@ -909,24 +1183,50 @@ app.get("/api/projects/:name/ai/usage", async (req, res) => {
   res.json(await subscriptionUsage(engine, model, force));
 });
 
+// Always ask the installed CLI for its current catalog. Model availability can
+// change independently of psm releases and may be scoped by account or policy.
+local.get("/api/projects/:name/ai/models", async (req, res) => {
+  const target = aiTarget(req.params.name);
+  if (!target) return res.status(404).json({ error: "unknown project" });
+  const engine = parseEngine(req.query.engine, target.aiEngine);
+  res.setHeader("Cache-Control", "no-store");
+  res.json(await modelCatalog(engine, target.path));
+});
+
 // the workspace-wide chat target (its saved engine / full-access defaults)
-app.get("/api/workspace", (_req, res) => {
+local.get("/api/workspace", (_req, res) => {
   const o = loadOverrides()[WORKSPACE_NAME] || {};
   res.json({
     name: WORKSPACE_NAME,
     aiEngine: o.aiEngine || "claude",
     aiModel: parseModel(o.aiModel),
+    aiEffort: parseEffort(o.aiEffort),
     aiFullAccess: !!o.aiFullAccess,
   });
 });
 
+// Dev mode: hand back a loopback port that mirrors the project's dev server with
+// the inspector injected, so clicks inside the preview can be turned into notes.
+local.get("/api/projects/:name/preview", async (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  const port = Number(req.query.port) || project.port;
+  if (!port) return res.status(400).json({ error: `no web port set for ${project.name}` });
+  try {
+    const proxyPort = await ensurePreviewProxy(port);
+    res.json({ ok: true, target: port, port: proxyPort, url: `http://localhost:${proxyPort}/` });
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message || "could not start the preview proxy" });
+  }
+});
+
 // snapshot status for one project+kind
-app.get("/api/projects/:name/proc", (req, res) => {
+local.get("/api/projects/:name/proc", (req, res) => {
   res.json(procState(req.params.name, parseKind(req.query.kind)));
 });
 
 // start the project's run (or deploy) command
-app.post("/api/projects/:name/run", (req, res) => {
+local.post("/api/projects/:name/run", (req, res) => {
   const kind = parseKind(req.body?.kind);
   const proj = findProject(req.params.name);
   if (!proj) return res.status(404).json({ error: "unknown project" });
@@ -939,13 +1239,13 @@ app.post("/api/projects/:name/run", (req, res) => {
 });
 
 // stop it
-app.post("/api/projects/:name/stop", (req, res) => {
+local.post("/api/projects/:name/stop", (req, res) => {
   const stopped = stop(req.params.name, parseKind(req.body?.kind));
   res.json({ ok: true, stopped });
 });
 
 // SSE log stream (replays buffer, then live)
-app.get("/api/projects/:name/logs/stream", (req, res) => {
+local.get("/api/projects/:name/logs/stream", (req, res) => {
   subscribe(res, req.params.name, parseKind(req.query.kind));
 });
 
@@ -960,6 +1260,11 @@ function parseModel(v: unknown, fallback: string | null = null): string | null {
   return model || fallback || null;
 }
 
+function parseEffort(v: unknown, fallback: string | null = null): string | null {
+  const effort = typeof v === "string" ? v.trim().toLowerCase() : "";
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(effort) ? effort : fallback || null;
+}
+
 // The AI target: a real project, or the workspace-wide chat (cwd = workspace root).
 function aiTarget(name: string) {
   if (name === WORKSPACE_NAME) {
@@ -969,6 +1274,7 @@ function aiTarget(name: string) {
       path: workspaceRoot(loadConfig()),
       aiEngine: (o.aiEngine as AiEngine) || "claude",
       aiModel: parseModel(o.aiModel),
+      aiEffort: parseEffort(o.aiEffort),
       aiFullAccess: !!o.aiFullAccess,
     };
   }
@@ -1046,17 +1352,17 @@ function planningRole(value: unknown): "planner" | "reviewer" {
   return value === "reviewer" ? "reviewer" : "planner";
 }
 
-app.get("/api/projects/:name/planner/state", (req, res) => {
+local.get("/api/projects/:name/planner/state", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
-  res.json(planningOverview(project.name, project.aiEngine, project.aiModel));
+  res.json(planningOverview(project.name, project.aiEngine, project.aiModel, project.aiEffort));
 });
 
-app.get("/api/projects/:name/planner/stream", (req, res) => {
+local.get("/api/projects/:name/planner/stream", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).end();
   const role = planningRole(req.query.role);
-  const overview = planningOverview(project.name, project.aiEngine, project.aiModel);
+  const overview = planningOverview(project.name, project.aiEngine, project.aiModel, project.aiEffort);
   const participant = overview[role];
   subscribeAi(
     res,
@@ -1064,40 +1370,45 @@ app.get("/api/projects/:name/planner/stream", (req, res) => {
     project.path,
     participant.engine,
     participant.model,
+    participant.effort,
   );
 });
 
-app.post("/api/projects/:name/planner/start", (req, res) => {
+local.post("/api/projects/:name/planner/start", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   const engine = parseEngine(req.body?.engine, project.aiEngine);
   const model = parseModel(req.body?.model, engine === project.aiEngine ? project.aiModel : null);
+  const effort = parseEffort(req.body?.effort, engine === project.aiEngine ? project.aiEffort : null);
   const result = startPlanningLoop(
     project.name,
     project.path,
     engine,
     model,
+    effort,
     String(req.body?.brief ?? ""),
   );
   res.status(result.ok ? 202 : 409).json(result);
 });
 
-app.post("/api/projects/:name/planner/message", (req, res) => {
+local.post("/api/projects/:name/planner/message", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   const engine = parseEngine(req.body?.engine, project.aiEngine);
   const model = parseModel(req.body?.model, engine === project.aiEngine ? project.aiModel : null);
+  const effort = parseEffort(req.body?.effort, engine === project.aiEngine ? project.aiEffort : null);
   const result = sendPlanningMessage(
     project.name,
     project.path,
     engine,
     model,
+    effort,
     String(req.body?.message ?? ""),
   );
   res.status(result.ok ? 202 : 409).json(result);
 });
 
-app.post("/api/projects/:name/planner/question", (req, res) => {
+local.post("/api/projects/:name/planner/question", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   const role = planningRole(req.body?.role);
@@ -1112,18 +1423,18 @@ app.post("/api/projects/:name/planner/question", (req, res) => {
   res.status(result.ok ? 200 : 409).json(result);
 });
 
-app.post("/api/projects/:name/planner/cancel", (req, res) => {
+local.post("/api/projects/:name/planner/cancel", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   res.json({ ok: true, cancelled: cancelPlanning(project.name) });
 });
 
-app.get("/api/projects/:name/plans", (req, res) => {
+local.get("/api/projects/:name/plans", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
     let plans = planStore.list(project.name);
-    const overview = planningOverview(project.name, project.aiEngine, project.aiModel);
+    const overview = planningOverview(project.name, project.aiEngine, project.aiModel, project.aiEffort);
     if (plans[0]?.status === "reviewing" && !overview.state && !overview.reviewer.busy) {
       planStore.markReviewUnavailable(project.name, plans[0].id, plans[0].revision);
       plans = planStore.list(project.name);
@@ -1134,7 +1445,7 @@ app.get("/api/projects/:name/plans", (req, res) => {
   }
 });
 
-app.get("/api/projects/:name/plans/:id", (req, res) => {
+local.get("/api/projects/:name/plans/:id", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
@@ -1146,7 +1457,7 @@ app.get("/api/projects/:name/plans/:id", (req, res) => {
   }
 });
 
-app.put("/api/projects/:name/plans/:id", (req, res) => {
+local.put("/api/projects/:name/plans/:id", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
@@ -1166,6 +1477,7 @@ app.put("/api/projects/:name/plans/:id", (req, res) => {
         project.path,
         project.aiEngine,
         project.aiModel,
+        project.aiEffort,
         plan,
       );
       reviewQueued = ai.ok;
@@ -1177,7 +1489,7 @@ app.put("/api/projects/:name/plans/:id", (req, res) => {
   }
 });
 
-app.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
+local.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
   try {
@@ -1192,6 +1504,7 @@ app.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
       project.path,
       project.aiEngine,
       project.aiModel,
+      project.aiEffort,
       kickoffPrompt(plan),
       project.aiFullAccess,
     );
@@ -1208,27 +1521,30 @@ app.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
 });
 
 // transcript stream (replays history, then live)
-app.get("/api/projects/:name/ai/stream", (req, res) => {
+local.get("/api/projects/:name/ai/stream", (req, res) => {
   const t = aiTarget(req.params.name);
   if (!t) return res.status(404).end();
   const engine = parseEngine(req.query.engine, t.aiEngine);
-  subscribeAi(res, t.name, t.path, engine, parseModel(req.query.model, t.aiModel));
+  const model = parseModel(req.query.model, t.aiModel);
+  const effort = parseEffort(req.query.effort, t.aiEffort);
+  subscribeAi(res, t.name, t.path, engine, model, effort);
 });
 
 // send one message to the project's (or workspace's) AI
-app.post("/api/projects/:name/ai", (req, res) => {
+local.post("/api/projects/:name/ai", (req, res) => {
   const t = aiTarget(req.params.name);
   if (!t) return res.status(404).json({ error: "unknown project" });
   const engine = parseEngine(req.body?.engine, t.aiEngine);
   const model = parseModel(req.body?.model, t.aiModel);
+  const effort = parseEffort(req.body?.effort, t.aiEffort);
   const fullAccess = req.body?.fullAccess ?? t.aiFullAccess;
   const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
-  const r = aiSend(t.name, t.path, engine, model, String(req.body?.message ?? ""), !!fullAccess, extra);
+  const r = aiSend(t.name, t.path, engine, model, effort, String(req.body?.message ?? ""), !!fullAccess, extra);
   res.status(r.ok ? 200 : 409).json(r);
 });
 
 // answer a structured question and resume the same provider session
-app.post("/api/projects/:name/ai/question", (req, res) => {
+local.post("/api/projects/:name/ai/question", (req, res) => {
   const t = aiTarget(req.params.name);
   if (!t) return res.status(404).json({ error: "unknown project" });
   const answers = req.body?.answers && typeof req.body.answers === "object" ? req.body.answers : {};
@@ -1246,18 +1562,18 @@ app.post("/api/projects/:name/ai/question", (req, res) => {
 });
 
 // cancel the in-flight turn
-app.post("/api/projects/:name/ai/cancel", (req, res) => {
+local.post("/api/projects/:name/ai/cancel", (req, res) => {
   res.json({ ok: true, cancelled: aiCancel(req.params.name) });
 });
 
-app.get("/api/projects/:name/ai/state", (req, res) => {
+local.get("/api/projects/:name/ai/state", (req, res) => {
   const t = aiTarget(req.params.name);
   if (!t) return res.status(404).json({ error: "unknown project" });
-  res.json(aiState(t.name, t.aiEngine, t.aiModel));
+  res.json(aiState(t.name, t.aiEngine, t.aiModel, t.aiEffort));
 });
 
 // "where we left off" recap — regenerated only when the transcript has grown
-app.get("/api/projects/:name/ai/recap", async (req, res) => {
+local.get("/api/projects/:name/ai/recap", async (req, res) => {
   try {
     res.json({ summary: await aiRecap(req.params.name) });
   } catch {
@@ -1265,12 +1581,31 @@ app.get("/api/projects/:name/ai/recap", async (req, res) => {
   }
 });
 
+// The one line that decides whether this process can touch the machine.
+if (isLocal()) app.use(local);
+
 app.use(express.static(WEB_DIR));
 
-app.listen(PORT, "127.0.0.1", () => {
-  console.log(`psm dashboard → http://localhost:${PORT}`);
+// Hosted psm faces the internet, so it binds every interface and lets the
+// platform's proxy terminate TLS. Local psm never leaves loopback.
+const HOST = isLocal() ? "127.0.0.1" : process.env.PSM_BIND || "0.0.0.0";
+
+app.listen(PORT, HOST, () => {
+  console.log(`psm ${describeMode()}`);
+  console.log(`  → http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`);
+  if (acceptsPairedOrigins()) {
+    console.log(`  → pairing token: ${agentSecret().token}`);
+    console.log(`  → paired origins: ${hostedOrigins().join(", ") || "none"}`);
+  }
+  if (requiresAuth() && !authConfigured()) {
+    console.warn("  ! hosted mode without auth configured — every request will 503");
+    console.warn("  ! set PSM_AUTH_JWKS_URL (or PSM_AUTH_SECRET) and restart");
+  }
 });
 
-startRuntimeDiscovery();
-setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
-setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();
+// Background work that reads the disk belongs to the machine, not the host.
+if (isLocal()) {
+  startRuntimeDiscovery();
+  setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
+  setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();
+}

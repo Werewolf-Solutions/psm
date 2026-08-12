@@ -1,3 +1,5 @@
+import { scansImplicitly } from "../mode.ts";
+
 export type RuntimeServiceSource = "local" | "production" | "override";
 
 export interface RuntimeService {
@@ -9,6 +11,8 @@ export interface RuntimeService {
   localUrl: string;
   productionUrl: string;
   localAvailable: boolean;
+  /** Did the target this mode selected answer? */
+  reachable: boolean;
   checkedAt: number;
   error?: string;
 }
@@ -33,11 +37,12 @@ const werewolf: RuntimeService = {
   id: "werewolf",
   title: "Werewolf Solutions API",
   project: "werewolf-dapp",
-  activeUrl: fixedUrl || productionUrl,
-  source: fixedUrl ? "override" : "production",
+  activeUrl: productionUrl, // replaced on first refresh by targetUrlForMode()
+  source: "production",
   localUrl,
   productionUrl,
   localAvailable: false,
+  reachable: false,
   checkedAt: 0,
 };
 
@@ -83,21 +88,43 @@ export function currentWerewolfRuntime(): RuntimeService {
   return copyService();
 }
 
+/**
+ * Which Werewolf API this psm talks to — decided by the mode, not by probing.
+ *
+ *   dev              the local werewolf-dapp (127.0.0.1:3000). `npm run server`
+ *                    is for working on the workspace, and it should not be
+ *                    reaching production accounts.
+ *   agent / hosted   werewolf.solutions, because those are the real deployment
+ *                    and they share one account with the hosted front end.
+ *
+ * `WEREWOLF_API_URL` overrides both. This used to pick whichever answered a
+ * probe, which meant the target silently changed depending on whether a local
+ * dapp happened to be running — the same class of surprise as an inherited
+ * `PORT`. It is still probed, but only to *report* whether it is reachable.
+ */
+export function targetUrlForMode(): { url: string; source: RuntimeServiceSource } {
+  if (fixedUrl) return { url: fixedUrl, source: "override" };
+  return scansImplicitly()
+    ? { url: localUrl, source: "local" }
+    : { url: productionUrl, source: "production" };
+}
+
 export async function refreshWerewolfRuntime(force = false): Promise<RuntimeService> {
-  if (fixedUrl) {
-    werewolf.checkedAt = Date.now();
-    return copyService();
-  }
+  const target = targetUrlForMode();
+  werewolf.activeUrl = target.url;
+  werewolf.source = target.source;
+
   if (!force && werewolf.checkedAt && Date.now() - werewolf.checkedAt < DISCOVERY_TTL_MS) {
     return copyService();
   }
   if (discovery) return { ...(await discovery) };
 
   discovery = (async () => {
-    const probe = await probeWerewolfApi(localUrl);
-    werewolf.localAvailable = probe.available;
-    werewolf.activeUrl = probe.available ? localUrl : productionUrl;
-    werewolf.source = probe.available ? "local" : "production";
+    // Probe the target we are actually going to use, so the UI can say "the
+    // local dapp is not running" instead of quietly signing you in to production.
+    const probe = await probeWerewolfApi(target.url);
+    werewolf.localAvailable = target.source === "local" ? probe.available : false;
+    werewolf.reachable = probe.available;
     werewolf.checkedAt = Date.now();
     if (probe.error) werewolf.error = probe.error;
     else delete werewolf.error;

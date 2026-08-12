@@ -62,55 +62,42 @@ async function loadCloud(force) {
   }
 }
 
+/**
+ * Signed out. There is no sign-in form here any more: psm has exactly one way
+ * in, and it is the same "Continue with Werewolf" handoff the rest of the app
+ * uses. This panel just points at it.
+ */
 function renderCloudLogin() {
   const runtime = CLOUD.runtime || STATE.runtimeServices.werewolf || {};
   const target = runtime.source === "local"
-    ? "Local Werewolf"
+    ? "Local Werewolf (werewolf-dapp on this machine)"
     : runtime.source === "override"
       ? "Configured Werewolf"
       : "Werewolf production";
+  const unreachable = runtime.reachable === false;
+
   $("#cloud-body").innerHTML = [
     '<div class="cloud-login">',
       '<div class="cloud-section">',
-        "<h3>Sign in to PSM Cloud</h3>",
-        "<p>Your existing local workspace stays available without an account.</p>",
-        '<label>Name <input id="cloud-name" type="text" autocomplete="name" placeholder="Only needed for a new account" /></label>',
-        '<label>Email <input id="cloud-email" type="email" autocomplete="email" /></label>',
-        '<label>Password <input id="cloud-password" type="password" autocomplete="current-password" minlength="8" /></label>',
+        "<h3>Sign in to use PSM Cloud</h3>",
+        "<p>Sync, encrypted backups, devices and billing need a Werewolf account. Your local workspace works without one.</p>",
         '<div class="cloud-actions">',
-          '<button class="btn btn-primary" id="cloud-login">Sign in</button>',
-          '<button class="btn" id="cloud-register">Create account</button>',
+          '<button class="btn btn-primary" id="cloud-sso">🐺 Continue with Werewolf</button>',
         "</div>",
       "</div>",
-      CLOUD.authError ? '<div class="cloud-warning">Previous session unavailable: ' + esc(CLOUD.authError) + "</div>" : "",
-      '<p class="hint">Target: ' + esc(target) + " · " + esc(runtime.activeUrl || "discovering…") + '. Sign-in uses /auth/login and /auth/me. Refresh credentials use the OS keyring when available and otherwise remain in memory only.</p>',
+      CLOUD.authError ? '<div class="cloud-warning">' + esc(CLOUD.authError) + "</div>" : "",
+      unreachable
+        ? '<div class="cloud-warning">' + esc(target) + " is not answering at " + esc(runtime.activeUrl || "?") +
+          ". Start it, or set WEREWOLF_API_URL.</div>"
+        : "",
+      '<p class="hint">Target: ' + esc(target) + " · " + esc(runtime.activeUrl || "resolving…") + "</p>",
     "</div>",
   ].join("");
 
-  async function submit(action) {
-    const email = $("#cloud-email").value.trim();
-    const password = $("#cloud-password").value;
-    const name = $("#cloud-name").value.trim();
-    if (!email || password.length < 8) return toast("Enter an email and a password of at least 8 characters");
-    CLOUD.busy = true;
-    try {
-      const result = await cloudApi("/api/cloud/" + action, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, name }),
-      });
-      CLOUD.signedIn = true;
-      CLOUD.account = result.account;
-      CLOUD.settings = result.settings;
-      toast(action === "register" ? "PSM Cloud account created" : "Signed in to PSM Cloud");
-      await loadCloud(true);
-    } catch (error) {
-      toast(error.message);
-      CLOUD.busy = false;
-    }
-  }
-  $("#cloud-login").onclick = () => submit("login");
-  $("#cloud-register").onclick = () => submit("register");
+  $("#cloud-sso").onclick = () => {
+    const returnTo = location.pathname + location.search + location.hash;
+    location.href = "/api/cloud/sso/start?returnTo=" + encodeURIComponent(returnTo);
+  };
 }
 
 function cloudSnapshotRow(snapshot) {
@@ -143,7 +130,7 @@ function renderCloudAccount() {
       "</section>",
     ].join("");
     $("#cloud-logout").onclick = async () => {
-      await cloudApi("/api/cloud/logout", { method: "POST" }).catch(() => {});
+      await cloudApi("/api/auth/logout", { method: "POST" }).catch(() => {});
       CLOUD.signedIn = false;
       CLOUD.account = null;
       renderCloud();
@@ -211,7 +198,7 @@ function renderCloudAccount() {
   ].join("");
 
   $("#cloud-logout").onclick = async () => {
-    await cloudApi("/api/cloud/logout", { method: "POST" }).catch(() => {});
+    await cloudApi("/api/auth/logout", { method: "POST" }).catch(() => {});
     CLOUD.signedIn = false;
     CLOUD.account = null;
     CLOUD.snapshots = [];

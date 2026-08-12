@@ -80,6 +80,18 @@ export interface Practice {
   scaffolds: boolean;
 }
 
+/**
+ * A project's stable identity, stored committed at `<project>/.psm/identity.json`.
+ * Lives in the project folder so the id survives renames, moves, and clones — unlike the
+ * folder name, which is only a human handle.
+ */
+export interface ProjectIdentity {
+  version: 1;
+  id: string; // prj_<20 hex>
+  name: string; // folder name when the id was minted, for provenance only
+  createdAt: number;
+}
+
 /** Per-project psm config, stored committed at `<project>/.psm/profile.json`. */
 export interface ProjectProfile {
   version: 1;
@@ -183,6 +195,7 @@ export interface Attachment {
 export interface Signals {
   name: string;
   path: string;
+  psmId: string | null; // stable id from .psm/identity.json, null until assigned
   hasGit: boolean;
   gitBranch: string | null;
   gitVersion: string | null; // nearest tag / describe
@@ -219,6 +232,7 @@ export interface Override {
   port?: number; // dev-server port, for the web-preview pane
   aiEngine?: "claude" | "codex"; // which CLI the AI pane shells out to
   aiModel?: string; // optional model id/alias passed to the selected AI CLI
+  aiEffort?: string; // optional reasoning/effort level passed to the selected AI CLI
   aiFullAccess?: boolean; // let the AI run commands, not just edit files
   attachments?: Attachment[]; // human-approved capability bindings
 }
@@ -227,6 +241,7 @@ export interface Override {
 export interface Project {
   name: string;
   path: string;
+  id: string | null; // stable id, null until one is assigned for this project
   status: Status;
   category: string;
   description: string;
@@ -251,6 +266,7 @@ export interface Project {
   port: number | null;
   aiEngine: "claude" | "codex";
   aiModel: string | null;
+  aiEffort: string | null;
   aiFullAccess: boolean;
   attachments: Attachment[];
   // provenance so the UI can show what's auto vs overridden

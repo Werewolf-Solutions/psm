@@ -20,6 +20,7 @@ const SESSIONS_FILE = path.resolve(__dirname, "..", "..", ".psm-sessions.json");
 
 export type AiEngine = "claude" | "codex";
 export type AiModel = string | null;
+export type AiEffort = string | null;
 
 /** Reserved session key for the workspace-wide chat (cwd = workspace root). */
 export const WORKSPACE_NAME = "__workspace__";
@@ -52,8 +53,8 @@ export interface PlanningLoopState {
   project: string;
   active: boolean;
   stage: "idle" | "planning" | "reviewing" | "revising" | "ready" | "ready-with-issues" | "error";
-  planner: { engine: AiEngine; model: AiModel };
-  reviewer: { engine: AiEngine; model: AiModel };
+  planner: { engine: AiEngine; model: AiModel; effort: AiEffort };
+  reviewer: { engine: AiEngine; model: AiModel; effort: AiEffort };
   round: number;
   maxRounds: number;
   planId: string | null;
@@ -97,6 +98,7 @@ interface AiSession {
   cwd: string;
   engine: AiEngine;
   model: AiModel; // configured model id/alias for the selected CLI
+  effort: AiEffort; // configured reasoning/effort level for the selected CLI
   actualModel: AiModel; // last model reported by the CLI, if available
   sessionId: string | null; // provider session/thread id, for resume
   busy: boolean;
@@ -121,6 +123,7 @@ interface AiSession {
 interface QueuedTurn {
   message: string;
   model: AiModel;
+  effort: AiEffort;
   fullAccess: boolean;
   extraContext: string;
 }
@@ -128,6 +131,11 @@ interface QueuedTurn {
 function normalizeModel(model: unknown): AiModel {
   const trimmed = typeof model === "string" ? model.trim() : "";
   return trimmed || null;
+}
+
+function normalizeEffort(effort: unknown): AiEffort {
+  const trimmed = typeof effort === "string" ? effort.trim().toLowerCase() : "";
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(trimmed) ? trimmed : null;
 }
 
 function modelLabel(model: AiModel): string {
@@ -152,6 +160,7 @@ const sessions = new Map<string, AiSession>();
 interface PersistedSession {
   engine: AiEngine;
   model?: string | null;
+  effort?: string | null;
   actualModel?: string | null;
   sessionId: string | null;
   log: AiEvent[];
@@ -176,6 +185,7 @@ function loadSessions(): void {
       cwd: "", // filled in when the client next subscribes
       engine: p.engine || "claude",
       model: normalizeModel(p.model),
+      effort: normalizeEffort(p.effort),
       actualModel: normalizeModel(p.actualModel),
       sessionId: p.sessionId ?? null,
       busy: false,
@@ -200,10 +210,11 @@ function saveSessions(): void {
   saveTimer = null;
   const map: Record<string, PersistedSession> = {};
   for (const [name, s] of sessions) {
-    if (!s.sessionId && !s.log.length && !s.model && !s.actualModel && !s.question) continue;
+    if (!s.sessionId && !s.log.length && !s.model && !s.effort && !s.actualModel && !s.question) continue;
     map[name] = {
       engine: s.engine,
       model: s.model,
+      effort: s.effort,
       actualModel: s.actualModel,
       sessionId: s.sessionId,
       log: s.log.slice(-MAX_PERSIST),
@@ -264,12 +275,13 @@ loadSessions();
 const sys = (text: string): AiEvent => ({ t: Date.now(), role: "system", text });
 const short = (id: string | null) => (id ? id.slice(0, 8) : "—");
 
-function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel): AiSession {
+function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel, effort: AiEffort): AiSession {
   const normalizedModel = normalizeModel(model);
+  const normalizedEffort = normalizeEffort(effort);
   let s = sessions.get(name);
   if (!s) {
     s = {
-      name, cwd, engine, model: normalizedModel, actualModel: null, sessionId: null, busy: false, child: null,
+      name, cwd, engine, model: normalizedModel, effort: normalizedEffort, actualModel: null, sessionId: null, busy: false, child: null,
       log: [], subscribers: new Set(), summary: null, summaryAt: 0, queue: [], question: null,
     };
     sessions.set(name, s);
@@ -278,6 +290,7 @@ function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel)
     // switching engines starts a fresh conversation
     s.engine = engine;
     s.model = normalizedModel;
+    s.effort = normalizedEffort;
     s.actualModel = null;
     s.sessionId = null;
     s.summary = null;
@@ -289,6 +302,10 @@ function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel)
     s.model = normalizedModel;
     s.actualModel = null;
     pushEvent(s, sys(`— ${engine} model set to ${modelLabel(normalizedModel)} —`));
+  }
+  if (s.effort !== normalizedEffort) {
+    s.effort = normalizedEffort;
+    pushEvent(s, sys(`— ${engine} effort set to ${normalizedEffort || "default"} —`));
   }
   s.cwd = cwd;
   return s;
@@ -307,15 +324,16 @@ function broadcast(s: AiSession, event: string, data: unknown) {
   for (const res of s.subscribers) res.write(payload);
 }
 
-function resetConversation(name: string, cwd: string, engine: AiEngine, model: AiModel): AiSession {
+function resetConversation(name: string, cwd: string, engine: AiEngine, model: AiModel, effort: AiEffort): AiSession {
   const existing = sessions.get(name);
   if (existing?.busy || existing?.queue.length) {
     throw new Error(`${sessionIdentity(name).role} session is still working`);
   }
-  const s = getSession(name, cwd, engine, model);
+  const s = getSession(name, cwd, engine, model, effort);
   if (s.question) broadcast(s, "question-cleared", { id: s.question.id });
   s.engine = engine;
   s.model = normalizeModel(model);
+  s.effort = normalizeEffort(effort);
   s.actualModel = null;
   s.sessionId = null;
   s.log = [];
@@ -445,6 +463,7 @@ function continuePlanningAfterPlan(s: AiSession, plan: ImplementationPlan): Impl
     s.cwd,
     loop.reviewer.engine,
     loop.reviewer.model,
+    loop.reviewer.effort,
     modelReviewPrompt(reviewing, nextRound, loop.maxRounds),
     false,
     plannerSystemContext("reviewer"),
@@ -496,6 +515,7 @@ function continuePlanningAfterReview(s: AiSession, plan: ImplementationPlan): vo
     s.cwd,
     loop.planner.engine,
     loop.planner.model,
+    loop.planner.effort,
     revisionPrompt(plan),
     false,
     plannerSystemContext("planner"),
@@ -677,6 +697,7 @@ function statusPayload(s: AiSession) {
     project: identity.project,
     engine: s.engine,
     model: s.model,
+    effort: s.effort,
     actualModel: s.actualModel,
     hasSession: !!s.sessionId,
     question: s.question,
@@ -684,7 +705,12 @@ function statusPayload(s: AiSession) {
   };
 }
 
-export function aiState(name: string, fallbackEngine: AiEngine = "claude", fallbackModel: AiModel = null) {
+export function aiState(
+  name: string,
+  fallbackEngine: AiEngine = "claude",
+  fallbackModel: AiModel = null,
+  fallbackEffort: AiEffort = null,
+) {
   const s = sessions.get(name);
   if (!s) {
     const identity = sessionIdentity(name);
@@ -694,6 +720,7 @@ export function aiState(name: string, fallbackEngine: AiEngine = "claude", fallb
       project: identity.project,
       engine: fallbackEngine,
       model: normalizeModel(fallbackModel),
+      effort: normalizeEffort(fallbackEffort),
       actualModel: null,
       hasSession: false,
       question: null,
@@ -731,6 +758,7 @@ export function activeSessions() {
       name,
       engine: s.engine,
       model: s.model,
+      effort: s.effort,
       actualModel: s.actualModel,
       messages: s.log.filter((e) => e.role === "user").length,
       lastActive: lastEvent ? lastEvent.t : 0,
@@ -746,6 +774,14 @@ export function activeSessions() {
 }
 
 /** Build the argv for one turn (no shell — args are passed literally). */
+export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
+  const value = normalizeEffort(effort);
+  if (!value) return [];
+  return engine === "codex"
+    ? ["-c", `model_reasoning_effort="${value}"`]
+    : ["--effort", value];
+}
+
 function buildCommand(
   s: AiSession,
   message: string,
@@ -764,7 +800,7 @@ function buildCommand(
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : ["-s", "workspace-write"];
     const model = s.model ? ["--model", s.model] : [];
-    const base = ["--json", "--skip-git-repo-check", ...model, ...sandbox];
+    const base = ["--json", "--skip-git-repo-check", ...model, ...effortArgs(s.engine, s.effort), ...sandbox];
     if (s.sessionId) {
       const prompt = `${INTERACTION_RULES}\n\n---\n\n${message}`;
       return { cmd: "codex", args: ["exec", ...base, "resume", s.sessionId, prompt] };
@@ -776,6 +812,7 @@ function buildCommand(
   // claude (default)
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (s.model) args.push("--model", s.model);
+  args.push(...effortArgs(s.engine, s.effort));
   args.push(
     "--permission-mode",
     readOnly ? "plan" : fullAccess ? "bypassPermissions" : "acceptEdits",
@@ -935,11 +972,12 @@ export function send(
   cwd: string,
   engine: AiEngine,
   model: AiModel,
+  effort: AiEffort,
   message: string,
   fullAccess: boolean,
   extraContext = "",
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
-  const s = getSession(name, cwd, engine, model);
+  const s = getSession(name, cwd, engine, model, effort);
   if (!message.trim()) return { ok: false, error: "empty message" };
   if (s.question) return { ok: false, question: true, error: "AI is waiting for your answer" };
   // refuse to accept a turn into a known usage limit — it would just fail and
@@ -952,12 +990,12 @@ export function send(
 
   if (s.busy) {
     // a turn is in flight — hold this one and run it when the current turn ends
-    s.queue.push({ message, model: s.model, fullAccess, extraContext });
+    s.queue.push({ message, model: s.model, effort: s.effort, fullAccess, extraContext });
     broadcast(s, "queued", { depth: s.queue.length });
     return { ok: true, queued: true };
   }
 
-  startTurn(s, message, fullAccess, extraContext, s.model);
+  startTurn(s, message, fullAccess, extraContext, s.model, s.effort);
   return { ok: true };
 }
 
@@ -965,16 +1003,18 @@ function newPlanningState(
   project: string,
   plannerEngine: AiEngine,
   plannerModel: AiModel,
+  plannerEffort: AiEffort,
 ): PlanningLoopState {
   const now = Date.now();
   return {
     project,
     active: true,
     stage: "planning",
-    planner: { engine: plannerEngine, model: normalizeModel(plannerModel) },
+    planner: { engine: plannerEngine, model: normalizeModel(plannerModel), effort: normalizeEffort(plannerEffort) },
     reviewer: {
       engine: plannerEngine === "claude" ? "codex" : "claude",
       model: null,
+      effort: null,
     },
     round: 0,
     maxRounds: 3,
@@ -990,16 +1030,19 @@ export function planningOverview(
   project: string,
   fallbackEngine: AiEngine,
   fallbackModel: AiModel,
+  fallbackEffort: AiEffort,
 ) {
   const state = planningLoops.get(project) ?? null;
   const plannerEngine = state?.planner.engine ?? fallbackEngine;
   const plannerModel = state?.planner.model ?? fallbackModel;
+  const plannerEffort = state?.planner.effort ?? fallbackEffort;
   const reviewerEngine = state?.reviewer.engine ?? (fallbackEngine === "claude" ? "codex" : "claude");
   const reviewerModel = state?.reviewer.model ?? null;
+  const reviewerEffort = state?.reviewer.effort ?? null;
   return {
     state,
-    planner: aiState(planningSessionKey(project, "planner"), plannerEngine, plannerModel),
-    reviewer: aiState(planningSessionKey(project, "reviewer"), reviewerEngine, reviewerModel),
+    planner: aiState(planningSessionKey(project, "planner"), plannerEngine, plannerModel, plannerEffort),
+    reviewer: aiState(planningSessionKey(project, "reviewer"), reviewerEngine, reviewerModel, reviewerEffort),
   };
 }
 
@@ -1008,6 +1051,7 @@ export function startPlanningLoop(
   cwd: string,
   engine: AiEngine,
   model: AiModel,
+  effort: AiEffort,
   brief: string,
 ): { ok: boolean; error?: string; state?: PlanningLoopState; limited?: boolean } {
   const request = brief.trim();
@@ -1018,15 +1062,15 @@ export function startPlanningLoop(
       const restored = planStore.markReviewUnavailable(project, previous.id, previous.revision);
       broadcastProjectPlan(project, restored);
     }
-    const state = newPlanningState(project, engine, model);
+    const state = newPlanningState(project, engine, model, effort);
     for (const role of ["planner", "reviewer"] as const) {
       const session = sessions.get(planningSessionKey(project, role));
       if (session?.busy || session?.queue.length) {
         throw new Error(`${role} session is still working`);
       }
     }
-    resetConversation(planningSessionKey(project, "planner"), cwd, state.planner.engine, state.planner.model);
-    resetConversation(planningSessionKey(project, "reviewer"), cwd, state.reviewer.engine, state.reviewer.model);
+    resetConversation(planningSessionKey(project, "planner"), cwd, state.planner.engine, state.planner.model, state.planner.effort);
+    resetConversation(planningSessionKey(project, "reviewer"), cwd, state.reviewer.engine, state.reviewer.model, state.reviewer.effort);
     planningLoops.set(project, state);
     broadcastPlanningState(project);
     const result = send(
@@ -1034,6 +1078,7 @@ export function startPlanningLoop(
       cwd,
       state.planner.engine,
       state.planner.model,
+      state.planner.effort,
       initialPlanningPrompt(project, request),
       false,
       plannerSystemContext("planner"),
@@ -1053,10 +1098,11 @@ export function sendPlanningMessage(
   cwd: string,
   engine: AiEngine,
   model: AiModel,
+  effort: AiEffort,
   message: string,
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   const current = planningLoops.get(project);
-  if (!current) return startPlanningLoop(project, cwd, engine, model, message);
+  if (!current) return startPlanningLoop(project, cwd, engine, model, effort, message);
   if (!current.active) {
     updatePlanningState(project, {
       active: true,
@@ -1070,6 +1116,7 @@ export function sendPlanningMessage(
     cwd,
     current.planner.engine,
     current.planner.model,
+    current.planner.effort,
     message,
     false,
     plannerSystemContext("planner"),
@@ -1081,10 +1128,11 @@ export function queuePlanReview(
   cwd: string,
   engine: AiEngine,
   model: AiModel,
+  effort: AiEffort,
   plan: ImplementationPlan,
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   let state = planningLoops.get(project);
-  if (!state) state = newPlanningState(project, engine, model);
+  if (!state) state = newPlanningState(project, engine, model, effort);
   state = {
     ...state,
     active: true,
@@ -1102,6 +1150,7 @@ export function queuePlanReview(
     cwd,
     state.reviewer.engine,
     state.reviewer.model,
+    state.reviewer.effort,
     modelReviewPrompt(plan, 1, state.maxRounds),
     false,
     plannerSystemContext("reviewer"),
@@ -1136,17 +1185,18 @@ export function startFreshAgentSession(
   cwd: string,
   engine: AiEngine,
   model: AiModel,
+  effort: AiEffort,
   message: string,
   fullAccess: boolean,
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   const limit = aiLimit(engine);
   if (limit?.hard) return { ok: false, error: limit.message, limited: true };
   try {
-    resetConversation(project, cwd, engine, model);
+    resetConversation(project, cwd, engine, model, effort);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  return send(project, cwd, engine, model, message, fullAccess);
+  return send(project, cwd, engine, model, effort, message, fullAccess);
 }
 
 export function answerQuestion(
@@ -1182,7 +1232,7 @@ export function answerQuestion(
   broadcast(s, "question-cleared", { id: request.id });
   pushEvent(s, { t: Date.now(), role: "user", text: transcriptLines.join("\n") });
 
-  const turn = { message, model: s.model, fullAccess, extraContext };
+  const turn = { message, model: s.model, effort: s.effort, fullAccess, extraContext };
   if (s.busy && s.child) {
     s.queue.unshift(turn);
     s.turnPausedForQuestion = true;
@@ -1198,15 +1248,24 @@ export function answerQuestion(
 
   s.busy = false;
   s.child = null;
-  startTurn(s, message, fullAccess, extraContext, s.model);
+  startTurn(s, message, fullAccess, extraContext, s.model, s.effort);
   return { ok: true };
 }
 
 /** Spawn the CLI for one turn. The user message has already been logged. */
-function startTurn(s: AiSession, message: string, fullAccess: boolean, extraContext: string, model: AiModel = s.model): void {
+function startTurn(
+  s: AiSession,
+  message: string,
+  fullAccess: boolean,
+  extraContext: string,
+  model: AiModel = s.model,
+  effort: AiEffort = s.effort,
+): void {
   const normalizedModel = normalizeModel(model);
+  const normalizedEffort = normalizeEffort(effort);
   if (s.model !== normalizedModel) s.actualModel = null;
   s.model = normalizedModel;
+  s.effort = normalizedEffort;
   s.busy = true;
   s.turnPrevSessionId = s.sessionId;
   s.turnHadAssistant = false;
@@ -1298,7 +1357,7 @@ function finishTurn(s: AiSession) {
   const next = s.queue.shift();
   if (next) {
     saveSessions();
-    startTurn(s, next.message, next.fullAccess, next.extraContext, next.model);
+    startTurn(s, next.message, next.fullAccess, next.extraContext, next.model, next.effort);
     return;
   }
 
@@ -1352,7 +1411,7 @@ export function restoreCachedRecap(name: string, value: unknown): void {
   let session = sessions.get(name);
   if (!session) {
     session = {
-      name, cwd: "", engine: "claude", model: null, actualModel: null, sessionId: null,
+      name, cwd: "", engine: "claude", model: null, effort: null, actualModel: null, sessionId: null,
       busy: false, child: null, log: [], subscribers: new Set(), summary: null,
       summaryAt: 0, queue: [], question: null,
     };
@@ -1436,8 +1495,15 @@ export function stopSession(name: string): { cancelled: boolean; queuedCleared: 
 }
 
 /** Attach an SSE response: replay transcript, then stream live. */
-export function subscribeAi(res: Response, name: string, cwd: string, engine: AiEngine, model: AiModel): void {
-  const s = getSession(name, cwd, engine, model);
+export function subscribeAi(
+  res: Response,
+  name: string,
+  cwd: string,
+  engine: AiEngine,
+  model: AiModel,
+  effort: AiEffort,
+): void {
+  const s = getSession(name, cwd, engine, model, effort);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");

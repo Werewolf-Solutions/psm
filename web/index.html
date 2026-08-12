@@ -7,6 +7,30 @@
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <!-- Sign in / sign up. Gates the whole app in hosted mode; in local modes it
+         is optional and reachable from the account chip. -->
+    <div class="auth-page" id="auth-page" hidden>
+      <form class="auth-card" id="auth-form">
+        <div class="auth-brand">
+          <span class="logo">psm</span>
+          <span class="tag">workspace cockpit</span>
+        </div>
+        <h1 id="auth-title">Sign in</h1>
+        <p class="auth-sub" id="auth-sub">Use your Werewolf account.</p>
+
+        <!-- The only way in: hand off to werewolf.solutions, which already knows
+             who you are, and come back with a code. psm never sees a password. -->
+        <button type="button" class="btn btn-primary sso-btn" id="auth-sso">
+          <span class="sso-mark">🐺</span> Continue with Werewolf
+        </button>
+        <p class="sso-note" id="auth-sso-note" hidden></p>
+
+        <p class="auth-error" id="auth-error" hidden></p>
+
+        <button type="button" class="auth-link auth-dismiss" id="auth-dismiss" hidden>Continue without signing in</button>
+      </form>
+    </div>
+
     <header class="topbar">
       <div class="brand">
         <span class="logo">psm</span>
@@ -16,8 +40,11 @@
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
+        <button id="account-chip" class="btn account-chip" title="Your Werewolf account">Sign&nbsp;in</button>
         <button id="cloud-open" class="btn" title="PSM Pro account, sync, and encrypted backups">☁&nbsp;Cloud</button>
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
+        <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
+        <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
         <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
         <button id="skills-open" class="btn" title="Skills the agents have used">Skills</button>
         <button id="new-open" class="btn" title="Create a new project">＋&nbsp;New</button>
@@ -37,6 +64,7 @@
 
       <footer class="foot">
         <span id="foot-note"></span>
+        <span id="foot-version" class="foot-version" title="psm version — repo-root package.json"></span>
       </footer>
     </div>
 
@@ -94,6 +122,11 @@
         <label>AI model
           <input id="d-model" type="text" list="ai-models" placeholder="default for selected engine" spellcheck="false" />
         </label>
+        <label>AI effort
+          <select id="d-effort">
+            <option value="">— default for selected model —</option>
+          </select>
+        </label>
         <label class="check">
           <input type="checkbox" id="d-full" /> AI full access (run commands, not just edit)
         </label>
@@ -117,7 +150,6 @@
           <span class="ws-status" id="ws-status">idle</span>
         </div>
         <div class="ws-head-actions">
-          <button id="usage-open" class="btn" title="View usage for this project's selected AI model">Usage</button>
           <button class="btn" id="ws-working" title="Manually show or hide this project in Working on">Mark working</button>
           <button class="btn" id="ws-close" aria-label="Return home">← Home</button>
         </div>
@@ -130,6 +162,7 @@
       </div>
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab" data-pane="plan">Plan</button>
+        <button class="ws-tab" data-pane="todos">Todos</button>
         <button class="ws-tab" data-pane="capabilities">Capabilities</button>
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
@@ -138,6 +171,16 @@
         <button class="ws-tab" data-pane="deploy">Deploy</button>
       </div>
       <div class="ws-panes">
+        <!-- This project's todos, read from the Werewolf board. Read-only: the
+             "Open in Todo" link is how anything gets changed. -->
+        <div class="ws-todos" id="ws-todos" data-pane="todos" hidden>
+          <div class="todos-toolbar">
+            <span class="todos-count" id="todos-count"></span>
+            <a class="btn" id="todos-open" target="_blank" rel="noopener">Open in Todo ↗</a>
+          </div>
+          <div class="todos-body" id="todos-body"></div>
+        </div>
+
         <div class="ws-plan" id="ws-plan" data-pane="plan" hidden>
           <div class="plan-toolbar">
             <div class="plan-heading">
@@ -224,10 +267,14 @@
               <option value="codex">Codex</option>
             </select>
             <input id="ws-model" class="ws-model" type="text" list="ai-models" placeholder="default model" title="Model id or alias" spellcheck="false" />
+            <select id="ws-effort" class="ws-effort" title="Reasoning effort for the selected model">
+              <option value="">Default effort</option>
+            </select>
             <span class="ws-model-current" id="ws-model-current" title="Model used by the current AI session">model: default</span>
             <label class="ws-full" title="Let the AI run shell commands, not just edit files">
               <input type="checkbox" id="ws-full" /> Full access
             </label>
+            <button id="usage-open" class="btn" title="View usage for the selected provider and model">Usage</button>
             <span class="ws-ai-status" id="ws-ai-status"></span>
           </div>
           <div class="ai-limit" id="ws-ai-limit" hidden></div>
@@ -259,11 +306,43 @@
         </div>
         <div class="ws-web" id="ws-web" data-pane="web" hidden>
           <div class="ws-webbar">
+            <button class="btn dev-toggle" id="ws-dev" title="Click elements in the preview to note what needs changing">◎&nbsp;Dev mode</button>
             <span class="ws-url" id="ws-url">—</span>
             <button class="btn" id="ws-reload" title="Reload the preview">↻</button>
             <button class="btn" id="ws-openext" title="Open in a new tab">Open&nbsp;↗</button>
           </div>
-          <div class="ws-webframe" id="ws-webframe"></div>
+          <!-- dev mode's own AI bar: same engine/model/effort/usage controls as the AI tab,
+               so a round of notes can be aimed without leaving the preview -->
+          <div class="ws-devbar" id="ws-devbar" hidden>
+            <span class="dev-eyebrow">Send to</span>
+            <select id="web-engine" title="Which AI engine to use">
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+            <input id="web-model" class="ws-model" type="text" list="ai-models" placeholder="default model" title="Model id or alias" spellcheck="false" />
+            <select id="web-effort" class="ws-effort" title="Reasoning effort for the selected model">
+              <option value="">Default effort</option>
+            </select>
+            <span class="ws-model-current" id="web-model-current" title="Model used by the current AI session">model: default</span>
+            <label class="ws-full" title="Let the AI run shell commands, not just edit files">
+              <input type="checkbox" id="web-full" /> Full access
+            </label>
+            <button id="web-usage" class="btn" title="View usage for the selected provider and model">Usage</button>
+            <span class="dev-spacer"></span>
+            <button class="btn" id="web-pick" title="Arm the picker, then click an element in the preview">＋ Add note</button>
+            <button class="btn btn-primary" id="web-apply" disabled>Make changes</button>
+          </div>
+          <div class="ws-webmain">
+            <div class="ws-webframe" id="ws-webframe"></div>
+            <aside class="ws-notes" id="ws-notes" hidden>
+              <div class="notes-head">
+                <h3>Change notes</h3>
+                <button class="btn" id="web-notes-clear" title="Remove every note">Clear</button>
+              </div>
+              <div class="notes-list" id="web-notes-list"></div>
+              <p class="notes-hint" id="web-notes-hint">Click anything in the preview, then say what should change.</p>
+            </aside>
+          </div>
         </div>
         <div class="ws-deploy" data-pane="deploy" hidden>
           <div class="ws-deploybar">
@@ -319,6 +398,83 @@
       </div>
       <div class="modal-body usage-body" id="usage-body">
         <div class="usage-empty">Reading provider usage...</div>
+      </div>
+    </section>
+
+    <!-- what's running on this machine: ports held, and what's left over -->
+    <section class="modal modal-wide procs-modal" id="procs-modal" role="dialog" aria-modal="true" aria-labelledby="procs-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="procs-title">Running on this machine</h2>
+          <p class="hint" id="procs-summary">Reading…</p>
+        </div>
+        <div class="procs-head-actions">
+          <button class="btn" id="procs-stale" hidden>Stop stale</button>
+          <button class="btn" id="procs-refresh">Refresh</button>
+          <button class="icon-btn" id="procs-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body procs-body" id="procs-body"></div>
+    </section>
+
+    <!-- linked folders: what psm looks at -->
+    <section class="modal modal-wide links-modal" id="links-modal" role="dialog" aria-modal="true" aria-labelledby="links-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="links-title">Linked folders</h2>
+          <p class="hint" id="links-mode">Where psm looks for projects.</p>
+        </div>
+        <button class="icon-btn" id="links-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body links-body">
+        <!-- agent mode only: what a hosted psm needs in order to drive this machine -->
+        <div class="pairing" id="pairing" hidden>
+          <div class="pairing-head">
+            <h3>Pair the hosted cockpit</h3>
+            <span class="pairing-origin" id="pairing-origin"></span>
+          </div>
+          <p class="pairing-copy">
+            Paste this token into psm.werewolf.solutions once. It stays on this machine
+            otherwise, and anyone who has it can run commands here.
+          </p>
+          <div class="pairing-row">
+            <code class="pairing-token" id="pairing-token">••••••••</code>
+            <button class="btn" id="pairing-reveal">Reveal</button>
+            <button class="btn" id="pairing-copy">Copy</button>
+            <button class="btn" id="pairing-rotate" title="Invalidate the old token everywhere">Rotate</button>
+          </div>
+        </div>
+
+        <div class="links-list" id="links-list"></div>
+
+        <div class="link-add">
+          <h3>Link a folder</h3>
+          <div class="link-kinds" id="link-kinds">
+            <button type="button" class="link-kind on" data-kind="workspace">
+              <span class="link-kind-title">📁 A directory of projects</span>
+              <span class="link-kind-sub">Every folder inside it becomes a project</span>
+            </button>
+            <button type="button" class="link-kind" data-kind="project">
+              <span class="link-kind-title">📦 A single project</span>
+              <span class="link-kind-sub">Link just this one folder</span>
+            </button>
+          </div>
+          <div class="link-path-row">
+            <input id="link-path" type="text" spellcheck="false" placeholder="/home/you/projects" />
+            <button class="btn" id="link-browse" title="Browse the machine running psm">Browse…</button>
+            <button class="btn btn-primary" id="link-add">Link</button>
+          </div>
+          <p class="link-error" id="link-error" hidden></p>
+          <div class="link-browser" id="link-browser" hidden>
+            <div class="link-browser-bar">
+              <button class="btn" id="link-up" title="Parent folder">↑</button>
+              <code class="link-browser-path" id="link-browser-path">—</code>
+              <button class="btn" id="link-browser-use">Use this folder</button>
+              <button class="icon-btn" id="link-browser-close" aria-label="Close browser">✕</button>
+            </div>
+            <div class="link-browser-list" id="link-browser-list"></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -478,13 +634,7 @@
       </div>
     </div>
 
-    <datalist id="ai-models">
-      <option value="opus"></option>
-      <option value="sonnet"></option>
-      <option value="fable"></option>
-      <option value="gpt-5.5"></option>
-      <option value="gpt-5"></option>
-    </datalist>
+    <datalist id="ai-models"></datalist>
 
     <div class="toast" id="toast" hidden></div>
 

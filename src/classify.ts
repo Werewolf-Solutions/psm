@@ -2,14 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { statePath } from "./store.ts";
 import type { Config, Override, Project, Signals, Status } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OVERRIDES_FILE = path.resolve(__dirname, "..", "overrides.json");
+
+// Locally this is overrides.json beside the repo, as it always was. Hosted it
+// resolves inside the requesting account's own directory, so two accounts with a
+// project of the same name cannot overwrite each other. See src/store.ts.
+const overridesFile = () => statePath("overrides.json");
 
 export function loadOverrides(): Record<string, Override> {
+  const file = overridesFile();
   try {
-    const parsed = JSON.parse(fs.readFileSync(OVERRIDES_FILE, "utf8"));
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error("overrides root must be an object");
     }
@@ -21,13 +27,14 @@ export function loadOverrides(): Record<string, Override> {
 }
 
 export function saveOverrides(all: Record<string, Override>): void {
-  const temp = `${OVERRIDES_FILE}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  const file = overridesFile();
+  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
   let mode = 0o600;
   try {
-    mode = fs.statSync(OVERRIDES_FILE).mode & 0o777;
+    mode = fs.statSync(file).mode & 0o777;
   } catch {}
   fs.writeFileSync(temp, JSON.stringify(all, null, 2) + "\n", { mode });
-  fs.renameSync(temp, OVERRIDES_FILE);
+  fs.renameSync(temp, file);
 }
 
 function daysSince(iso: string | null): number {
@@ -87,6 +94,7 @@ export function merge(
     return {
       name: s.name,
       path: s.path,
+      id: s.psmId,
       status,
       category: o.category || autoCategory(status),
       description,
@@ -110,6 +118,7 @@ export function merge(
       port: o.port ?? s.port,
       aiEngine: o.aiEngine ?? "claude",
       aiModel: o.aiModel?.trim() || null,
+      aiEffort: o.aiEffort?.trim() || null,
       aiFullAccess: o.aiFullAccess ?? false,
       attachments: o.attachments ?? [],
       overridden,

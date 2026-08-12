@@ -1,5 +1,14 @@
 node_modules/
 *.log
+
+# Secrets. Nothing here has ever been committed, and nothing should be: psm is
+# deployed as static files with no .env on the server, so a .env in this repo is
+# always a local one holding real credentials.
+.env
+.env.*
+!.env.example
+
+# Local state psm writes beside itself.
 .psm-sessions.json
 .psm-plans/
 .psm-attachments-state.json
@@ -7,5 +16,12 @@ node_modules/
 .psm-catalog.json
 .psm-cloud-device.json
 .psm-cloud.json
+.psm-agent.json
+.psm-links.json
+.psm-data/
+.psm-prod.env
+
+# Stamped by the deploy workflow so the page can spot an out-of-date agent.
+web/version.json
 
 notes.md

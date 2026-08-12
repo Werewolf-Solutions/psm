@@ -7,8 +7,9 @@ const CAT_ORDER = [
 ];
 
 let STATE = {
-  projects: [], meta: {}, filter: "all", query: "", procs: {}, sessions: [], sessionsSig: "",
+  projects: [], meta: {}, version: "", filter: "all", query: "", procs: {}, sessions: [], sessionsSig: "",
   runtimeServices: {}, runtimeServicesSig: "",
+  mode: "dev", can: { runsCommands: true, scansImplicitly: true, canLink: true },
 };
 
 const $ = (s) => document.querySelector(s);
@@ -21,12 +22,99 @@ const el = (tag, cls, html) => {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const scVar = (status) => `var(--st-${status})`;
+const MODEL_CATALOGS = { claude: null, codex: null };
+const MODEL_FETCH_TOKENS = new WeakMap();
+
+function modelEntry(catalog, model) {
+  const value = String(model || "").trim();
+  return catalog?.models?.find((entry) => entry.id === value || entry.resolvedModel === value) || null;
+}
+
+function showModelCatalog(catalog) {
+  if (!catalog) return;
+  const list = $("#ai-models");
+  list.innerHTML = "";
+  for (const model of catalog.models || []) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.label = model.label && model.label !== model.id
+      ? `${model.label}${model.resolvedModel ? ` · ${model.resolvedModel}` : ""}`
+      : model.resolvedModel || "";
+    option.title = model.description || "";
+    list.append(option);
+  }
+}
+
+function renderEffortOptions(select, engine, model, selected = "") {
+  const catalog = MODEL_CATALOGS[engine];
+  const entry = modelEntry(catalog, model);
+  const levels = entry ? entry.effortLevels || [] : catalog?.effortLevels || [];
+  const value = String(selected || "").trim();
+  select.innerHTML = "";
+  const automatic = document.createElement("option");
+  automatic.value = "";
+  automatic.textContent = entry?.defaultEffort
+    ? `Default (${entry.defaultEffort})`
+    : "Default effort";
+  select.append(automatic);
+  for (const level of levels) {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = level;
+    select.append(option);
+  }
+  if (value && !levels.includes(value)) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = `${value} (custom)`;
+    select.append(option);
+  }
+  select.value = value;
+  select.title = catalog?.source === "fallback" && catalog.message
+    ? `Live model discovery failed: ${catalog.message}`
+    : "Reasoning effort for the selected model";
+}
+
+// `effortSelect` may be one select or several: the AI tab and the Web tab's dev
+// bar show the same choice, and they must not each pay for their own discovery.
+async function refreshModelCatalog(project, engine, model, effort, effortSelect) {
+  if (!engine || !project) return;
+  const selects = [].concat(effortSelect).filter(Boolean);
+  if (!selects.length) return;
+  const token = {};
+  for (const select of selects) {
+    MODEL_FETCH_TOKENS.set(select, token);
+    select.dataset.loading = "true";
+  }
+  const mine = (select) => MODEL_FETCH_TOKENS.get(select) === token;
+  try {
+    const response = await fetch(
+      `/api/projects/${encodeURIComponent(project)}/ai/models?engine=${encodeURIComponent(engine)}`,
+      { cache: "no-store" },
+    );
+    const catalog = await response.json();
+    if (!response.ok) throw new Error(catalog.error || "Model discovery failed");
+    MODEL_CATALOGS[engine] = catalog;
+    if (!selects.some(mine)) return;
+    showModelCatalog(catalog);
+    for (const select of selects) if (mine(select)) renderEffortOptions(select, engine, model, effort);
+  } catch (error) {
+    for (const select of selects) if (mine(select)) select.title = error.message || "Model discovery failed";
+  } finally {
+    for (const select of selects) if (mine(select)) delete select.dataset.loading;
+  }
+}
 
 async function load() {
   const r = await fetch("/api/projects");
   const data = await r.json();
   STATE.projects = data.projects;
   STATE.meta = data.statusMeta;
+  STATE.version = data.version || "";
+  STATE.mode = data.mode || "dev";
+  // what this psm can do at all — a hosted one has no disk, an agent scans only
+  // what has been linked, so the board's empty state differs by posture
+  STATE.can = data.capabilities || { runsCommands: true, scansImplicitly: true, canLink: true };
   await Promise.all([fetchSessions(false), fetchRuntimeServices()]);
   render();
 }
@@ -71,6 +159,7 @@ async function fetchSessions(rerender = true) {
         engine: s.engine || "",
         model: s.model || "",
         actualModel: s.actualModel || "",
+        effort: s.effort || "",
       })),
     );
     STATE.sessions = sessions;
@@ -81,8 +170,40 @@ async function fetchSessions(rerender = true) {
   } catch {}
 }
 
-function projectHash(name, pane = "plan") {
-  return `#/p/${encodeURIComponent(name)}/${encodeURIComponent(pane)}`;
+/**
+ * Project pages are addressed by the project's stable id, so a bookmarked URL survives a
+ * folder rename. Projects that have not been given an id yet fall back to their name, and
+ * get canonicalised to the id URL the first time they are opened.
+ */
+function routeKey(project) {
+  return project?.id || project?.name || "";
+}
+
+function projectHash(key, pane = "plan") {
+  return `#/p/${encodeURIComponent(key)}/${encodeURIComponent(pane)}`;
+}
+
+function projectByRouteKey(key) {
+  return (
+    STATE.projects.find((project) => project.id === key) ||
+    STATE.projects.find((project) => project.name === key) ||
+    null
+  );
+}
+
+function projectByName(name) {
+  return STATE.projects.find((project) => project.name === name) || null;
+}
+
+/** Mint this project's id server-side; throws so callers can decide how loud to be. */
+async function assignProjectId(project) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(project.name)}/id`, { method: "POST" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "could not assign an id");
+  project.id = data.id;
+  const known = projectByName(project.name);
+  if (known) known.id = data.id;
+  return data.id;
 }
 
 function renderQuickSwitch() {
@@ -101,7 +222,9 @@ function renderQuickSwitch() {
   for (const name of names) {
     const button = el("button", "quick-pill", esc(name));
     button.classList.toggle("on", WS?.name === name);
-    button.onclick = () => { location.hash = projectHash(name, WS?.name === name ? WS.pane : "plan"); };
+    button.onclick = () => {
+      location.hash = projectHash(routeKey(projectByName(name)), WS?.name === name ? WS.pane : "plan");
+    };
     nav.append(button);
   }
 }
@@ -183,6 +306,72 @@ function renderFilters() {
   }
 }
 
+async function copyText(text) {
+  try {
+    // writeText can hang (not reject) when the document lacks focus — never wedge on it
+    await Promise.race([
+      navigator.clipboard.writeText(text),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("clipboard timeout")), 1200)),
+    ]);
+    return true;
+  } catch {
+    // clipboard API also needs a secure context; fall back to a throwaway selection
+    try {
+      const ta = el("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+      document.body.append(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** The project's stable id — copyable, or an offer to mint one when it has none yet. */
+function cardId(p) {
+  const row = el("div", "card-id");
+
+  if (!p.id) {
+    const assign = el("button", "id-assign", "assign id");
+    assign.type = "button";
+    assign.title = "Write a stable id to .psm/identity.json so this project keeps its identity across renames and clones";
+    assign.onclick = async (e) => {
+      e.stopPropagation();
+      assign.disabled = true;
+      try {
+        toast(`Assigned ${await assignProjectId(p)}`);
+        render();
+      } catch (err) {
+        assign.disabled = false;
+        toast(err.message);
+      }
+    };
+    row.append(assign);
+    return row;
+  }
+
+  const chip = el("button", "id-chip");
+  chip.type = "button";
+  chip.title = `Copy ${p.id}`;
+  chip.append(el("span", "id-icon", "⧉"), el("code", "id-text", esc(p.id)));
+  chip.onclick = async (e) => {
+    e.stopPropagation();
+    if (await copyText(p.id)) {
+      chip.classList.add("copied");
+      setTimeout(() => chip.classList.remove("copied"), 900);
+      toast("Project id copied");
+    } else {
+      toast("Could not copy the id");
+    }
+  };
+  row.append(chip);
+  return row;
+}
+
 function card(p) {
   const classes = ["card"];
   if (p.pinned) classes.push("pinned");
@@ -224,7 +413,7 @@ function card(p) {
   if (p.priority) bits.push(`<span class="prio ${p.priority}">${p.priority}</span>`);
   meta.innerHTML = bits.join("");
 
-  c.append(top, desc, meta);
+  c.append(top, cardId(p), desc, meta);
 
   if (p.next) {
     const nx = el("div", "next");
@@ -324,6 +513,7 @@ function sessionCard(sess, proj) {
   const model = sess.actualModel || sess.model;
   if (sess.engine) meta.append(el("span", "pill", esc(sess.engine)));
   if (model) meta.append(el("span", "pill", esc(model)));
+  if (sess.effort) meta.append(el("span", "pill", esc(`${sess.effort} effort`)));
   if (sess.messages) meta.append(el("span", null, `${sess.messages} message${sess.messages === 1 ? "" : "s"}`));
   if (sess.queueDepth) meta.append(el("span", null, `${sess.queueDepth} queued`));
 
@@ -391,7 +581,33 @@ function renderBoard() {
     board.append(wrap);
   }
 
-  if (!vis.length) board.append(el("div", "group-title", "No projects match."));
+  if (!vis.length) {
+    // Nothing at all is different from "nothing matches the filter": a psm that
+    // scans only what you link starts here, and needs to say what to do next.
+    if (!STATE.projects.length) board.append(emptyStateCard());
+    else board.append(el("div", "group-title", "No projects match."));
+  }
+}
+
+function emptyStateCard() {
+  const box = el("div", "board-empty");
+  const linkable = STATE.can.canLink;
+  box.append(el("h2", null, linkable ? "psm isn’t looking at anything yet" : "No projects on this account yet"));
+  box.append(
+    el(
+      "p",
+      null,
+      linkable
+        ? "Link a directory of projects to map a whole workspace at once, or link a single project folder on its own."
+        : "This psm is hosted, so it has no filesystem of its own. Run the psm agent on your machine and pair it to map local projects.",
+    ),
+  );
+  if (linkable) {
+    const cta = el("button", "btn btn-primary", "🔗 Link a folder");
+    cta.onclick = openLinks;
+    box.append(cta);
+  }
+  return box;
 }
 
 function catRank(c) {
@@ -405,6 +621,7 @@ function render() {
   renderBoard();
   renderQuickSwitch();
   $("#foot-note").textContent = `${STATE.projects.length} projects · click a card to edit · Export MD writes PROJECTS.md`;
+  $("#foot-version").textContent = STATE.version ? `v${STATE.version}` : "";
 }
 
 /* ---------- drawer ---------- */
@@ -432,6 +649,11 @@ function openDrawer(p) {
   $("#d-engine").value = p.overridden.includes("aiEngine") ? p.aiEngine : "";
   $("#d-model").value = p.overridden.includes("aiModel") ? p.aiModel || "" : "";
   $("#d-model").placeholder = p.aiModel || "default for selected engine";
+  const drawerEngine = $("#d-engine").value || p.aiEngine || "claude";
+  const drawerEffort = p.overridden.includes("aiEffort") ? p.aiEffort || "" : "";
+  renderEffortOptions($("#d-effort"), drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort);
+  refreshModelCatalog(p.name, drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort, $("#d-effort"));
+
   $("#d-full").checked = !!p.aiFullAccess;
   $("#d-deploy-staging").value = p.deployStaging || "";
   $("#d-deploy-production").value = p.deployProduction || "";
@@ -471,6 +693,7 @@ async function saveDrawer() {
     port: $("#d-port").value.trim() ? Number($("#d-port").value.trim()) : "",
     aiEngine: $("#d-engine").value,
     aiModel: $("#d-model").value.trim(),
+    aiEffort: $("#d-effort").value,
     aiFullAccess: $("#d-full").checked,
     deployStaging: $("#d-deploy-staging").value.trim(),
     deployProduction: $("#d-deploy-production").value.trim(),
@@ -498,7 +721,7 @@ async function saveDrawer() {
 /* ---------- workspace / cockpit ---------- */
 let WS = {
   name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-  engine: "claude", model: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+  engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
 
@@ -528,6 +751,18 @@ let CAPS = {
   loading: false,
   applying: false,
   preview: null,
+};
+
+// This project's todos, read from the Werewolf board. `signedIn` is part of the
+// state rather than an error case: most of psm works without a cloud session, so
+// the pane has to be able to say "sign in" instead of "something went wrong".
+let TODOS = {
+  project: null,
+  tasks: [],
+  loading: false,
+  signedIn: true,
+  appUrl: null,
+  error: null,
 };
 
 // unsent composer text, kept separately per project (and per the workspace-wide
@@ -639,7 +874,7 @@ function appendLine(entry, con = $("#ws-console")) {
 
 function openWorkspace(p, pane = "logs", opts = {}) {
   if (!opts.fromRoute) {
-    location.hash = projectHash(p.name, pane);
+    location.hash = projectHash(routeKey(p), pane);
     return;
   }
   const chat = !!opts.chatOnly; // the workspace-wide chat: AI pane only
@@ -654,12 +889,16 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   if (CAPS.project !== p.name) {
     CAPS = { project: p.name, catalog: [], loading: false, applying: false, preview: null };
   }
+  if (TODOS.project !== p.name) {
+    TODOS = { project: p.name, tasks: [], loading: false, signedIn: true, appUrl: TODOS.appUrl, error: null };
+  }
   WS.chatOnly = chat;
   WS.name = p.name;
   WS.workingOn = !!p.workingOn;
   WS.port = p.port ?? null;
   WS.engine = p.aiEngine || "claude";
   WS.model = p.aiModel || "";
+  WS.effort = p.aiEffort || "";
   WS.actualModel = null;
   WS.fullAccess = !!p.aiFullAccess;
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
@@ -690,16 +929,17 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   $("#ws-transcript").innerHTML = "";
   renderSessionPane(null);
   loadDraft(p.name); // restore this chat's own unsent text (empty if none)
-  $("#ws-engine").value = WS.engine;
-  $("#ws-model").value = WS.model;
-  renderAiModel();
-  $("#ws-full").checked = WS.fullAccess;
+  syncAiControls();
+  refreshAiModels();
+  loadDevNotes(p.name); // this project's un-applied preview notes come back with it
   setWsStatus("idle");
   setAiBusy(false);
   switchPane(chat ? "ai" : pane);
   $("#home-page").hidden = true;
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = false;
+  // the cockpit owns the viewport while it is open — no page scroll behind it
+  document.body.classList.add("ws-open");
   renderQuickSwitch();
   if (!chat) loadPlan();
   if (!chat) connectLogs(p.name);
@@ -710,13 +950,13 @@ async function openWorkspaceChat(fromRoute = false) {
     location.hash = projectHash("__workspace__", "ai");
     return;
   }
-  let w = { aiEngine: "claude", aiModel: null, aiFullAccess: false };
+  let w = { aiEngine: "claude", aiModel: null, aiEffort: null, aiFullAccess: false };
   try {
     w = await (await fetch("/api/workspace")).json();
   } catch {}
   openWorkspace(
     { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null,
-      aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiFullAccess: !!w.aiFullAccess },
+      aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiEffort: w.aiEffort || null, aiFullAccess: !!w.aiFullAccess },
     "ai",
     { chatOnly: true, title: "psm · all projects", fromRoute: true },
   );
@@ -741,7 +981,7 @@ function disconnectAi() {
 function switchPane(pane) {
   const allowed = WS.chatOnly
     ? new Set(["ai", "session"])
-    : new Set(["plan", "capabilities", "logs", "web", "ai", "session", "deploy"]);
+    : new Set(["plan", "todos", "capabilities", "logs", "web", "ai", "session", "deploy"]);
   if (!allowed.has(pane)) pane = WS.chatOnly ? "ai" : "plan";
   WS.pane = pane;
   for (const t of document.querySelectorAll(".ws-tab"))
@@ -758,23 +998,30 @@ function switchPane(pane) {
   if (pane === "session") fetchSessionState();
   if (pane === "plan") loadPlan();
   if (pane === "capabilities") loadCapabilities();
+  if (pane === "todos") loadTodos();
   if (pane === "ai" && !WS.recapFetched) {
     WS.recapFetched = true;
     fetchRecap(); // refresh "where we left off" (regenerates only if stale)
     fetchLimit(); // surface a usage limit before the user types anything
   }
-  if (WS.name) history.replaceState(null, "", projectHash(WS.name, pane));
+  if (WS.name) history.replaceState(null, "", projectHash(routeKey(projectByName(WS.name)) || WS.name, pane));
   renderQuickSwitch();
 }
 
 const webUrl = () => (WS.port ? `http://localhost:${WS.port}` : null);
 
+/** What the iframe should show: the instrumented proxy in dev mode, else the app itself. */
+const previewUrl = () => (DEV.on && DEV.proxyUrl ? DEV.proxyUrl : webUrl());
+
 function renderWebPane() {
-  const url = webUrl();
+  const url = previewUrl();
   const frame = $("#ws-webframe");
-  $("#ws-url").textContent = url || "no port set";
-  $("#ws-openext").disabled = !url;
+  $("#ws-url").textContent = DEV.on
+    ? `${webUrl() || "no port set"}${DEV.pagePath && DEV.pagePath !== "/" ? DEV.pagePath : ""} · dev mode`
+    : url || "no port set";
+  $("#ws-openext").disabled = !webUrl();
   $("#ws-reload").disabled = !url;
+  renderDevMode();
   if (!url) {
     frame.innerHTML = "";
     const box = el("div", "ws-noport");
@@ -817,6 +1064,275 @@ function renderWebPane() {
   frame.append(iframe);
 }
 
+/* ---- Web tab · dev mode ----------------------------------------------------
+ * Click an element in the running app, say what should change about it, then
+ * hand the whole batch to the project's AI. The preview is a foreign origin, so
+ * the picking happens inside an inspector script the dev-mode proxy injects
+ * (web/preview-inspector.js) and reaches us over postMessage.
+ * -------------------------------------------------------------------------- */
+let DEV = { on: false, picking: false, notes: [], proxyUrl: null, pagePath: "/", busy: false };
+
+const DEV_NOTES = (() => {
+  try {
+    return JSON.parse(localStorage.getItem("psm.devnotes") || "{}");
+  } catch {
+    return {};
+  }
+})();
+
+function saveDevNotes() {
+  if (!WS.name) return;
+  const keep = DEV.notes.filter((note) => !note.sent);
+  if (keep.length) DEV_NOTES[WS.name] = keep;
+  else delete DEV_NOTES[WS.name];
+  try {
+    localStorage.setItem("psm.devnotes", JSON.stringify(DEV_NOTES));
+  } catch {}
+}
+
+function loadDevNotes(name) {
+  DEV = { on: false, picking: false, notes: DEV_NOTES[name] || [], proxyUrl: null, pagePath: "/", busy: false };
+}
+
+const previewOrigin = () => {
+  try {
+    return new URL(DEV.proxyUrl).origin;
+  } catch {
+    return null;
+  }
+};
+
+function postPreview(message) {
+  const frame = $("#ws-webframe").querySelector("iframe");
+  const origin = previewOrigin();
+  if (!frame?.contentWindow || !origin) return;
+  frame.contentWindow.postMessage({ source: "psm-devmode", ...message }, origin);
+}
+
+/**
+ * Keep the in-page pin badges numbered the same way the notes rail is. The
+ * selector rides along so a reloaded preview can find its elements again —
+ * psm owns the notes, the page only owns the markers.
+ */
+function syncPreviewPins() {
+  postPreview({
+    type: "sync",
+    pins: DEV.notes.map((note, i) => ({ id: note.id, n: i + 1, selector: note.target.selector })),
+  });
+  postPreview({ type: DEV.picking ? "arm" : "disarm" });
+}
+
+async function toggleDevMode(on = !DEV.on) {
+  if (!WS.name) return;
+  if (!on) {
+    postPreview({ type: "disarm" });
+    DEV.on = false;
+    DEV.picking = false;
+    DEV.proxyUrl = null;
+    renderWebPane();
+    return;
+  }
+  if (!WS.port) return toast("Set a web port first — dev mode previews the running app");
+  const button = $("#ws-dev");
+  button.disabled = true;
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/preview`);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(data.error || "Could not start the dev-mode preview");
+    DEV.proxyUrl = data.url;
+    DEV.on = true;
+    DEV.picking = true; // armed straight away — the point of the mode is picking
+    renderWebPane();
+    toast("Dev mode on — click anything in the preview");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderDevMode() {
+  $("#ws-dev").classList.toggle("on", DEV.on);
+  $("#ws-dev").setAttribute("aria-pressed", String(DEV.on));
+  $("#ws-devbar").hidden = !DEV.on;
+  $("#ws-notes").hidden = !DEV.on;
+  $("#ws-web").classList.toggle("dev-on", DEV.on);
+  const pick = $("#web-pick");
+  pick.classList.toggle("on", DEV.picking);
+  pick.textContent = DEV.picking ? "◉ Picking… (Esc)" : "＋ Add note";
+  renderApplyButton();
+  if (DEV.on) renderDevNotes();
+}
+
+function renderApplyButton() {
+  const ready = DEV.notes.filter((note) => !note.sent && note.note.trim()).length;
+  const apply = $("#web-apply");
+  apply.disabled = !ready || DEV.busy;
+  apply.textContent = DEV.busy
+    ? "Sending…"
+    : ready
+      ? `Make ${ready} change${ready === 1 ? "" : "s"}`
+      : "Make changes";
+}
+
+function renderDevNotes() {
+  const list = $("#web-notes-list");
+  list.innerHTML = "";
+  $("#web-notes-hint").hidden = DEV.notes.length > 0;
+  $("#web-notes-clear").disabled = !DEV.notes.length;
+  DEV.notes.forEach((note, i) => {
+    const card = el("div", "note-card" + (note.sent ? " sent" : ""));
+    card.dataset.noteId = note.id;
+    const head = el("div", "note-head");
+    const badge = el("span", "note-n", String(i + 1));
+    const target = el("button", "note-target");
+    target.type = "button";
+    target.textContent = noteLabel(note);
+    target.title = `${note.target.selector}\n${note.target.openTag || ""}`;
+    target.onclick = () => postPreview({ type: "flash", id: note.id });
+    const remove = el("button", "icon-btn note-remove", "✕");
+    remove.title = "Remove this note";
+    remove.onclick = () => {
+      DEV.notes = DEV.notes.filter((n) => n.id !== note.id);
+      saveDevNotes();
+      renderDevMode();
+      syncPreviewPins();
+    };
+    head.append(badge, target, remove);
+
+    const text = el("textarea", "note-text");
+    text.rows = 2;
+    text.value = note.note;
+    text.placeholder = "What should change here?";
+    text.disabled = !!note.sent;
+    text.oninput = () => {
+      note.note = text.value;
+      saveDevNotes();
+      renderApplyButton(); // don't re-render the list — it would eat the caret
+    };
+    text.onkeydown = (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        applyDevNotes();
+      }
+    };
+
+    card.append(head, text);
+    if (note.sent) card.append(el("div", "note-sent", "sent to the AI"));
+    if (note.target.pathname && note.target.pathname !== "/")
+      card.append(el("div", "note-path", esc(note.target.pathname)));
+    list.append(card);
+  });
+}
+
+function noteLabel(note) {
+  const t = note.target;
+  const attrs = t.attrs || {};
+  let label = `<${t.tag}>`;
+  if (attrs.id) label += ` #${attrs.id}`;
+  else if (attrs["data-testid"]) label += ` [${attrs["data-testid"]}]`;
+  if (t.text) label += ` “${t.text.slice(0, 34)}${t.text.length > 34 ? "…" : ""}”`;
+  return label;
+}
+
+function addDevNote(id, target) {
+  DEV.notes.push({ id, target, note: "", sent: false });
+  saveDevNotes();
+  renderDevMode();
+  syncPreviewPins();
+  // land the caret in the new note so the user can just start typing
+  const card = $(`.note-card[data-note-id="${CSS.escape(id)}"]`);
+  const text = card?.querySelector(".note-text");
+  card?.scrollIntoView({ block: "nearest" });
+  text?.focus();
+}
+
+/** Turn the notes into one prompt and send it to the selected AI. */
+async function applyDevNotes() {
+  if (!WS.name || DEV.busy) return;
+  const pending = DEV.notes.filter((note) => !note.sent && note.note.trim());
+  if (!pending.length) return toast("Write what should change first");
+  if (WS.aiLimited) return toast("Usage limit reached — sending is paused");
+
+  const lines = [
+    "These change requests come from clicking elements in this project's live preview (psm dev mode).",
+    `Preview: ${webUrl()}${DEV.pagePath && DEV.pagePath !== "/" ? DEV.pagePath : ""}`,
+    "",
+  ];
+  pending.forEach((note, i) => {
+    const t = note.target;
+    const attrs = Object.entries(t.attrs || {}).map(([k, v]) => `${k}="${v}"`).join(" ");
+    lines.push(`${i + 1}. Change: ${note.note.trim()}`);
+    lines.push(`   Element: ${t.openTag || `<${t.tag}>`}`);
+    lines.push(`   Selector: ${t.selector}`);
+    if (t.text) lines.push(`   Visible text: "${t.text}"`);
+    if (attrs) lines.push(`   Attributes: ${attrs}`);
+    if (t.pathname) lines.push(`   On page: ${t.pathname}`);
+    lines.push("");
+  });
+  lines.push(
+    "Find where each element is rendered in this project's source, make the requested changes, and tell me which files you touched.",
+  );
+  const message = lines.join("\n");
+
+  DEV.busy = true;
+  renderDevMode();
+  const name = WS.name;
+  if (!WS.aiEs) connectAi(name);
+  WS.pending.push(message);
+  const optimistic = renderAiBubble({ role: "user", text: message });
+  const wasBusy = WS.aiBusy;
+  setAiBusy(true);
+  const { ok, body } = await postAiMessage(name, message);
+  DEV.busy = false;
+  if (!ok) {
+    toast(body.error || "AI request failed");
+    if (!wasBusy) setAiBusy(false);
+    const i = WS.pending.indexOf(message);
+    if (i >= 0) WS.pending.splice(i, 1);
+    optimistic.remove();
+    if (body.limited) fetchLimit();
+    if (body.question) fetchSessionState();
+    renderDevMode();
+    return;
+  }
+  for (const note of pending) note.sent = true;
+  saveDevNotes();
+  renderDevMode();
+  switchPane("ai"); // watch the turn happen
+  toast(body.queued ? "Queued — sends when the current turn finishes" : "Sent to the AI");
+}
+
+// Esc must disarm from either side: right after a pick the caret is in psm's
+// note box, so the inspector's own Esc handler never sees the key.
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !DEV.on || !DEV.picking) return;
+  event.preventDefault();
+  DEV.picking = false;
+  renderDevMode();
+  postPreview({ type: "disarm" });
+});
+
+// the inspector inside the preview reports picks, navigation, and pin clicks
+window.addEventListener("message", (event) => {
+  const data = event.data;
+  if (!data || data.source !== "psm-preview") return;
+  const origin = previewOrigin();
+  if (!origin || event.origin !== origin) return;
+  if (data.type === "hello" || data.type === "navigate") {
+    DEV.pagePath = data.pathname || "/";
+    $("#ws-url").textContent = `${webUrl()}${DEV.pagePath !== "/" ? DEV.pagePath : ""} · dev mode`;
+    syncPreviewPins(); // a fresh document starts with no pins and no arming
+  } else if (data.type === "pick" && data.target) {
+    addDevNote(data.id, data.target);
+  } else if (data.type === "cancel") {
+    DEV.picking = false;
+    renderDevMode();
+  } else if (data.type === "focus") {
+    const card = $(`.note-card[data-note-id="${CSS.escape(data.id)}"]`);
+    card?.scrollIntoView({ block: "center" });
+    card?.querySelector(".note-text")?.focus();
+  }
+});
+
 function connectLogs(name) {
   if (WS.es) WS.es.close();
   const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
@@ -853,6 +1369,8 @@ function closeWorkspace(fromRoute = false) {
     return;
   }
   stashDraft(); // keep the unsent text so it's there when this chat reopens
+  saveDevNotes(); // un-applied preview notes come back with the project
+  DEV = { on: false, picking: false, notes: [], proxyUrl: null, pagePath: "/", busy: false };
   clearTimeout(sessionRefreshTimer);
   if (WS.es) WS.es.close();
   if (WS.aiEs) WS.aiEs.close();
@@ -860,12 +1378,13 @@ function closeWorkspace(fromRoute = false) {
   if (WS.depEs) WS.depEs.close();
   WS = {
     name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-    engine: "claude", model: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+    engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
   };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
   $("#home-page").hidden = false;
+  document.body.classList.remove("ws-open");
   PLAN = { saved: null, draft: null, dirty: false, loading: false, drag: null };
   PLANNER = emptyPlannerState();
   CAPS = { project: null, catalog: [], loading: false, applying: false, preview: null };
@@ -884,17 +1403,18 @@ function routeFromHash() {
     else {
       $("#home-page").hidden = false;
       $("#workspace").hidden = true;
+      document.body.classList.remove("ws-open");
       renderQuickSwitch();
     }
     return;
   }
-  const name = decodeURIComponent(match[1]);
+  const key = decodeURIComponent(match[1]);
   const pane = decodeURIComponent(match[2] || "plan");
-  if (name === "__workspace__") {
+  if (key === "__workspace__") {
     openWorkspaceChat(true);
     return;
   }
-  const project = STATE.projects.find((item) => item.name === name);
+  const project = projectByRouteKey(key);
   if (!project) {
     toast("Project not found");
     history.replaceState(null, "", "#/");
@@ -902,6 +1422,20 @@ function routeFromHash() {
     return;
   }
   openWorkspace(project, pane, { fromRoute: true });
+  // Opening a project is its "first need": give it an id now so the URL is stable from
+  // here on, and rewrite a name-addressed URL (old bookmark) to the canonical id one.
+  if (key !== project.id) canonicaliseRoute(project, pane);
+}
+
+async function canonicaliseRoute(project, pane) {
+  try {
+    if (!project.id) await assignProjectId(project);
+  } catch {
+    return; // no id: the name URL keeps working, just isn't rename-proof
+  }
+  if (!project.id || WS.name !== project.name) return; // the user moved on meanwhile
+  history.replaceState(null, "", projectHash(project.id, pane));
+  renderBoard(); // the card's "assign id" chip becomes a copyable id
 }
 
 /* ---- capability catalog and attachment preview ---- */
@@ -976,6 +1510,111 @@ function renderCapabilities() {
     card.append(copy, actions);
     list.append(card);
   }
+}
+
+/* ---- Todos pane ---------------------------------------------------------
+ * This project's tasks from the Werewolf todo board, read-only. Editing lives
+ * in the todo app, so there is one implementation of what a status cycle or a
+ * reorder means — this pane's job is to show what is outstanding and get you
+ * there in one click.
+ */
+
+// Where "Open in Todo" points. The server decides (TODO_APP_URL, defaulting to
+// the local dev server) because the todo app is not deployed yet; this is only
+// the fallback for a response that predates the field.
+const TODO_APP_FALLBACK = "http://localhost:5200";
+const TODO_WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+async function loadTodos(force = false) {
+  if (!WS.name || WS.chatOnly || TODOS.loading) return;
+  if (!force && TODOS.project === WS.name && TODOS.tasks.length) return;
+  TODOS.loading = true;
+  TODOS.error = null;
+  renderTodos();
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/todos`);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not load todos");
+    TODOS.project = WS.name;
+    TODOS.tasks = data.tasks || [];
+    TODOS.signedIn = data.signedIn !== false;
+    TODOS.appUrl = data.appUrl || TODO_APP_FALLBACK;
+  } catch (error) {
+    TODOS.error = error.message || "Could not load todos";
+  } finally {
+    TODOS.loading = false;
+    renderTodos();
+  }
+}
+
+function renderTodos() {
+  const body = $("#todos-body");
+  const count = $("#todos-count");
+  const open = $("#todos-open");
+  if (!body) return;
+
+  // The link always works, even with nothing to show: an empty pane is the
+  // moment you most want to go and add something.
+  if (open) {
+    open.href = `${TODOS.appUrl || TODO_APP_FALLBACK}/?project=${encodeURIComponent(WS.name || "")}`;
+    open.title = `Open the todo board filtered to ${WS.name}`;
+  }
+
+  body.innerHTML = "";
+
+  if (TODOS.loading) {
+    count.textContent = "loading…";
+    return;
+  }
+
+  if (TODOS.error) {
+    count.textContent = "";
+    body.append(el("div", "todos-empty", TODOS.error));
+    return;
+  }
+
+  if (!TODOS.signedIn) {
+    count.textContent = "";
+    const note = el("div", "todos-empty");
+    note.append(
+      el("p", "", "Not signed in to Werewolf, so there are no todos to show."),
+      el("p", "", "Use ☁ Cloud in the top bar to connect this device."),
+    );
+    body.append(note);
+    return;
+  }
+
+  const open_ = TODOS.tasks.filter((t) => t.status !== "done");
+  count.textContent = `${open_.length} open · ${TODOS.tasks.length} total`;
+
+  if (!TODOS.tasks.length) {
+    const note = el("div", "todos-empty");
+    note.append(
+      el("p", "", `Nothing on the board is tagged ${esc(WS.name)}.`),
+      el("p", "", "Tag a task with this project in the todo app and it will appear here."),
+    );
+    body.append(note);
+    return;
+  }
+
+  // Open work first — that is what the pane is for. Within each group, the
+  // board's own order is preserved.
+  const ordered = [...TODOS.tasks].sort((a, b) => (a.status === "done") - (b.status === "done"));
+  const list = el("ul", "todos-list");
+  for (const task of ordered) {
+    const row = el("li", `todo-row todo-${task.status}`);
+    const when = el("span", "todo-when", task.weekday === null || task.weekday === undefined
+      ? ""
+      : TODO_WEEKDAYS[task.weekday]);
+    const marker = el("span", "todo-marker", esc(task.marker || "[]"));
+    // esc, because el() assigns innerHTML and task text is free-form prose —
+    // todo.md is full of ** and <, and this is the user's own text arriving
+    // over the network.
+    const text = el("span", "todo-text", esc(task.text));
+    row.append(when, marker, text);
+    list.append(row);
+  }
+  body.append(list);
 }
 
 async function loadCapabilities(force = false) {
@@ -1257,10 +1896,11 @@ function renderPlannerParticipant(role) {
   const configured = PLANNER.loop?.[role] || {};
   const engine = state.engine || configured.engine || (role === "planner" ? WS.engine : WS.engine === "claude" ? "codex" : "claude");
   const model = state.actualModel || state.model || configured.model || "default model";
+  const effort = state.effort || configured.effort;
   const item = el("span", `planner-participant${state.busy ? " busy" : ""}`);
   item.append(
     el("strong", null, role === "planner" ? "Planner" : "Reviewer"),
-    document.createTextNode(`${engine} · ${model}`),
+    document.createTextNode(`${engine} · ${model}${effort ? ` · ${effort}` : ""}`),
   );
   return item;
 }
@@ -1450,6 +2090,7 @@ async function sendPlannerMessage() {
           [fresh ? "brief" : "message"]: message,
           engine: WS.engine,
           model: WS.model,
+          effort: WS.effort,
         }),
       },
     );
@@ -1972,6 +2613,7 @@ function renderSessionPane(data) {
     engine: WS.engine,
     model: WS.model || null,
     actualModel: WS.actualModel || null,
+    effort: WS.effort || null,
     hasSession: false,
     sessionId: null,
     queueDepth: 0,
@@ -1997,6 +2639,7 @@ function renderSessionPane(data) {
     ["engine", state.engine || WS.engine || "claude"],
     ["model", activeModel],
     ["configured", state.model || "default"],
+    ["effort", state.effort || "default"],
     ["session", state.sessionId || "—"],
     ["messages", String(state.messages || 0)],
     ["queue", String(state.queueDepth || 0)],
@@ -2255,18 +2898,85 @@ async function answerQuestion(event) {
 }
 
 /* ---- AI pane ---- */
+
+// The AI tab and the Web tab's dev bar both drive one selection: whichever set
+// of controls the user touches, WS is the single source of truth and both
+// mirrors are redrawn from it.
+const AI_CONTROLS = [
+  { engine: "#ws-engine", model: "#ws-model", effort: "#ws-effort", full: "#ws-full", current: "#ws-model-current", usage: "#usage-open" },
+  { engine: "#web-engine", model: "#web-model", effort: "#web-effort", full: "#web-full", current: "#web-model-current", usage: "#web-usage" },
+];
+const aiControlNodes = (key) => AI_CONTROLS.map((set) => $(set[key])).filter(Boolean);
+
 function renderAiModel() {
   const configured = WS.model && WS.model.trim();
   const actual = WS.actualModel && WS.actualModel.trim();
   const text = actual || configured || "default";
-  const node = $("#ws-model-current");
-  node.textContent = `model: ${text}`;
-  node.title = actual && configured && actual !== configured
+  const title = actual && configured && actual !== configured
     ? `CLI reported ${actual}; configured as ${configured}`
     : configured
       ? `Configured model: ${configured}`
       : "Using the CLI default model";
-  $("#ws-model").placeholder = WS.engine === "codex" ? "default from Codex config" : "default from Claude Code";
+  for (const node of aiControlNodes("current")) {
+    node.textContent = `model: ${text}`;
+    node.title = title;
+  }
+  const placeholder = WS.engine === "codex" ? "default from Codex config" : "default from Claude Code";
+  for (const node of aiControlNodes("model")) node.placeholder = placeholder;
+}
+
+/** Push WS's engine/model/effort/full-access onto every mirror. */
+function syncAiControls() {
+  for (const set of AI_CONTROLS) {
+    $(set.engine).value = WS.engine;
+    $(set.model).value = WS.model;
+    renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort);
+    $(set.full).checked = WS.fullAccess;
+  }
+  renderAiModel();
+}
+
+function refreshAiModels() {
+  refreshModelCatalog(WS.name, WS.engine, WS.model, WS.effort, aiControlNodes("effort"));
+}
+
+function applyEngine(engine) {
+  WS.engine = engine;
+  WS.model = "";
+  WS.effort = "";
+  WS.actualModel = null;
+  syncAiControls();
+  refreshAiModels();
+  usageSelectionChanged();
+  patchProject(WS.name, { aiEngine: WS.engine, aiModel: "", aiEffort: "" }); // remember per project
+  fetchLimit(); // limits are per engine — re-check for the newly selected one
+  if (aiPaneOpen()) connectAi(WS.name);
+  scheduleSessionRefresh();
+}
+
+function applyModel(model) {
+  WS.model = String(model || "").trim();
+  WS.effort = "";
+  WS.actualModel = null;
+  syncAiControls();
+  usageSelectionChanged();
+  patchProject(WS.name, { aiModel: WS.model, aiEffort: "" }); // remember per project
+  if (aiPaneOpen()) connectAi(WS.name);
+  scheduleSessionRefresh();
+}
+
+function applyEffort(effort) {
+  WS.effort = effort;
+  syncAiControls();
+  patchProject(WS.name, { aiEffort: WS.effort });
+  if (aiPaneOpen()) connectAi(WS.name);
+  scheduleSessionRefresh();
+}
+
+function applyFullAccess(fullAccess) {
+  WS.fullAccess = fullAccess;
+  for (const node of aiControlNodes("full")) node.checked = fullAccess;
+  patchProject(WS.name, { aiFullAccess: WS.fullAccess }); // remember per project
 }
 
 function setAiActivity(text) {
@@ -2316,8 +3026,9 @@ function appendAiEvent(ev) {
 function setAiBusy(busy) {
   WS.aiBusy = busy;
   $("#ws-ai-status").textContent = busy ? "working…" : "";
-  $("#ws-engine").disabled = busy || !!WS.question;
-  $("#ws-model").disabled = busy || !!WS.question;
+  const locked = busy || !!WS.question;
+  for (const key of ["engine", "model", "effort"])
+    for (const node of aiControlNodes(key)) node.disabled = locked;
   // Send stays available even while busy — extra messages get queued. Stop
   // shows alongside it so the running turn can still be cancelled.
   $("#ws-send").hidden = false;
@@ -2332,6 +3043,7 @@ function connectAi(name) {
   if (WS.aiEs) WS.aiEs.close();
   const params = new URLSearchParams({ engine: WS.engine });
   if (WS.model) params.set("model", WS.model);
+  if (WS.effort) params.set("effort", WS.effort);
   const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/ai/stream?${params}`);
   WS.aiEs = es;
   // on every (re)connection the server replays the whole transcript, so wipe
@@ -2351,11 +3063,10 @@ function connectAi(name) {
       const status = JSON.parse(e.data);
       WS.engine = status.engine || WS.engine;
       WS.model = status.model || "";
+      WS.effort = status.effort || "";
       WS.actualModel = status.actualModel || null;
       WS.question = status.question || null;
-      $("#ws-engine").value = WS.engine;
-      $("#ws-model").value = WS.model;
-      renderAiModel();
+      syncAiControls();
       if (WS.pane === "session") renderSessionPane({ ...(WS.sessionState || {}), ...status, recent: WS.sessionState?.recent || [] });
       if (WS.question) openQuestion(name, WS.question);
       else clearQuestion(name);
@@ -2501,6 +3212,16 @@ async function fetchLimit() {
   } catch {}
 }
 
+/** One place that hands a message to the project's AI with the current selection. */
+async function postAiMessage(name, message) {
+  const r = await fetch(`/api/projects/${encodeURIComponent(name)}/ai`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort, fullAccess: WS.fullAccess }),
+  });
+  return { ok: r.ok, body: await r.json().catch(() => ({})) };
+}
+
 async function sendAi() {
   // note: no aiBusy guard — you can send while a turn is running; the server
   // queues it and runs it when the current turn finishes
@@ -2521,13 +3242,8 @@ async function sendAi() {
   WS.pending.push(message);
   const optimistic = renderAiBubble({ role: "user", text: message });
   setAiBusy(true);
-  const r = await fetch(`/api/projects/${encodeURIComponent(name)}/ai`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, fullAccess: WS.fullAccess }),
-  });
-  const e = await r.json().catch(() => ({}));
-  if (!r.ok) {
+  const { ok, body: e } = await postAiMessage(name, message);
+  if (!ok) {
     toast(e.error || "AI request failed");
     if (!wasBusy) setAiBusy(false); // our optimistic "busy" was bogus — undo it
     // don't lose the message — put it back on its own chat only
@@ -2715,35 +3431,32 @@ $("#ws-reload").onclick = () => {
   if (iframe) iframe.src = iframe.src; // reassigning src forces a reload
 };
 $("#ws-openext").onclick = () => {
-  const url = webUrl();
+  const url = webUrl(); // always the real app, never the dev-mode proxy
   if (url) window.open(url, "_blank");
 };
-$("#ws-engine").onchange = (e) => {
-  WS.engine = e.target.value;
-  WS.model = "";
-  WS.actualModel = null;
-  $("#ws-model").value = "";
-  renderAiModel();
-  usageSelectionChanged();
-  patchProject(WS.name, { aiEngine: WS.engine, aiModel: "" }); // remember per project
-  fetchLimit(); // limits are per engine — re-check for the newly selected one
-  if (aiPaneOpen()) connectAi(WS.name);
-  scheduleSessionRefresh();
+$("#ws-dev").onclick = () => toggleDevMode();
+$("#web-pick").onclick = () => {
+  DEV.picking = !DEV.picking;
+  renderDevMode();
+  postPreview({ type: DEV.picking ? "arm" : "disarm" });
 };
-$("#ws-model").onchange = (e) => {
-  WS.model = e.target.value.trim();
-  WS.actualModel = null;
-  e.target.value = WS.model;
-  renderAiModel();
-  usageSelectionChanged();
-  patchProject(WS.name, { aiModel: WS.model }); // remember per project
-  if (aiPaneOpen()) connectAi(WS.name);
-  scheduleSessionRefresh();
+$("#web-apply").onclick = applyDevNotes;
+$("#web-notes-clear").onclick = () => {
+  if (!DEV.notes.length) return;
+  DEV.notes = [];
+  saveDevNotes();
+  renderDevMode();
+  syncPreviewPins();
 };
-$("#ws-full").onchange = (e) => {
-  WS.fullAccess = e.target.checked;
-  patchProject(WS.name, { aiFullAccess: WS.fullAccess }); // remember per project
-};
+for (const set of AI_CONTROLS) {
+  $(set.engine).onchange = (e) => applyEngine(e.target.value);
+  $(set.model).onchange = (e) => applyModel(e.target.value);
+  $(set.model).onfocus = refreshAiModels;
+  $(set.effort).onfocus = refreshAiModels;
+  $(set.effort).onchange = (e) => applyEffort(e.target.value);
+  $(set.full).onchange = (e) => applyFullAccess(e.target.checked);
+}
+$("#web-usage").onclick = openUsage;
 $("#ws-send").onclick = sendAi;
 $("#ws-cancel").onclick = cancelAi;
 $("#ws-session-refresh").onclick = fetchSessionState;
@@ -2835,12 +3548,506 @@ function openModal(id) {
 }
 function closeModals() {
   $("#modal-backdrop").hidden = true;
+  $("#procs-modal").hidden = true;
+  $("#links-modal").hidden = true;
   $("#new-modal").hidden = true;
   $("#rules-modal").hidden = true;
   $("#usage-modal").hidden = true;
   $("#cap-custom-modal").hidden = true;
   $("#cloud-modal").hidden = true;
   $("#skills-modal").hidden = true;
+}
+
+/* ---------- signing in ----------
+ * Modelled on todo-app's session module, with one deliberate difference: the
+ * page never holds a token. psm's server is the confidential client — it talks
+ * to werewolf-dapp and hands this page an httpOnly cookie, so there is nothing
+ * here for injected script to steal and nothing to put in localStorage.
+ * ---------------------------------------------------------------------- */
+let AUTH = { user: null, required: false, checked: false, sso: { available: false } };
+
+async function loadSession() {
+  try {
+    const r = await fetch("/api/auth/session", { credentials: "same-origin" });
+    const data = await r.json();
+    AUTH.user = data.user || null;
+    AUTH.required = !!data.required;
+    AUTH.sso = data.sso || { available: false };
+  } catch {
+    AUTH.user = null;
+  }
+  AUTH.checked = true;
+  renderAccount();
+  return AUTH.user;
+}
+
+/**
+ * The redirect flow reports failures by bouncing back to "/" with a reason —
+ * mid-redirect there is nowhere else to put it.
+ */
+function consumeSsoError() {
+  const params = new URLSearchParams(location.search);
+  const message = params.get("sso_error");
+  if (!message) return null;
+  params.delete("sso_error");
+  const query = params.toString();
+  history.replaceState(null, "", location.pathname + (query ? `?${query}` : "") + location.hash);
+  return message;
+}
+
+function renderAccount() {
+  const chip = $("#account-chip");
+  // Visible everywhere: signing in to a *local* cockpit without retyping a
+  // password is the whole point of the redirect flow (docs/werewolf-sso-plan.md).
+  // It is optional there — psm works signed out — and required when hosted.
+  chip.hidden = false;
+  if (AUTH.user) {
+    const label = AUTH.user.name || AUTH.user.email || "Account";
+    chip.textContent = label.length > 18 ? label.slice(0, 17) + "…" : label;
+    chip.title = `Signed in as ${AUTH.user.email || label} — click to sign out`;
+    chip.classList.add("on");
+  } else {
+    chip.textContent = "Sign in";
+    chip.title = "Sign in with your Werewolf account";
+    chip.classList.remove("on");
+  }
+}
+
+/** Hosted psm cannot show anything until someone is signed in. */
+function authGateRequired() {
+  return AUTH.required && !AUTH.user;
+}
+
+function openAuth() {
+  setAuthError("");
+  $("#auth-page").hidden = false;
+  document.body.classList.add("auth-open");
+  renderAuthMode();
+}
+
+function closeAuth() {
+  if (authGateRequired()) return; // there is nothing behind the gate to show
+  $("#auth-page").hidden = true;
+  document.body.classList.remove("auth-open");
+}
+
+function renderAuthMode() {
+  $("#auth-sub").textContent = AUTH.required
+    ? "Sign in with your Werewolf account to use psm."
+    : "Optional here — psm works signed out. Signing in enables cloud sync and backups.";
+
+  // The handoff is offered only where dapp will accept this instance's callback;
+  // elsewhere the panel explains what has to be registered.
+  const ssoOk = !!AUTH.sso?.available;
+  $("#auth-sso").hidden = !ssoOk;
+  const note = $("#auth-sso-note");
+  note.hidden = ssoOk || !AUTH.sso?.reason;
+  note.textContent = AUTH.sso?.reason || "";
+  $("#auth-dismiss").hidden = AUTH.required;
+}
+
+function setAuthError(message) {
+  const node = $("#auth-error");
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+async function signOutOfPsm() {
+  await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
+  AUTH.user = null;
+  renderAccount();
+  toast("Signed out");
+  if (AUTH.required) openAuth();
+  else load();
+}
+
+/* ---------- what's running on this machine ----------
+ * psm accounts for the processes it started; this is about the ones it did not.
+ * Yesterday's dev server still holding 5173 is why today's climbs to 5176, and
+ * nothing in a terminal tells you that. Stopping is two clicks, never one.
+ * ---------------------------------------------------------------------- */
+let PROCS = { list: [], loading: false, armed: null, error: null };
+
+const fmtAge = (seconds) => {
+  if (seconds < 90) return `${Math.max(1, Math.round(seconds))}s`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 172800) return `${(seconds / 3600).toFixed(1)}h`;
+  return `${Math.round(seconds / 86400)}d`;
+};
+const fmtMem = (bytes) => (bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(1)}GB` : `${Math.round(bytes / 1048576)}MB`);
+
+async function openProcs() {
+  closeModals();
+  openModal("#procs-modal");
+  PROCS.armed = null;
+  await loadProcs();
+}
+
+async function loadProcs() {
+  PROCS.loading = true;
+  renderProcs();
+  try {
+    const r = await fetch("/api/machine/processes");
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || "Could not read the process list");
+    PROCS.list = data.processes || [];
+    PROCS.error = null;
+  } catch (err) {
+    PROCS.error = err.message || "Could not reach psm";
+    PROCS.list = [];
+  } finally {
+    PROCS.loading = false;
+    renderProcs();
+  }
+}
+
+function renderProcs() {
+  const body = $("#procs-body");
+  const stale = PROCS.list.filter((p) => p.duplicateOf);
+  $("#procs-stale").hidden = !stale.length;
+  $("#procs-stale").textContent = `Stop ${stale.length} stale`;
+
+  if (PROCS.loading && !PROCS.list.length) {
+    $("#procs-summary").textContent = "Reading…";
+    body.innerHTML = '<div class="procs-empty">Looking at what\'s running…</div>';
+    return;
+  }
+  if (PROCS.error) {
+    $("#procs-summary").textContent = "Unavailable";
+    body.innerHTML = "";
+    body.append(el("div", "procs-empty", esc(PROCS.error)));
+    return;
+  }
+
+  const ports = PROCS.list.filter((p) => p.ports.length).length;
+  $("#procs-summary").textContent =
+    `${PROCS.list.length} process${PROCS.list.length === 1 ? "" : "es"} · ${ports} holding a port` +
+    (stale.length ? ` · ${stale.length} look left over` : "");
+
+  body.innerHTML = "";
+  if (!PROCS.list.length) {
+    body.append(el("div", "procs-empty", "Nothing of note is running."));
+    return;
+  }
+
+  // group by project so three copies of one dev server read as three copies
+  const groups = new Map();
+  for (const proc of PROCS.list) {
+    const key = proc.project || "Elsewhere on this machine";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(proc);
+  }
+  for (const [name, procs] of groups) {
+    body.append(el("div", "procs-group", esc(name)));
+    for (const proc of procs) body.append(procRow(proc));
+  }
+}
+
+function procRow(proc) {
+  const row = el("div", "proc-row" + (proc.duplicateOf ? " stale" : ""));
+  const main = el("div", "proc-main");
+
+  const title = el("div", "proc-title");
+  title.append(el("span", "proc-label", esc(proc.label)));
+  for (const port of proc.ports) title.append(el("span", "proc-port", `:${port}`));
+  if (!proc.ports.length && proc.expectedPort) {
+    // it is meant to serve this, but nothing is listening — a crashed dev server
+    const chip = el("span", "proc-port expected", `:${proc.expectedPort}?`);
+    chip.title = "The port psm has for this project — nothing is listening on it";
+    title.append(chip);
+  }
+  if (proc.self) title.append(el("span", "proc-tag self", "this psm"));
+  else if (proc.psmManaged) title.append(el("span", "proc-tag psm", "started by psm"));
+  if (proc.duplicateOf) {
+    const tag = el("span", "proc-tag stale", "left over");
+    tag.title = `A newer copy of the same thing is running as pid ${proc.duplicateOf}`;
+    title.append(tag);
+  }
+
+  const meta = el("div", "proc-meta");
+  meta.append(
+    el("span", null, `pid ${proc.pid}`),
+    el("span", null, `up ${fmtAge(proc.ageSeconds)}`),
+    el("span", null, fmtMem(proc.rssBytes)),
+  );
+  if (proc.cwd) {
+    const cwd = el("span", "proc-cwd", esc(proc.cwd));
+    cwd.title = proc.command;
+    meta.append(cwd);
+  }
+  main.append(title, meta);
+  row.append(main);
+
+  if (proc.self) {
+    const note = el("span", "proc-selfnote", "in use");
+    note.title = "This is the psm you are looking at";
+    row.append(note);
+  } else {
+    const stop = el("button", "btn proc-stop" + (PROCS.armed === proc.pid ? " danger" : ""));
+    stop.textContent = PROCS.armed === proc.pid ? "Confirm stop" : "Stop";
+    stop.onclick = () => {
+      // two clicks: stopping someone's editor or database by mistake is not
+      // something an undo button can fix
+      if (PROCS.armed !== proc.pid) {
+        PROCS.armed = proc.pid;
+        renderProcs();
+        setTimeout(() => {
+          if (PROCS.armed === proc.pid) {
+            PROCS.armed = null;
+            renderProcs();
+          }
+        }, 4000);
+        return;
+      }
+      PROCS.armed = null;
+      stopProc(proc);
+    };
+    row.append(stop);
+  }
+  return row;
+}
+
+async function stopProc(proc, quiet = false) {
+  const r = await fetch(`/api/machine/processes/${proc.pid}/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    if (!quiet) toast(data.error || "Could not stop that process");
+    return false;
+  }
+  if (!quiet) toast(`Stopped ${proc.label} (pid ${proc.pid})`);
+  return true;
+}
+
+async function stopStale() {
+  const stale = PROCS.list.filter((p) => p.duplicateOf && !p.self);
+  if (!stale.length) return;
+  const button = $("#procs-stale");
+  if (button.dataset.armed !== "1") {
+    button.dataset.armed = "1";
+    button.classList.add("danger");
+    button.textContent = `Confirm — stop ${stale.length}`;
+    setTimeout(() => {
+      button.dataset.armed = "0";
+      button.classList.remove("danger");
+      renderProcs();
+    }, 4000);
+    return;
+  }
+  button.dataset.armed = "0";
+  button.classList.remove("danger");
+  let stopped = 0;
+  for (const proc of stale) if (await stopProc(proc, true)) stopped++;
+  toast(stopped ? `Stopped ${stopped} leftover process${stopped === 1 ? "" : "es"}` : "Nothing was stopped");
+  // give them a moment to die before asking again
+  setTimeout(loadProcs, 600);
+}
+
+/* ---------- linked folders ----------
+ * What psm looks at. Dev mode has the configured workspace root baked in and
+ * shows it as an unremovable link; agent and hosted modes start with nothing,
+ * so this is where a deployed psm gets pointed at real folders.
+ * ---------------------------------------------------------------------- */
+let LINKS = { links: [], mode: "dev", canLink: true, kind: "workspace", browse: null, busy: false };
+
+const MODE_BLURB = {
+  dev: "Dev mode — the workspace root from psm.config.json is scanned automatically. Link more folders to widen it.",
+  agent: "Agent mode — nothing is scanned until you link it. Linked folders are read from this machine.",
+  hosted: "Hosted mode — this psm has no filesystem. Projects come from a paired agent running on your machine.",
+};
+
+async function openLinks() {
+  closeModals();
+  openModal("#links-modal");
+  setLinkError("");
+  $("#link-browser").hidden = true;
+  await loadLinks();
+}
+
+/* ---- pairing: the only thing that lets a hosted page drive this machine ---- */
+let PAIRING = { token: null, shown: false };
+
+async function loadPairing() {
+  const box = $("#pairing");
+  box.hidden = LINKS.mode !== "agent";
+  if (box.hidden) return;
+  try {
+    const r = await fetch("/api/agent/token");
+    if (!r.ok) return (box.hidden = true);
+    const data = await r.json();
+    PAIRING.token = data.token;
+    PAIRING.shown = false;
+    $("#pairing-origin").textContent = (data.origins || []).join(", ") || "no origin allowed";
+    renderPairing();
+  } catch {
+    box.hidden = true;
+  }
+}
+
+function renderPairing() {
+  $("#pairing-token").textContent = PAIRING.shown ? PAIRING.token : "•".repeat(24);
+  $("#pairing-reveal").textContent = PAIRING.shown ? "Hide" : "Reveal";
+}
+
+async function loadLinks() {
+  const list = $("#links-list");
+  list.innerHTML = '<div class="links-empty">Loading…</div>';
+  try {
+    const r = await fetch("/api/links");
+    const data = await r.json();
+    LINKS.links = data.links || [];
+    LINKS.mode = data.mode || "dev";
+    LINKS.canLink = !!data.canLink;
+  } catch {
+    LINKS.links = [];
+  }
+  renderLinks();
+  loadPairing();
+}
+
+function renderLinks() {
+  $("#links-mode").textContent = MODE_BLURB[LINKS.mode] || MODE_BLURB.dev;
+  $("#link-add").disabled = !LINKS.canLink || LINKS.busy;
+  $("#link-browse").disabled = !LINKS.canLink;
+  $("#link-path").disabled = !LINKS.canLink;
+
+  const list = $("#links-list");
+  list.innerHTML = "";
+  if (!LINKS.links.length) {
+    list.append(el("div", "links-empty", LINKS.canLink
+      ? "No folders linked yet."
+      : "Hosted psm links nothing directly — pair an agent instead."));
+    return;
+  }
+  for (const link of LINKS.links) {
+    const row = el("div", "link-row" + (link.exists ? "" : " missing"));
+    const icon = el("span", "link-icon", link.kind === "workspace" ? "📁" : "📦");
+    const body = el("div", "link-body");
+    const title = el("div", "link-title");
+    title.append(el("span", "link-label", esc(link.label)));
+    title.append(el("span", "link-kind-tag", link.kind === "workspace" ? "directory of projects" : "single project"));
+    if (link.implicit) {
+      const tag = el("span", "link-implicit", "from psm.config.json");
+      tag.title = "Configured, not linked — edit psm.config.json to change it";
+      title.append(tag);
+    }
+    if (!link.exists) title.append(el("span", "link-missing", "missing"));
+    body.append(title, el("code", "link-path", esc(link.path)));
+    row.append(icon, body);
+
+    if (!link.implicit) {
+      const remove = el("button", "icon-btn", "✕");
+      remove.title = "Unlink — the folder itself is not touched";
+      remove.onclick = () => unlink(link);
+      row.append(remove);
+    }
+    list.append(row);
+  }
+}
+
+function setLinkError(message) {
+  const node = $("#link-error");
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+async function addLink() {
+  if (LINKS.busy) return;
+  const path = $("#link-path").value.trim();
+  if (!path) return setLinkError("Enter or browse to a folder");
+  LINKS.busy = true;
+  renderLinks();
+  setLinkError("");
+  try {
+    const r = await fetch("/api/links", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: LINKS.kind, path }),
+    });
+    const data = await r.json();
+    if (!r.ok) return setLinkError(data.error || "Could not link that folder");
+    LINKS.links = data.links || LINKS.links;
+    $("#link-path").value = "";
+    $("#link-browser").hidden = true;
+    toast(LINKS.kind === "workspace" ? "Linked — scanning its projects" : "Project linked");
+    load(); // the board is now different
+  } finally {
+    LINKS.busy = false;
+    renderLinks();
+  }
+}
+
+async function unlink(link) {
+  const r = await fetch(`/api/links/${encodeURIComponent(link.id)}`, { method: "DELETE" });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(data.error || "Could not unlink");
+  LINKS.links = data.links || LINKS.links.filter((l) => l.id !== link.id);
+  renderLinks();
+  toast(`Unlinked ${link.label}`);
+  load();
+}
+
+/* ---- the folder browser: psm reads the machine it runs on, one level deep ---- */
+async function browseTo(path) {
+  const panel = $("#link-browser");
+  panel.hidden = false;
+  const list = $("#link-browser-list");
+  list.innerHTML = '<div class="links-empty">Reading…</div>';
+  try {
+    const params = path ? `?path=${encodeURIComponent(path)}` : "";
+    const r = await fetch(`/api/fs/browse${params}`);
+    const data = await r.json();
+    if (!r.ok) {
+      list.innerHTML = "";
+      list.append(el("div", "links-empty", data.error || "Could not read that folder"));
+      return;
+    }
+    LINKS.browse = data;
+    renderBrowser();
+  } catch {
+    list.innerHTML = "";
+    list.append(el("div", "links-empty", "Could not reach psm"));
+  }
+}
+
+function renderBrowser() {
+  const data = LINKS.browse;
+  if (!data) return;
+  $("#link-browser-path").textContent = data.path;
+  $("#link-up").disabled = !data.parent;
+  const list = $("#link-browser-list");
+  list.innerHTML = "";
+  if (!data.entries.length) {
+    list.append(el("div", "links-empty", "No folders in here."));
+    return;
+  }
+  for (const entry of data.entries) {
+    const row = el("button", "browse-row");
+    row.type = "button";
+    row.append(el("span", "browse-name", esc(entry.name)));
+    // the hint is the whole point of browsing: it tells you which kind to pick
+    if (entry.projectChildren > 1)
+      row.append(el("span", "browse-hint dir", `${entry.projectChildren} projects inside`));
+    else if (entry.isProject) row.append(el("span", "browse-hint proj", "project"));
+    row.onclick = () => {
+      $("#link-path").value = entry.path;
+      // a folder full of projects is almost certainly a workspace link; a lone
+      // project is almost certainly a single link — preselect, don't force
+      if (entry.projectChildren > 1) setLinkKind("workspace");
+      else if (entry.isProject) setLinkKind("project");
+      browseTo(entry.path);
+    };
+    list.append(row);
+  }
+}
+
+function setLinkKind(kind) {
+  LINKS.kind = kind;
+  for (const button of document.querySelectorAll(".link-kind"))
+    button.classList.toggle("on", button.dataset.kind === kind);
 }
 
 /* ---------- subscription usage ---------- */
@@ -2864,9 +4071,10 @@ function selectedUsageScope() {
 }
 
 function resetUsageButton() {
-  const button = $("#usage-open");
-  button.textContent = "Usage";
-  button.classList.remove("usage-warning", "usage-critical");
+  for (const button of aiControlNodes("usage")) {
+    button.textContent = "Usage";
+    button.classList.remove("usage-warning", "usage-critical");
+  }
 }
 
 function usageSelectionChanged() {
@@ -2880,7 +4088,8 @@ function usageSelectionChanged() {
   const changed = scope.key !== USAGE_STATE.activeKey;
   USAGE_STATE.activeKey = scope.key;
   $("#usage-scope").textContent = `${scope.project} · ${scope.engine} · ${scope.model || "default model"}`;
-  $("#usage-open").title = `View ${scope.engine} subscription usage for ${scope.model || "the default model"}`;
+  for (const button of aiControlNodes("usage"))
+    button.title = `View ${scope.engine} subscription usage for ${scope.model || "the default model"}`;
   const cached = USAGE_STATE.cache.get(scope.key);
   if (cached && (changed || USAGE_STATE.renderedKey !== scope.key)) {
     renderUsage(cached.snapshot, scope);
@@ -3009,10 +4218,11 @@ function renderUsage(snapshot, scope = selectedUsageScope()) {
     (provider.windows || []).map((window) => Number(window.usedPercent)).filter(Number.isFinite),
   );
   const highest = percentages.length ? Math.max(...percentages) : null;
-  const button = $("#usage-open");
-  button.textContent = highest == null ? "Usage" : `Usage ${Math.round(highest)}%`;
-  button.classList.toggle("usage-warning", highest != null && highest >= 80 && highest < 100);
-  button.classList.toggle("usage-critical", highest != null && highest >= 100);
+  for (const button of aiControlNodes("usage")) {
+    button.textContent = highest == null ? "Usage" : `Usage ${Math.round(highest)}%`;
+    button.classList.toggle("usage-warning", highest != null && highest >= 80 && highest < 100);
+    button.classList.toggle("usage-critical", highest != null && highest >= 100);
+  }
 }
 
 async function fetchUsage(force = false, quiet = false) {
@@ -3289,6 +4499,63 @@ $("#new-name").addEventListener("keydown", (e) => {
 });
 $("#rules-open").onclick = () => openRules();
 $("#skills-open").onclick = openSkills;
+$("#account-chip").onclick = () => (AUTH.user ? signOutOfPsm() : openAuth());
+$("#auth-form").onsubmit = (e) => e.preventDefault();
+$("#auth-dismiss").onclick = closeAuth;
+$("#auth-sso").onclick = () => {
+  // A full-page handoff, not a popup: the consent screen needs the werewolf.solutions
+  // session cookie, and psm gets the browser back on the callback.
+  const returnTo = location.pathname + location.search + location.hash;
+  location.href = `/api/cloud/sso/start?returnTo=${encodeURIComponent(returnTo)}`;
+};
+$("#procs-open").onclick = openProcs;
+$("#procs-close").onclick = closeModals;
+$("#procs-refresh").onclick = loadProcs;
+$("#procs-stale").onclick = stopStale;
+$("#links-open").onclick = openLinks;
+$("#links-close").onclick = closeModals;
+$("#link-kinds").onclick = (e) => {
+  const button = e.target.closest(".link-kind");
+  if (button) setLinkKind(button.dataset.kind);
+};
+$("#link-add").onclick = addLink;
+$("#link-path").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    addLink();
+  }
+});
+$("#link-browse").onclick = () => browseTo($("#link-path").value.trim() || undefined);
+$("#link-up").onclick = () => LINKS.browse?.parent && browseTo(LINKS.browse.parent);
+$("#link-browser-use").onclick = () => {
+  if (!LINKS.browse) return;
+  $("#link-path").value = LINKS.browse.path;
+  $("#link-browser").hidden = true;
+};
+$("#link-browser-close").onclick = () => ($("#link-browser").hidden = true);
+$("#pairing-reveal").onclick = () => {
+  PAIRING.shown = !PAIRING.shown;
+  renderPairing();
+};
+$("#pairing-copy").onclick = async () => {
+  if (!PAIRING.token) return;
+  try {
+    await navigator.clipboard.writeText(PAIRING.token);
+    toast("Pairing token copied");
+  } catch {
+    PAIRING.shown = true; // clipboard blocked — at least let them read it
+    renderPairing();
+    toast("Copy failed — select the token manually");
+  }
+};
+$("#pairing-rotate").onclick = async () => {
+  const r = await fetch("/api/agent/token/rotate", { method: "POST" });
+  if (!r.ok) return toast("Could not rotate the token");
+  PAIRING.token = (await r.json()).token;
+  PAIRING.shown = true;
+  renderPairing();
+  toast("Rotated — paired browsers must be paired again");
+};
 $("#skills-close").onclick = closeModals;
 $("#skills-refresh").onclick = () => loadSkills();
 $("#skills-scope").onchange = () => loadSkills();
@@ -3319,6 +4586,22 @@ $("#d-close").onclick = closeDrawer;
 $("#d-cancel").onclick = closeDrawer;
 $("#backdrop").onclick = closeDrawer;
 $("#d-save").onclick = saveDrawer;
+$("#d-engine").onchange = () => {
+  if (!editing) return;
+  const engine = $("#d-engine").value || "claude";
+  $("#d-model").value = "";
+  renderEffortOptions($("#d-effort"), engine, "", "");
+  refreshModelCatalog(editing.name, engine, "", "", $("#d-effort"));
+};
+$("#d-model").onchange = () => {
+  const engine = $("#d-engine").value || "claude";
+  renderEffortOptions($("#d-effort"), engine, $("#d-model").value.trim(), "");
+};
+$("#d-model").onfocus = () => {
+  if (!editing) return;
+  const engine = $("#d-engine").value || editing.aiEngine || "claude";
+  refreshModelCatalog(editing.name, engine, $("#d-model").value.trim(), $("#d-effort").value, $("#d-effort"));
+};
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("#question-modal").hidden) closeQuestion(true);
@@ -3326,10 +4609,26 @@ document.addEventListener("keydown", (e) => {
   else closeDrawer();
 });
 
-load().then(() => {
+/**
+ * Startup. The session comes first: hosted psm has nothing to render until
+ * somebody is signed in, and asking the API before that just produces 401s.
+ */
+async function boot() {
+  const ssoError = consumeSsoError();
+  await loadSession();
+  if (authGateRequired() || (ssoError && !AUTH.user)) {
+    openAuth();
+    if (ssoError) setAuthError(ssoError);
+    if (authGateRequired()) return;
+  }
+  if (ssoError && AUTH.user) toast(ssoError);
+  closeAuth();
+  await load();
   pollProcs();
   routeFromHash();
-});
+}
+
+boot();
 window.addEventListener("hashchange", routeFromHash);
 setInterval(() => {
   pollProcs();

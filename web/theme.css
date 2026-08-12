@@ -1,0 +1,256 @@
+/* ==========================================================================
+   Werewolf Solutions — the shared theme.
+   ==========================================================================
+
+   ONE FILE, COPIED. This is the source; every app holds a byte-identical copy:
+
+     werewolf-dapp/theme/theme.css      <- you are here, the source
+     todo-app/client/src/theme.css
+     psm/web/theme.css
+
+   Change it here, then run `npm run theme:sync` in werewolf-dapp. A test
+   (`test/theme.test.js`) fails if a copy has drifted, because drift is the only
+   failure mode this arrangement has — unlike the markdown modules in
+   server/lib/todo/, these copies are *not* expected to diverge, ever.
+
+   Copied rather than linked at runtime so no app can be restyled or broken by
+   another app's deploy, and rather than packaged so psm's vanilla-JS web UI can
+   use it as readily as the two React apps.
+
+   ## What is in here
+
+   Tokens and *chrome* — the header, the app switcher, the footer. The frame
+   that should look identical in every app. What goes inside the frame is each
+   app's own business: dapp's tables, psm's project board, todo's week columns.
+
+   The palette is werewolf-dapp's noir, promoted to the ecosystem 2026-08-10.
+   Comments explaining why a value is what it is live with the original in
+   werewolf-dapp/client/src/index.css; the short version is kept here.
+   ========================================================================== */
+
+:root {
+  /* --- Foundation: the noir palette ------------------------------------ */
+  --noir:        #050608;  /* page background, deepest */
+  --noir-deep:   #0a0b10;  /* raised band against --noir */
+
+  /* Translucent white over noir, so stacking depth reads consistently. */
+  --layer-1:     rgba(255, 255, 255, 0.04);
+  --layer-2:     rgba(255, 255, 255, 0.07);
+
+  --line-faint:  rgba(255, 255, 255, 0.08);
+  --line:        rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.16);
+
+  --text-hi:     #f5f5f7;
+  --text-mid:    rgba(245, 245, 247, 0.72);
+  --text-low:    rgba(245, 245, 247, 0.5);
+
+  /* Functional accent. Carries every state the user must actually perceive —
+     active nav, focus ring, links — because it clears contrast on noir
+     (7.2:1) where the brand maroon does not. */
+  --accent:        #ff6b54;
+  --accent-strong: #ff8a77;
+  --accent-soft:   rgba(255, 107, 84, 0.10);
+
+  /* Brand maroon scores 2.2:1 on noir: decorative fills only. Never an
+     indicator, focus ring, border, or anything text-sized. */
+  --brand-accent:      #872222;
+  --brand-accent-soft: rgba(135, 34, 34, 0.10);
+
+  /* --- App-semantic tokens --------------------------------------------- */
+  --bg:            var(--noir);
+  /* Opaque, not translucent: surfaces stack (card > panel > modal) and
+     translucent layers double-tint when nested. */
+  --surface:       #0f1116;
+  --surface-2:     #15171f;
+  --surface-3:     #1b1e28;
+  --surface-hover: rgba(255, 255, 255, 0.05);
+
+  --text:          var(--text-hi);
+  --text-muted:    var(--text-mid);
+  --text-subtle:   var(--text-low);
+
+  --border:        rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
+  --border-subtle: rgba(255, 255, 255, 0.06);
+
+  --accent-ink:    var(--accent);
+  --accent-wash:   var(--brand-accent-soft);
+  --focus-ring:    var(--accent);
+  --text-on-fill:  #ffffff;
+
+  /* --- Type ------------------------------------------------------------- */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+               'Helvetica Neue', sans-serif;
+  /* Structure — dates, ids, markers, code — is set in mono everywhere, so a
+     task marker and a project id look like the same kind of thing. */
+  --font-mono: ui-monospace, 'JetBrains Mono', 'SFMono-Regular', Menlo,
+               Consolas, monospace;
+
+  /* --- Shape ------------------------------------------------------------ */
+  --radius:      6px;
+  --radius-pill: 999px;
+  --chrome-h:    52px;  /* header height, so apps can offset sticky content */
+}
+
+/* ==========================================================================
+   Chrome — identical in every app.
+   Class names are prefixed `ws-` so they cannot collide with an app's own CSS.
+   ========================================================================== */
+
+.ws-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: var(--chrome-h);
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 0 16px;
+  background: color-mix(in srgb, var(--noir) 85%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-sans);
+}
+
+/* The mark. Same in every app; only `.ws-brand__app` changes. */
+.ws-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.ws-brand__mark {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.ws-brand__app {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* The app switcher — the thing that makes the ecosystem feel like one place.
+   Every app renders the same list and marks itself current. */
+.ws-switcher {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.ws-switcher a {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-decoration: none;
+  color: var(--text-subtle);
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  white-space: nowrap;
+}
+
+.ws-switcher a:hover {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.ws-switcher a[aria-current='page'] {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+
+/* Offline or not deployed yet — psm is localhost-only today. Dimmed rather
+   than hidden, so the ecosystem's shape stays visible. */
+.ws-switcher a[data-local='true']::after {
+  content: '·local';
+  margin-left: 5px;
+  font-size: 10px;
+  color: var(--text-subtle);
+  opacity: 0.7;
+}
+
+/* Each app puts its own navigation here. This is the only part of the header
+   that differs between apps. */
+.ws-menu {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  min-width: 0;
+}
+
+.ws-menu button,
+.ws-menu a {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.ws-menu button:hover,
+.ws-menu a:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.ws-footer {
+  margin-top: 32px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-subtle);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.ws-footer a {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.ws-footer a:hover {
+  color: var(--accent-ink);
+}
+
+/* The version, which every app shows in the same place, in the same shape —
+   see the versioning rule in psm/house-rules.md. */
+.ws-version {
+  font-family: var(--font-mono);
+  color: var(--text-subtle);
+}
+
+/* One focus treatment across the ecosystem. */
+.ws-header :focus-visible,
+.ws-footer :focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .ws-header {
+    height: auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+  }
+
+  .ws-menu {
+    margin-left: 0;
+    width: 100%;
+  }
+}

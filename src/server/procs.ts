@@ -36,6 +36,28 @@ const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})/;
 
 const keyOf = (name: string, kind: ProcKind) => `${name}::${kind}`;
 
+/**
+ * The environment a project's own command should run in.
+ *
+ * Emphatically **not** psm's. psm's server has `PORT` set — that is the port psm
+ * itself is listening on — and a child inheriting it is a genuine trap: dotenv
+ * does not overwrite variables that already exist, so the project silently
+ * ignores its own `.env` and tries to bind psm's port. Running werewolf-dapp
+ * from psm's Run button did exactly that, and its server died on 4317 with
+ * "address already in use" while its `.env` plainly said 3000.
+ *
+ * `PSM_*` goes too: psm's mode, data directory and session secret are psm's
+ * business, and one of them is a credential.
+ */
+function projectEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.PORT;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("PSM_")) delete env[key];
+  }
+  return env;
+}
+
 export function getProc(name: string, kind: ProcKind): ProcEntry | undefined {
   return registry.get(keyOf(name, kind));
 }
@@ -68,6 +90,9 @@ export function activeProcesses() {
       kind: p.kind,
       command: p.command,
       startedAt: p.startedAt,
+      // the machine panel uses this to tell "psm started this" from "this was
+      // already here"; a shell-wrapped child's group is what actually holds ports
+      pid: p.child?.pid ?? null,
     }));
 }
 
@@ -135,7 +160,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     cwd,
     shell: true,
     detached: true,
-    env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: { ...projectEnv(), FORCE_COLOR: "0", NO_COLOR: "1" },
   });
   p.child = child;
 
