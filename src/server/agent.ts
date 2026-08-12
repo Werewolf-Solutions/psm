@@ -169,25 +169,33 @@ export function agentGuard(options: GuardOptions = {}): express.RequestHandler {
     }
     const loopbackOrigin = isLoopbackHost(originHost);
 
-    if (!loopbackOrigin) {
-      // A paired hosted origin: answer CORS, including Chrome's Private Network
-      // Access preflight — without that header the fetch never leaves the browser.
-      res.setHeader("Access-Control-Allow-Origin", origin);
-      res.setHeader("Vary", "Origin");
-      res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
-      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      res.setHeader("Access-Control-Max-Age", "600");
-      if (req.headers["access-control-request-private-network"] === "true") {
-        res.setHeader("Access-Control-Allow-Private-Network", "true");
-      }
-      if (req.method === "OPTIONS") return res.status(204).end();
+    // Any allowed origin that is not this exact origin needs CORS headers.
+    //
+    // Loopback is *not* the same as same-origin, and conflating the two was a
+    // real bug: a page on http://localhost:8080 talking to the agent on
+    // http://127.0.0.1:4317 is cross-origin by every rule the browser applies,
+    // so without these headers the response is blocked — which looks exactly
+    // like "the agent is not running". Same host and port send no Origin at all
+    // and never reach here.
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Max-Age", "600");
+    // Chrome's Private Network Access preflight, sent for public→private
+    // requests. Without the answer the fetch never leaves the browser.
+    if (req.headers["access-control-request-private-network"] === "true") {
+      res.setHeader("Access-Control-Allow-Private-Network", "true");
+    }
+    if (req.method === "OPTIONS") return res.status(204).end();
 
-      if (!publicPaths.has(req.path) && !tokenMatches(presentedToken(req))) {
-        return res.status(401).json({
-          error: "pair this browser with the agent first",
-          code: "agent_unpaired",
-        });
-      }
+    // The token is what actually authenticates, and only a non-loopback origin
+    // has to present one: reaching loopback already means being on this machine.
+    if (!loopbackOrigin && !publicPaths.has(req.path) && !tokenMatches(presentedToken(req))) {
+      return res.status(401).json({
+        error: "pair this browser with the agent first",
+        code: "agent_unpaired",
+      });
     }
 
     next();

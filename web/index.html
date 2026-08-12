@@ -33,6 +33,52 @@
       </form>
     </div>
 
+    <!-- Connect the hosted page to the psm agent on the user's own machine.
+         Replaces the board until there is something to show, the way the
+         sign-in screen does. -->
+    <div class="connect-page" id="connect-page" hidden>
+      <div class="connect-card">
+        <div class="auth-brand">
+          <span class="logo">psm</span>
+          <span class="tag">workspace cockpit</span>
+        </div>
+        <h1>Connect to your machine</h1>
+        <p class="connect-sub">
+          Your projects never leave your computer. This page talks straight to a psm
+          agent running there — nothing about your code passes through a server.
+        </p>
+
+        <ol class="connect-steps">
+          <li>
+            <span>Start the agent in your workspace:</span>
+            <code class="connect-cmd" id="connect-cmd">npm run agent</code>
+          </li>
+          <li>
+            <span>It prints a pairing token. The cockpit shows it too, under
+            <strong>🔗 Folders</strong>.</span>
+          </li>
+        </ol>
+
+        <label class="auth-field">
+          <span>Agent address</span>
+          <input id="connect-base" type="text" spellcheck="false" placeholder="http://127.0.0.1:4317" />
+        </label>
+        <label class="auth-field">
+          <span>Pairing token</span>
+          <input id="connect-token" type="password" spellcheck="false" placeholder="paste it here" />
+        </label>
+
+        <p class="connect-error" id="connect-error" hidden></p>
+        <p class="connect-note" id="connect-note" hidden></p>
+
+        <div class="connect-actions">
+          <button class="btn btn-primary" id="connect-go">Connect</button>
+          <button class="btn" id="connect-find">Find my agent</button>
+        </div>
+        <button type="button" class="auth-link connect-skip" id="connect-skip">Not now</button>
+      </div>
+    </div>
+
     <header class="topbar">
       <div class="brand">
         <span class="logo">psm</span>
@@ -641,6 +687,7 @@
     <div class="toast" id="toast" hidden></div>
 
     <script src="/auth.js"></script>
+    <script src="/agent.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>
   </body>

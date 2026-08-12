@@ -607,6 +607,10 @@ function emptyStateCard() {
     const cta = el("button", "btn btn-primary", "🔗 Link a folder");
     cta.onclick = openLinks;
     box.append(cta);
+  } else if (typeof PsmAgent !== "undefined" && !PsmAgent.servedByAgent()) {
+    const cta = el("button", "btn btn-primary", "Connect to your machine");
+    cta.onclick = openConnect;
+    box.append(cta);
   }
   return box;
 }
@@ -3591,6 +3595,8 @@ async function detectHost() {
   } catch {
     SERVED_BY_AGENT = false;
   }
+  // agent.js starts from a hostname guess; this is the answer.
+  PsmAgent.setServedByAgent(SERVED_BY_AGENT);
   return SERVED_BY_AGENT;
 }
 const hostedPage = () => SERVED_BY_AGENT === false;
@@ -3891,6 +3897,102 @@ async function stopStale() {
   toast(stopped ? `Stopped ${stopped} leftover process${stopped === 1 ? "" : "es"}` : "Nothing was stopped");
   // give them a moment to die before asking again
   setTimeout(loadProcs, 600);
+}
+
+/* ---------- connecting to the agent ----------
+ * The hosted page has no API. Until it is paired with an agent on the user's own
+ * machine there is nothing to show, so this screen replaces the board — and,
+ * crucially, says *why* rather than spinning.
+ * ---------------------------------------------------------------------- */
+
+/** Every state that is not "we can talk to an agent". */
+function agentReady() {
+  const s = PsmAgent.state();
+  return s === "same-origin" || s === "paired";
+}
+
+function openConnect() {
+  $("#connect-page").hidden = false;
+  document.body.classList.add("auth-open");
+  $("#connect-base").value = PsmAgent.base() || PsmAgent.defaultBase;
+  $("#connect-token").value = PsmAgent.token() || "";
+  renderConnect();
+}
+
+function closeConnect() {
+  $("#connect-page").hidden = true;
+  document.body.classList.remove("auth-open");
+}
+
+function setConnectError(message) {
+  const node = $("#connect-error");
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+function setConnectNote(message) {
+  const node = $("#connect-note");
+  node.textContent = message || "";
+  node.hidden = !message;
+}
+
+function renderConnect() {
+  const state = PsmAgent.state();
+  setConnectError(state === "unpaired" && !PsmAgent.detail() ? "" : PsmAgent.detail());
+  // A browser that is blocking local-network access is not the user's mistake and
+  // not the agent's fault, so it gets its own line rather than an error tone.
+  if (state === "blocked-by-browser") {
+    setConnectError("");
+    setConnectNote(PsmAgent.detail());
+  } else {
+    setConnectNote("");
+  }
+}
+
+async function connectToAgent() {
+  const button = $("#connect-go");
+  button.disabled = true;
+  button.textContent = "Connecting…";
+  setConnectError("");
+  setConnectNote("");
+  try {
+    const ok = await PsmAgent.connect($("#connect-base").value.trim(), $("#connect-token").value.trim());
+    if (!ok) return renderConnect();
+    closeConnect();
+    toast(`Connected to ${PsmAgent.identity()?.hostname || "your machine"}`);
+    await boot();
+  } finally {
+    button.disabled = false;
+    button.textContent = "Connect";
+  }
+}
+
+async function findAgent() {
+  const button = $("#connect-find");
+  button.disabled = true;
+  button.textContent = "Looking…";
+  setConnectError("");
+  setConnectNote("");
+  try {
+    const found = await PsmAgent.discover();
+    if (!found) {
+      setConnectError("No agent answered on the usual ports. Start one with `npm run agent`.");
+      // Say so if the browser is what stopped us, rather than blaming the agent.
+      const permission = await PsmAgent.localNetworkPermission();
+      if (permission !== "granted" && permission !== "unsupported") {
+        setConnectNote(
+          "This browser has not granted local-network access to this site, which can look " +
+            "exactly like a missing agent. Check the address bar for a permission prompt.",
+        );
+      }
+      return;
+    }
+    $("#connect-base").value = found.base;
+    toast(`Found an agent at ${found.base}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Find my agent";
+  }
 }
 
 /* ---------- linked folders ----------
@@ -4560,6 +4662,11 @@ $("#auth-sso").onclick = async () => {
     setAuthError(err.message || "Could not start sign-in");
   }
 };
+$("#connect-go").onclick = connectToAgent;
+$("#connect-find").onclick = findAgent;
+$("#connect-skip").onclick = closeConnect;
+$("#connect-base").addEventListener("keydown", (e) => { if (e.key === "Enter") connectToAgent(); });
+$("#connect-token").addEventListener("keydown", (e) => { if (e.key === "Enter") connectToAgent(); });
 $("#procs-open").onclick = openProcs;
 $("#procs-close").onclick = closeModals;
 $("#procs-refresh").onclick = loadProcs;
@@ -4690,8 +4797,19 @@ async function boot() {
   if (ssoError && AUTH.user) toast(ssoError);
   closeAuth();
 
-  // No agent behind this page is an ordinary state, not a crash: the hosted page
-  // has no API of its own until one is paired.
+  // A hosted page has no API of its own until an agent is paired. That is an
+  // ordinary state with its own screen, not a crash.
+  if (hostedPage()) {
+    await PsmAgent.refreshState();
+    if (!agentReady()) {
+      STATE.projects = [];
+      STATE.can = { runsCommands: false, scansImplicitly: false, canLink: false };
+      render();
+      return openConnect();
+    }
+  }
+  closeConnect();
+
   try {
     await load();
     pollProcs();
@@ -4701,6 +4819,7 @@ async function boot() {
     STATE.projects = [];
     STATE.can = { runsCommands: false, scansImplicitly: false, canLink: false };
     render();
+    openConnect();
   }
 }
 

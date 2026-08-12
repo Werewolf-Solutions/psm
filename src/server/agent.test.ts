@@ -207,3 +207,26 @@ test("the allowlist is configurable for staging origins", () => {
   assert.deepEqual(hostedOrigins(), ["https://a.example", "https://b.example"]);
   process.env.PSM_HOSTED_ORIGIN = previous;
 });
+
+test("a loopback origin on another port still gets CORS headers", () => {
+  // Loopback is not the same as same-origin: a page on http://localhost:8080
+  // talking to the agent on 127.0.0.1:4317 is cross-origin by every rule the
+  // browser applies. Without these headers the response is blocked, which looks
+  // exactly like "the agent is not running" — and did, for a while.
+  setModeForTesting("agent");
+  const { res, passed } = run(agentGuard(), fakeReq({ headers: { origin: "http://localhost:8080" } }));
+  assert.equal(passed, true, "a loopback origin needs no token");
+  assert.equal(res.headers["access-control-allow-origin"], "http://localhost:8080");
+  assert.equal(res.headers["vary"], "Origin");
+});
+
+test("a loopback preflight is answered too", () => {
+  setModeForTesting("agent");
+  const { res } = run(
+    agentGuard(),
+    fakeReq({ method: "OPTIONS", headers: { origin: "http://127.0.0.1:8080" } }),
+  );
+  assert.equal(res.statusCode, 204);
+  assert.equal(res.headers["access-control-allow-origin"], "http://127.0.0.1:8080");
+  assert.ok((res.headers["access-control-allow-headers"] || "").includes("authorization"));
+});

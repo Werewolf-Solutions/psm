@@ -822,6 +822,62 @@ body.auth-open { overflow: hidden; }
 .proc-stop { flex: 0 0 auto; padding: 5px 11px; font-size: 12px; }
 .proc-selfnote { flex: 0 0 auto; color: var(--faint); font-size: 11.5px; font-weight: 700; }
 
+/* ---- connect to your machine ---- */
+.connect-page {
+  position: fixed; inset: 0; z-index: 190; overflow-y: auto;
+  display: flex; align-items: center; justify-content: center; padding: 28px 18px;
+  background:
+    radial-gradient(1100px 520px at 50% -10%, color-mix(in srgb, var(--st-active) 13%, transparent), transparent),
+    var(--bg);
+}
+.connect-card {
+  width: min(520px, 100%); display: flex; flex-direction: column; gap: 13px;
+  padding: 30px 28px 26px;
+  background: var(--bg-soft); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.45);
+}
+.connect-card h1 { margin: 0; font-size: 21px; letter-spacing: -0.3px; }
+.connect-sub { margin: -6px 0 2px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.connect-steps {
+  margin: 0; padding: 0 0 0 20px; display: flex; flex-direction: column; gap: 9px;
+  color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.connect-steps strong { color: var(--text); font-weight: 700; }
+.connect-cmd {
+  display: block; margin-top: 5px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  font: 12.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  user-select: all;
+}
+/* Shared by the sign-in and connect screens. (Removed with the password form in
+   0.2.0 and needed again the moment a screen had inputs — worth remembering
+   before deleting "dead" CSS that a sibling screen might reuse.) */
+.auth-field { display: flex; flex-direction: column; gap: 5px; }
+.auth-field > span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.auth-field input {
+  padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); font: inherit; font-size: 14px;
+}
+.auth-field input:focus { outline: none; border-color: var(--accent); }
+
+.connect-error {
+  margin: 0; padding: 9px 11px; border-radius: 9px;
+  border: 1px solid color-mix(in srgb, #f85149 45%, var(--line));
+  background: color-mix(in srgb, #f85149 12%, transparent);
+  color: #f0a58a; font-size: 12.5px; line-height: 1.5;
+}
+/* Not an error: the browser withholding local-network access is a permission the
+   user still has to give, and blaming them in red would be wrong. */
+.connect-note {
+  margin: 0; padding: 9px 11px; border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--st-paused) 45%, var(--line));
+  background: color-mix(in srgb, var(--st-paused) 10%, transparent);
+  color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.connect-actions { display: flex; gap: 9px; margin-top: 4px; }
+.connect-actions .btn { flex: 1; justify-content: center; padding: 11px 16px; font-size: 14px; }
+.connect-skip { margin-top: 2px; color: var(--faint); font-weight: 600; }
+
 /* ---- linked folders ---- */
 .board-empty {
   margin: 40px auto; padding: 34px 30px; max-width: 620px; text-align: center;

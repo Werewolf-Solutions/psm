@@ -12,7 +12,7 @@
     "aiFullAccess": true,
     "aiEngine": "claude",
     "aiModel": "sonnet",
-    "aiEffort": "medium"
+    "aiEffort": "max"
   },
   "nfc-pay": {
     "category": "Flagship & platform",
