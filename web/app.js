@@ -107,6 +107,7 @@ async function refreshModelCatalog(project, engine, model, effort, effortSelect)
 
 async function load() {
   const r = await fetch("/api/projects");
+  if (!r.ok) throw new Error(`projects unavailable (${r.status})`);
   const data = await r.json();
   STATE.projects = data.projects;
   STATE.meta = data.statusMeta;
@@ -3559,20 +3560,65 @@ function closeModals() {
 }
 
 /* ---------- signing in ----------
- * Modelled on todo-app's session module, with one deliberate difference: the
- * page never holds a token. psm's server is the confidential client — it talks
- * to werewolf-dapp and hands this page an httpOnly cookie, so there is nothing
- * here for injected script to steal and nothing to put in localStorage.
+ * Two arrangements, one screen, chosen by where the page is served from:
+ *
+ *   the cockpit (127.0.0.1)  psm's own server is the confidential client. It
+ *                            runs the PKCE flow, holds the tokens, and this page
+ *                            just asks /api/auth/session who is signed in.
+ *   the hosted page          there is no psm server, so the browser runs the
+ *                            flow itself as `psm-web` (web/auth.js). dapp keeps
+ *                            the refresh token in an httpOnly cookie.
+ *
+ * Either way the page never holds a refresh token, which is the property that
+ * matters. `PsmAuth.hosted` is the switch.
  * ---------------------------------------------------------------------- */
 let AUTH = { user: null, required: false, checked: false, sso: { available: false } };
 
-async function loadSession() {
+/**
+ * Is there a psm server behind this page?
+ *
+ * Not a guess from the hostname — the static host runs on localhost:8080 during
+ * testing and is every bit as serverless as psm.werewolf.solutions. So ask: the
+ * cockpit answers /api/auth/session, and a static host returns 404 (the vhost
+ * seals /api/ off deliberately, so this is a designed signal rather than luck).
+ */
+let SERVED_BY_AGENT = null;
+async function detectHost() {
+  if (SERVED_BY_AGENT !== null) return SERVED_BY_AGENT;
   try {
     const r = await fetch("/api/auth/session", { credentials: "same-origin" });
-    const data = await r.json();
-    AUTH.user = data.user || null;
-    AUTH.required = !!data.required;
-    AUTH.sso = data.sso || { available: false };
+    SERVED_BY_AGENT = r.ok && (r.headers.get("content-type") || "").includes("json");
+  } catch {
+    SERVED_BY_AGENT = false;
+  }
+  return SERVED_BY_AGENT;
+}
+const hostedPage = () => SERVED_BY_AGENT === false;
+
+async function loadSession({ justSignedIn = false } = {}) {
+  try {
+    await detectHost();
+    if (hostedPage()) {
+      // Don't re-restore what we just established: the exchange already returned
+      // the user, and firing a refresh straight after it would discard a working
+      // sign-in if that one call happened to fail.
+      if (justSignedIn && AUTH.user) {
+        AUTH.checked = true;
+        renderAccount();
+        return AUTH.user;
+      }
+      // Otherwise the cookie is the only evidence, and refreshing is how we find
+      // out. `restore()` no-ops when there was never a session.
+      AUTH.user = (await PsmAuth.restore()) ? AUTH.user || PsmAuth.cachedUser() || { id: "me" } : null;
+      AUTH.required = false; // the board degrades to "pair an agent", not a wall
+      AUTH.sso = { available: true };
+    } else {
+      const r = await fetch("/api/auth/session", { credentials: "same-origin" });
+      const data = await r.json();
+      AUTH.user = data.user || null;
+      AUTH.required = !!data.required;
+      AUTH.sso = data.sso || { available: true };
+    }
   } catch {
     AUTH.user = null;
   }
@@ -3653,7 +3699,8 @@ function setAuthError(message) {
 }
 
 async function signOutOfPsm() {
-  await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
+  if (hostedPage()) await PsmAuth.signOut().catch(() => {});
+  else await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
   AUTH.user = null;
   renderAccount();
   toast("Signed out");
@@ -4502,11 +4549,16 @@ $("#skills-open").onclick = openSkills;
 $("#account-chip").onclick = () => (AUTH.user ? signOutOfPsm() : openAuth());
 $("#auth-form").onsubmit = (e) => e.preventDefault();
 $("#auth-dismiss").onclick = closeAuth;
-$("#auth-sso").onclick = () => {
-  // A full-page handoff, not a popup: the consent screen needs the werewolf.solutions
-  // session cookie, and psm gets the browser back on the callback.
-  const returnTo = location.pathname + location.search + location.hash;
-  location.href = `/api/cloud/sso/start?returnTo=${encodeURIComponent(returnTo)}`;
+$("#auth-sso").onclick = async () => {
+  // A full-page handoff, not a popup: the consent screen needs the
+  // werewolf.solutions session cookie, and we get the browser back on a callback.
+  try {
+    if (hostedPage()) return await PsmAuth.beginSignIn();
+    const returnTo = location.pathname + location.search + location.hash;
+    location.href = `/api/cloud/sso/start?returnTo=${encodeURIComponent(returnTo)}`;
+  } catch (err) {
+    setAuthError(err.message || "Could not start sign-in");
+  }
 };
 $("#procs-open").onclick = openProcs;
 $("#procs-close").onclick = closeModals;
@@ -4614,8 +4666,22 @@ document.addEventListener("keydown", (e) => {
  * somebody is signed in, and asking the API before that just produces 401s.
  */
 async function boot() {
-  const ssoError = consumeSsoError();
-  await loadSession();
+  // The hosted page lands here after the consent screen. Redeem before anything
+  // else asks who is signed in, then put the URL back so a reload does not
+  // replay a code that is already spent.
+  let callbackError = null;
+  await detectHost();
+  if (hostedPage() && PsmAuth.isCallback()) {
+    try {
+      AUTH.user = await PsmAuth.completeSignIn(location.search);
+    } catch (err) {
+      callbackError = err.message || "Sign-in failed";
+    }
+    history.replaceState(null, "", "/" + PsmAuth.returnTo());
+  }
+
+  const ssoError = consumeSsoError() || callbackError;
+  await loadSession({ justSignedIn: !!AUTH.user && !callbackError });
   if (authGateRequired() || (ssoError && !AUTH.user)) {
     openAuth();
     if (ssoError) setAuthError(ssoError);
@@ -4623,9 +4689,19 @@ async function boot() {
   }
   if (ssoError && AUTH.user) toast(ssoError);
   closeAuth();
-  await load();
-  pollProcs();
-  routeFromHash();
+
+  // No agent behind this page is an ordinary state, not a crash: the hosted page
+  // has no API of its own until one is paired.
+  try {
+    await load();
+    pollProcs();
+    routeFromHash();
+  } catch (err) {
+    if (!hostedPage()) throw err;
+    STATE.projects = [];
+    STATE.can = { runsCommands: false, scansImplicitly: false, canLink: false };
+    render();
+  }
 }
 
 boot();

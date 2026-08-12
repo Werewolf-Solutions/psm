@@ -4,7 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>psm · workspace cockpit</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <!-- Absolute, not "./": the SPA fallback serves this file at /auth/callback too,
+         where a relative path would resolve to /auth/styles.css and 404. -->
+    <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <!-- Sign in / sign up. Gates the whole app in hosted mode; in local modes it
@@ -638,7 +640,8 @@
 
     <div class="toast" id="toast" hidden></div>
 
-    <script src="./app.js"></script>
-    <script src="./cloud.js"></script>
+    <script src="/auth.js"></script>
+    <script src="/app.js"></script>
+    <script src="/cloud.js"></script>
   </body>
 </html>

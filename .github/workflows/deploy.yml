@@ -96,3 +96,13 @@ jobs:
           code=$(curl -s -o /dev/null -w '%{http_code}' https://psm.werewolf.solutions/api/projects || true)
           [ "$code" = "404" ] || fail "/api/ is not sealed off — got $code, expected 404"
           echo "ok: /api/ returns 404"
+
+          # /auth/callback returning 200 is not enough: the SPA fallback serves
+          # index.html there, so a *relative* <script src> would resolve to
+          # /auth/app.js and quietly get index.html back. Assert the scripts are
+          # referenced absolutely and that the path they resolve to is real JS.
+          html=$(curl -s https://psm.werewolf.solutions/auth/callback)
+          echo "$html" | grep -q 'src="\./' && fail "index.html uses relative script paths; they break under /auth/callback"
+          type=$(curl -s -o /dev/null -w '%{content_type}' https://psm.werewolf.solutions/auth/app.js || true)
+          case "$type" in *javascript*) fail "/auth/app.js served JS — the fallback is masking a bad path";; esac
+          echo "ok: assets are absolute and /auth/ does not shadow them"
