@@ -1,0 +1,98 @@
+name: Deploy psm.werewolf.solutions
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+# psm's hosted half has no server. The whole deploy is "rsync web/ to a directory
+# nginx serves" — no npm on the droplet, no pm2 app, no port, no .env. `pm2 list`
+# must look identical afterwards; that is part of acceptance.
+#
+# Accounts come from werewolf-dapp, which ships on its own schedule. Everything
+# about projects comes from the agent on the user's own machine.
+#
+# See docs/deploy/PUBLISHING-A-NEW-APP.md for the one-time droplet setup this
+# assumes, and werewolf-dapp/docs/11-operations.md for how a subdomain works here.
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      TARGET_DIR: /var/www/psm.werewolf.solutions
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # There is no build to break, so these are the only gates. They matter more
+      # than usual: the same web/ directory is served locally by the agent, so a
+      # bad deploy is also a bad cockpit.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The page compares this to the version its paired agent reports, and warns
+      # when they have drifted — the hosted half deploys from master while the
+      # agent runs whatever the user has checked out.
+      - name: Stamp the version
+        run: |
+          node -e "
+            const v = require('./package.json').version;
+            require('fs').writeFileSync('web/version.json', JSON.stringify({ version: v, commit: process.env.GITHUB_SHA?.slice(0,7) || null }) + '\n');
+          "
+          cat web/version.json
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync web/ to the droplet
+        # --delete keeps the target exact: a removed file should not linger and be
+        # served alongside its replacement. preview-inspector.js is excluded
+        # because it is injected into a previewed page by the *agent's* proxy,
+        # read from the agent's own web/ — the hosted copy would never be used.
+        run: |
+          rsync -az --delete \
+            --exclude 'preview-inspector.js' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            web/ \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.TARGET_DIR }}/"
+
+      - name: Check it is being served
+        # Four checks, not one. The last two are the ones that fail silently:
+        # /auth/callback proves the SPA fallback is in place (without it sign-in
+        # dies at the final redirect), and /api/ must 404 rather than serve
+        # index.html with a 200 to a fetch that was never retargeted.
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          for path in / /app.js /auth/callback; do
+            code=""
+            for attempt in 1 2 3 4 5; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "https://psm.werewolf.solutions$path" || true)
+              [ "$code" = "200" ] && break
+              echo "attempt $attempt: $path → $code"; sleep 5
+            done
+            [ "$code" = "200" ] || fail "$path returned $code, expected 200"
+            echo "ok: $path"
+          done
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' https://psm.werewolf.solutions/api/projects || true)
+          [ "$code" = "404" ] || fail "/api/ is not sealed off — got $code, expected 404"
+          echo "ok: /api/ returns 404"
