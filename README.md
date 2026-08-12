@@ -17,48 +17,40 @@ npm install
 npm run dev             # → http://localhost:4317   (set PORT to change)
 ```
 
-To try the deployed posture on your own machine, run the other script — it uses
-port 4318, so both can run at once and you can compare them side by side:
+To try the hosted page locally — the same static files nginx serves at
+psm.werewolf.solutions — run the static host alongside an agent:
 
 ```bash
-npm run prod            # → http://localhost:4318   hosted mode: login required
-npm run agent           # in another terminal: the local half hosted psm pairs with
+npm run agent           # the machine half: linked folders only, pairable
+npm run web             # → http://localhost:8080   the page, with no server behind it
 ```
 
-Both scripts hand `PORT` to the server process rather than exporting it, and refuse to be
-sourced. `PORT` inherited from somewhere else is a nasty one to debug: `dotenv` does not
-overwrite variables that already exist, so a project silently ignores its own `.env` and
-uses the inherited value. For the same reason psm strips `PORT` and every `PSM_*` variable
-from the environment it gives a project's **Run** command — otherwise every dev server
-psm launches would try to bind psm's own port. If something binds an unexpected port
-anyway, check `echo $PORT` in that terminal.
+`scripts/dev.sh` and `scripts/static.sh` hand `PORT` to the process rather than exporting
+it, and refuse to be sourced. `PORT` inherited from somewhere else is a nasty one to debug:
+`dotenv` does not overwrite variables that already exist, so a project silently ignores its
+own `.env` and uses the inherited value. For the same reason psm strips `PORT` and every
+`PSM_*` variable from the environment it gives a project's **Run** command — otherwise
+every dev server psm launches would try to bind psm's own port. If something binds an
+unexpected port anyway, check `echo $PORT` in that terminal.
 
-`npm run prod` is the same process the Dockerfile starts. It generates a local
-`PSM_SESSION_SECRET` into `.psm-prod.env` on first run (gitignored — production injects
-its own), keeps state in `.psm-data/`, binds loopback only, and prints which Werewolf API
-sign-in will go to. Expect an empty board: hosted psm has no filesystem, which is the
-point of the agent.
+## Two postures, and a page
 
-## Modes — local, agent, hosted
+psm has two postures, chosen with `PSM_MODE`, and both have a machine under them:
 
-psm is one codebase in three postures, chosen with `PSM_MODE`. The reason there is
-more than one: **a page served from the internet cannot read your disk**, so "hosted"
-and "maps all your local projects" only coexist if something local keeps running.
+| Mode | What it is | Scans |
+| --- | --- | --- |
+| `dev` (default) | the local cockpit, `npm run dev` | `workspaceRoot` automatically |
+| `agent` | the same server, driven from psm.werewolf.solutions, `npm run agent` | only linked folders |
 
-| Mode | What it is | Scans | Runs commands | Auth |
-| --- | --- | --- | --- | --- |
-| `dev` (default) | the original local tool, `npm run server` | `workspaceRoot` automatically | yes | none (loopback) |
-| `agent` | local, driven by the hosted UI, `npm run agent` | only linked folders | yes | pairing token for remote origins |
-| `hosted` | the deployed front end, `npm start` | nothing — it has no disk | **no** | required, per account |
+There is no third. **psm.werewolf.solutions is static files** — nginx serves `web/`, the
+browser signs in against werewolf-dapp directly, and every project operation goes to the
+agent on your own machine. `PSM_MODE=hosted` is refused with a pointer to that fact, because
+someone setting it is expecting a server that does not exist.
 
-`production` and `prod` are accepted spellings of `hosted`. Copy `.env.example` for the
-full environment reference.
-
-**In hosted mode the routes that shell out do not exist.** Run, logs, AI, planner,
-preview, filesystem browsing, and project creation are registered on a router that is
-only mounted when the process has a machine under it, so a routing mistake cannot reach
-a shell. `src/server/hosted.test.ts` boots a real hosted server and asserts each of
-those routes 404s.
+The reason it is shaped this way: **a page served from the internet cannot read your disk.**
+"Hosted" and "maps all your local projects" only coexist if something local keeps running —
+so the something local is the agent, and the page is just a page. Your code, logs and AI
+output never reach a server.
 
 ## Linked folders — what psm looks at
 
@@ -105,7 +97,7 @@ no identities, and holds none of dapp's signing keys — it asks dapp.
 | mode | Werewolf API |
 | --- | --- |
 | `dev` | the local werewolf-dapp — `http://127.0.0.1:3000/api/v1` |
-| `agent`, `hosted` | production — `https://werewolf.solutions/api/v1` |
+| `agent` | production — `https://werewolf.solutions/api/v1` |
 
 `WEREWOLF_API_URL` overrides both. This used to pick whichever answered a probe first,
 which meant the target changed silently depending on whether a local dapp happened to be
@@ -134,16 +126,19 @@ keyed by `state`. The browser only ever carries the code, which is useless witho
 
 Redirect URIs are exact-matched by dapp. psm is registered `clientType: 'native'`, whose
 rule is *any loopback port with the path locked to `/api/cloud/sso/callback`* — so a local
-instance works on 4317, 4318, or anywhere else with no per-port registration. A public
-https origin is not a loopback URI, so hosted psm hides the button and says what dapp
-needs to allow; set `PSM_SSO_REGISTERED=1` once it does, and `PSM_PUBLIC_ORIGIN` if psm
-cannot infer its own origin from the proxy headers.
+cockpit works on 4317, 4318, or anywhere else with no per-port registration.
 
-**psm's server is the confidential client, not the browser.** todo-app can run the whole
-flow in the tab because dapp hands *web* clients an httpOnly refresh cookie the page
-cannot read; psm's app-session endpoints take the refresh token in the request body
-instead, which a browser could only keep somewhere JavaScript can reach. So psm redeems
-the authorization code server-side, and the browser gets back a cookie carrying nothing
+The **hosted page signs in separately**, as its own `psm-web` application with
+`clientType: 'web'`, because a public https origin is not a loopback URI. That is not a
+workaround: web clients are the ones dapp gives an httpOnly refresh cookie to, so the page
+never holds a refresh token at all.
+
+**For the local cockpit, psm's server is the confidential client.** The verifier and the
+refresh token stay in the psm process; the browser holds nothing. The hosted page is the
+other arrangement — dapp keeps its refresh token in an httpOnly cookie. Both avoid the
+thing that matters: a refresh token somewhere JavaScript can read.
+
+Historical note: psm redeemed the code server-side and handed the browser a cookie carrying nothing
 but an opaque session id and a signature over it. dapp's rotating refresh token stays
 server-side and is swapped for a fresh access token as needed; a refresh dapp rejects
 ends the session rather than looping.

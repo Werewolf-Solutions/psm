@@ -115,9 +115,9 @@ test("unlinking drops its projects", () => {
   assert.equal(scanSources(CONFIG as any).length, 0);
 });
 
-test("agent and hosted modes scan nothing until something is linked", () => {
+test("agent mode scans nothing until something is linked", () => {
   makeProject(CONFIG.workspaceRoot, "in-the-config-root");
-  for (const mode of ["agent", "hosted"] as const) {
+  for (const mode of ["agent"] as const) {
     setModeForTesting(mode);
     assert.deepEqual(activeLinks(CONFIG as any), [], mode);
     assert.deepEqual(scanSources(CONFIG as any), [], mode);

@@ -44,10 +44,10 @@ await new Promise<void>((resolve) => dapp.listen(0, "127.0.0.1", () => resolve()
 process.env.WEREWOLF_API_URL = `http://127.0.0.1:${(dapp.address() as any).port}`;
 
 const { account, cloudAvailable, cloudRequest, devices, pullSync } = await import("./cloud.ts");
-const { runAsUser } = await import("../store.ts");
+const { runWithSession } = await import("../store.ts");
 
-const signedIn = <T>(fn: () => T) => runAsUser("user-1", fn, "cloud-access");
-const signedOut = <T>(fn: () => T) => runAsUser("local", fn, null);
+const signedIn = <T>(fn: () => T) => runWithSession("cloud-access", fn);
+const signedOut = <T>(fn: () => T) => runWithSession(null, fn);
 
 /** runtime.ts probes /auth/me to report reachability; that is not a cloud call. */
 const cloudCalls = () => calls.filter((call) => call.path !== "/auth/me");

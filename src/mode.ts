@@ -1,37 +1,43 @@
 /**
  * How this psm process is running.
  *
- * psm is one codebase in three postures, because "hosted" and "scans your local
- * folders" cannot be the same process — a page served from the internet has no
- * disk. See docs/hosted-psm-plan.md.
+ * There are two postures, and both have a machine under them:
  *
  *   dev      the original local tool: auto-scans the workspace root next to the
- *            repo, no auth, everything available. What `npm run server` gives you.
- *   agent    local too, but headless-ish: nothing is scanned until you link a
- *            folder, and a paired hosted origin is allowed to drive it.
- *   hosted   the deployed front end: authenticated, multi-tenant, and physically
- *            unable to run a command or read a project — those routes are never
- *            registered in this mode.
+ *            repo, serves its own cockpit at 127.0.0.1. What `npm run dev` gives you.
+ *   agent    local too, but driven from elsewhere: nothing is scanned until you
+ *            link a folder, and a paired browser origin is allowed to reach it.
  *
- * Every branch in the server should ask one of the predicates below rather than
- * comparing the mode string, so adding a fourth posture stays a local change.
+ * There used to be a third, `hosted` — a psm server on the internet. It is gone.
+ * psm.werewolf.solutions is **static files**: nginx serves `web/`, the browser
+ * signs in against werewolf-dapp directly, and every project operation goes to
+ * the agent on the user's own machine. Nothing runs psm on a server, which is
+ * why nothing here has to reason about multi-tenancy or shell-out isolation any
+ * more. See docs/deploy/PUBLISHING-A-NEW-APP.md.
+ *
+ * Branch on the predicates below rather than comparing the mode string.
  */
-export type PsmMode = "dev" | "agent" | "hosted";
+export type PsmMode = "dev" | "agent";
 
-const MODES: PsmMode[] = ["dev", "agent", "hosted"];
+const MODES: PsmMode[] = ["dev", "agent"];
 
 export class ModeError extends Error {}
 
 function parseMode(raw: string | undefined): PsmMode {
   const value = String(raw || "").trim().toLowerCase();
   if (!value) return "dev";
-  // "production" is what a deploy config naturally says; it means the hosted half
-  if (value === "production" || value === "prod") return "hosted";
   if (value === "local") return "dev";
+  // Fail loudly rather than quietly demoting to agent: someone setting this is
+  // expecting a server, and they need to know there isn't one.
+  if (["hosted", "production", "prod"].includes(value)) {
+    throw new ModeError(
+      "PSM_MODE=hosted has been retired — psm.werewolf.solutions is a static site " +
+        "served by nginx, with no psm process behind it. Use PSM_MODE=agent to let " +
+        "that page drive this machine, or leave it unset for the local cockpit.",
+    );
+  }
   if ((MODES as string[]).includes(value)) return value as PsmMode;
-  throw new ModeError(
-    `PSM_MODE must be one of ${MODES.join(", ")} (or production/local) — got "${raw}"`,
-  );
+  throw new ModeError(`PSM_MODE must be one of ${MODES.join(", ")} — got "${raw}"`);
 }
 
 let cached: PsmMode | null = null;
@@ -46,31 +52,14 @@ export function setModeForTesting(mode: PsmMode | undefined) {
   cached = mode ?? null;
 }
 
-/** Does this process have the machine's disk under it? */
-export const isLocal = () => psmMode() !== "hosted";
-
-/** May it start processes, stream logs, and run AI turns? */
-export const canRunCommands = () => isLocal();
-
 /** Does it scan a workspace root implicitly, or only what has been linked? */
 export const scansImplicitly = () => psmMode() === "dev";
-
-/** Must every request carry an authenticated user? */
-export const requiresAuth = () => psmMode() === "hosted";
-
-/** Does it serve state for many accounts rather than one machine's owner? */
-export const isMultiTenant = () => psmMode() === "hosted";
 
 /** May a paired browser origin other than loopback talk to it? */
 export const acceptsPairedOrigins = () => psmMode() === "agent";
 
 export function describeMode(): string {
-  switch (psmMode()) {
-    case "dev":
-      return "dev — local workspace scan, no auth";
-    case "agent":
-      return "agent — local, linked folders only, paired origins allowed";
-    case "hosted":
-      return "hosted — authenticated, multi-tenant, no local execution";
-  }
+  return psmMode() === "dev"
+    ? "dev — local workspace scan, cockpit on loopback"
+    : "agent — linked folders only, paired origins allowed";
 }

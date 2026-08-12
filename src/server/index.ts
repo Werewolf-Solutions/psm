@@ -8,15 +8,7 @@ import { getProjects, writeMarkdown } from "../index.ts";
 import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
 import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
-import {
-  acceptsPairedOrigins,
-  canRunCommands,
-  describeMode,
-  isLocal,
-  psmMode,
-  requiresAuth,
-  scansImplicitly,
-} from "../mode.ts";
+import { acceptsPairedOrigins, describeMode, psmMode, scansImplicitly } from "../mode.ts";
 import { ensureProjectId } from "../identity.ts";
 import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
@@ -64,10 +56,9 @@ import {
   isLoopbackHost,
   rotateAgentToken,
 } from "./agent.ts";
-import { authConfigured, currentUserId, hostedAuth, identify, werewolfAuthEnabled } from "./auth.ts";
-import { AuthError, SESSION_COOKIE, cookieOptions, sessionContext, signOut } from "./session.ts";
-import { SSO_CALLBACK_PATH, completeSso, ssoAuthorizeUrl, ssoAvailability } from "./sso.ts";
-import { runAsUser } from "../store.ts";
+import { AuthError, currentUser, sessionContext, signOut } from "./session.ts";
+import { SSO_CALLBACK_PATH, completeSso, ssoAuthorizeUrl } from "./sso.ts";
+import { runWithSession } from "../store.ts";
 import { subscriptionUsage } from "./usage.ts";
 import { modelCatalog } from "./models.ts";
 import {
@@ -112,52 +103,31 @@ const app = express();
 app.disable("x-powered-by");
 
 /**
- * Everything that touches this machine — running commands, streaming logs, AI
- * turns, reading folders, writing project files — is registered on `local` and
- * mounted only when the process has a machine under it.
+ * The whole API. psm always has a machine under it now — the hosted posture was
+ * retired in favour of a static site (src/mode.ts) — so there is no longer a
+ * build of psm that must not reach a shell, and everything is mounted.
  *
- * The distinction matters more than a flag would: in hosted mode `local` is
- * never mounted, so those routes do not exist at all and a routing mistake
- * cannot reach a shell. See docs/hosted-psm-plan.md, "Nothing that shells out".
+ * What guards the shell is the boundary in server/agent.ts: loopback is trusted,
+ * and exactly one paired origin may cross it with a token.
  */
 const local = express.Router();
 
-// Local modes keep the loopback guard, now with one deliberate hole for a paired
-// hosted origin (see server/agent.ts). Hosted mode is a public server: it has no
-// loopback guard and requires a session on every route instead.
-if (isLocal()) {
-  app.use(agentGuard({ publicPaths: ["/api/agent"] }));
-} else {
-  app.use(hostedAuth());
-}
+app.use(agentGuard({ publicPaths: ["/api/agent"] }));
 app.use(express.json({ limit: "2mb" }));
 
-// Everything downstream reads and writes state through src/store.ts, which
-// resolves paths against whoever this request belongs to. Locally that is always
-// the one owner; hosted it is the verified session's subject, so an account can
-// only ever reach its own rows.
-app.use((req, _res, next) => {
-  // Resolve the signed-in session once, here, and carry both the owner and the
-  // Werewolf access token for the rest of the request. Cloud calls borrow the
-  // token from this context rather than keeping a second session of their own.
-  sessionContext(req)
-    .then(({ userId, accessToken }) => runAsUser(userId || currentUserId(req), next, accessToken))
-    .catch(() => runAsUser(currentUserId(req), next));
+// Resolve the signed-in session once per request and carry its Werewolf token,
+// so cloud calls act on the owner's behalf without keeping a session of their own.
+app.use((_req, _res, next) => {
+  sessionContext()
+    .then(({ accessToken }) => runWithSession(accessToken, next))
+    .catch(() => runWithSession(null, next));
 });
-
-/* ---------- signing in (werewolf-dapp) ----------
- * Registered in every mode: hosted psm needs it to let anyone in at all, and
- * local psm uses the same account for cloud sync and backups. psm never stores
- * a password — it forwards the pair to dapp once and keeps only the session.
- * -------------------------------------------------------------------------- */
 
 /* ---- Sign in with Werewolf (authorization code + PKCE) ----
  * A full-page handoff, the way todo-app does it: leave for dapp's consent
  * screen, come back with a code, redeem it here. The verifier stays server-side.
  */
 app.get("/api/cloud/sso/start", async (req, res) => {
-  const availability = ssoAvailability(req);
-  if (!availability.available) return res.status(400).json({ error: availability.reason });
   try {
     const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
       ? req.query.returnTo // same-origin paths only — never an open redirect
@@ -170,8 +140,7 @@ app.get("/api/cloud/sso/start", async (req, res) => {
 
 app.get(SSO_CALLBACK_PATH, async (req, res) => {
   try {
-    const { cookie, returnTo } = await completeSso(req);
-    res.cookie(SESSION_COOKIE, cookie, cookieOptions());
+    const { returnTo } = await completeSso(req);
     res.redirect(returnTo);
   } catch (err) {
     const message = (err as AuthError).message || "Sign-in failed";
@@ -181,25 +150,15 @@ app.get(SSO_CALLBACK_PATH, async (req, res) => {
   }
 });
 
-app.post("/api/auth/logout", async (req, res) => {
-  await signOut(req).catch(() => undefined);
-  res.clearCookie(SESSION_COOKIE, { ...cookieOptions(), maxAge: undefined });
+app.post("/api/auth/logout", async (_req, res) => {
+  await signOut().catch(() => undefined);
   res.json({ ok: true });
 });
 
-// Who am I — the page asks this on load to decide between the board and the
-// login screen. Never 401s: "nobody" is a valid answer, and the only one a
-// signed-out local psm can give.
-app.get("/api/auth/session", async (req, res) => {
-  const user = await identify(req).catch(() => null);
-  const sso = ssoAvailability(req);
-  res.json({
-    user,
-    required: requiresAuth(),
-    provider: werewolfAuthEnabled() ? "werewolf" : "jwt",
-    // the page offers "Sign in with Werewolf" only where it can actually work
-    sso: { available: sso.available, reason: sso.reason },
-  });
+// Who am I — the cockpit asks this on load.
+app.get("/api/auth/session", async (_req, res) => {
+  // Never 401s: "nobody" is a valid answer, and the usual one for a fresh cockpit.
+  res.json({ user: await currentUser().catch(() => null), provider: "werewolf" });
 });
 
 /* ---------- agent identity + pairing ---------- */
@@ -267,11 +226,7 @@ app.get("/api/projects", (_req, res) => {
     statusMeta: STATUS_META,
     version: APP_VERSION,
     mode: psmMode(),
-    capabilities: {
-      runsCommands: canRunCommands(),
-      scansImplicitly: scansImplicitly(),
-      canLink: isLocal(),
-    },
+    capabilities: { runsCommands: true, scansImplicitly: scansImplicitly(), canLink: true },
   });
 });
 
@@ -280,15 +235,10 @@ app.get("/api/projects", (_req, res) => {
 // What psm is looking at. In dev this includes the configured workspace root,
 // flagged `implicit` so the UI does not offer to unlink something it cannot.
 app.get("/api/links", (_req, res) => {
-  res.json({
-    mode: psmMode(),
-    canLink: isLocal(),
-    links: isLocal() ? describeLinks(loadConfig()) : [],
-  });
+  res.json({ mode: psmMode(), canLink: true, links: describeLinks(loadConfig()) });
 });
 
 app.post("/api/links", (req, res) => {
-  if (!isLocal()) return res.status(400).json({ error: "this psm has no local filesystem to link" });
   const kind = String(req.body?.kind ?? "");
   if (kind !== "workspace" && kind !== "project")
     return res.status(400).json({ error: "kind must be 'workspace' or 'project'" });
@@ -302,7 +252,6 @@ app.post("/api/links", (req, res) => {
 });
 
 app.delete("/api/links/:id", (req, res) => {
-  if (!isLocal()) return res.status(400).json({ error: "this psm has no local filesystem to link" });
   const removed = removeLink(req.params.id);
   res.status(removed ? 200 : 404).json({
     ok: removed,
@@ -342,10 +291,8 @@ local.post("/api/machine/processes/:pid/stop", (req, res) => {
   }
 });
 
-// Read-only directory listing for the link picker. Local modes only: a hosted
-// psm has no disk, and must not pretend otherwise.
+// Read-only directory listing for the link picker.
 local.get("/api/fs/browse", (req, res) => {
-  if (!isLocal()) return res.status(404).json({ error: "not available in hosted mode" });
   try {
     res.json(browse(typeof req.query.path === "string" ? req.query.path : undefined));
   } catch (err) {
@@ -1582,30 +1529,22 @@ local.get("/api/projects/:name/ai/recap", async (req, res) => {
 });
 
 // The one line that decides whether this process can touch the machine.
-if (isLocal()) app.use(local);
+app.use(local);
 
 app.use(express.static(WEB_DIR));
 
-// Hosted psm faces the internet, so it binds every interface and lets the
-// platform's proxy terminate TLS. Local psm never leaves loopback.
-const HOST = isLocal() ? "127.0.0.1" : process.env.PSM_BIND || "0.0.0.0";
+// psm never leaves loopback. The public face is a static site; see src/mode.ts.
+const HOST = "127.0.0.1";
 
 app.listen(PORT, HOST, () => {
   console.log(`psm ${describeMode()}`);
-  console.log(`  → http://${HOST === "0.0.0.0" ? "localhost" : HOST}:${PORT}`);
+  console.log(`  → http://${HOST}:${PORT}`);
   if (acceptsPairedOrigins()) {
     console.log(`  → pairing token: ${agentSecret().token}`);
     console.log(`  → paired origins: ${hostedOrigins().join(", ") || "none"}`);
   }
-  if (requiresAuth() && !authConfigured()) {
-    console.warn("  ! hosted mode without auth configured — every request will 503");
-    console.warn("  ! set PSM_AUTH_JWKS_URL (or PSM_AUTH_SECRET) and restart");
-  }
 });
 
-// Background work that reads the disk belongs to the machine, not the host.
-if (isLocal()) {
-  startRuntimeDiscovery();
-  setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
-  setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();
-}
+startRuntimeDiscovery();
+setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
+setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();

@@ -18,15 +18,13 @@
  *   local   psm is registered `clientType: 'native'`, so any loopback port is
  *           accepted with the path locked to /api/cloud/sso/callback. Works out
  *           of the box on 4317, 4318, or wherever you run it.
- *   hosted  a public https origin is *not* a loopback URI, so it must be on
- *           psm's registered allowlist in dapp before this can work — see
- *           `ssoAvailability()`, which says so rather than failing obscurely.
+ *   hosted  not this flow at all — psm.werewolf.solutions signs in as the
+ *           separate `psm-web` application, in the browser (web/auth.js).
  */
 import crypto from "node:crypto";
 import type express from "express";
 
 import { getProjects } from "../index.ts";
-import { requiresAuth } from "../mode.ts";
 import { machineProcesses } from "./machine.ts";
 import { currentWerewolfRuntime, werewolfApiUrl } from "./runtime.ts";
 import { AuthError, dappPost, openSession } from "./session.ts";
@@ -106,39 +104,12 @@ export function werewolfWebOrigin(apiUrl: string): string {
  * is what psm's native registration allows; the deployment's public origin when
  * hosted, which dapp has to be told about separately.
  */
-export function ssoRedirectUri(req: express.Request): string {
-  const configured = process.env.PSM_PUBLIC_ORIGIN;
-  if (configured) return `${configured.replace(/\/$/, "")}${SSO_CALLBACK_PATH}`;
-  if (requiresAuth()) {
-    // Hosted with nothing configured: guess from the request, and let the
-    // availability check below explain why dapp may refuse it.
-    const proto = String(req.headers["x-forwarded-proto"] || "https").split(",")[0];
-    const host = String(req.headers["x-forwarded-host"] || req.headers.host || "");
-    return `${proto}://${host}${SSO_CALLBACK_PATH}`;
-  }
-  // dapp's native rule: http, loopback host, this exact path, any port.
+export function ssoRedirectUri(): string {
+  // dapp's native rule for psm: http, loopback host, this exact path, any port.
+  // That is the whole story now — the hosted page signs in as `psm-web` in the
+  // browser and never comes through here.
   const port = Number(process.env.PORT || 4317);
   return `http://127.0.0.1:${port}${SSO_CALLBACK_PATH}`;
-}
-
-/**
- * Can this instance use the redirect flow at all? Hosted psm needs its public
- * callback on psm's allowlist in dapp, which is a record in dapp's database, not
- * something psm can arrange for itself. Saying so up front beats a consent
- * screen that mysteriously refuses.
- */
-export function ssoAvailability(req: express.Request): { available: boolean; reason?: string } {
-  const redirectUri = ssoRedirectUri(req);
-  if (redirectUri.startsWith("http://127.0.0.1") || redirectUri.startsWith("http://localhost")) {
-    return { available: true };
-  }
-  if (process.env.PSM_SSO_REGISTERED === "1") return { available: true };
-  return {
-    available: false,
-    reason:
-      `Werewolf must allowlist ${redirectUri} for the psm application before ` +
-      "sign-in works from this origin — see docs/werewolf-psm-registration.md.",
-  };
 }
 
 /**
@@ -150,7 +121,7 @@ export async function ssoAuthorizeUrl(req: express.Request, returnTo = "/"): Pro
   const verifier = crypto.randomBytes(32).toString("base64url");
   const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
   const state = crypto.randomBytes(16).toString("base64url");
-  const redirectUri = ssoRedirectUri(req);
+  const redirectUri = ssoRedirectUri();
 
   pending.set(state, { verifier, redirectUri, returnTo, createdAt: Date.now() });
 
@@ -171,7 +142,7 @@ export async function ssoAuthorizeUrl(req: express.Request, returnTo = "/"): Pro
  */
 export async function completeSso(
   req: express.Request,
-): Promise<{ cookie: string; returnTo: string; user: { id: string; name?: string; email?: string } }> {
+): Promise<{ returnTo: string; user: { id: string; name?: string; email?: string } }> {
   sweep();
   const error = typeof req.query.error === "string" ? req.query.error : "";
   const code = typeof req.query.code === "string" ? req.query.code : "";
@@ -204,8 +175,8 @@ export async function completeSso(
     apiUrl,
   );
 
-  const { cookie, user } = openSession(data, apiUrl);
-  return { cookie, returnTo: entry.returnTo, user };
+  const { user } = openSession(data, apiUrl);
+  return { returnTo: entry.returnTo, user };
 }
 
 /** Test seam: the pending map is process-local and otherwise unreachable. */

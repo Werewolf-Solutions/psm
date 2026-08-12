@@ -61,9 +61,9 @@ process.env.WEREWOLF_API_URL = `http://127.0.0.1:${dappPort}`;
 process.env.WEREWOLF_WEB_ORIGIN = "https://werewolf.test";
 process.env.PORT = "4317";
 
-const { SSO_CALLBACK_PATH, completeSso, pendingCount, ssoAuthorizeUrl, ssoAvailability, ssoRedirectUri, werewolfWebOrigin } =
+const { SSO_CALLBACK_PATH, completeSso, pendingCount, ssoAuthorizeUrl, ssoRedirectUri, werewolfWebOrigin } =
   await import("./sso.ts");
-const { sessionFromRequest, SESSION_COOKIE } = await import("./session.ts");
+const { currentUser } = await import("./session.ts");
 
 const req = (query: Record<string, string> = {}, headers: Record<string, string> = {}) =>
   ({ query, headers: { "user-agent": "test", ...headers } }) as any;
@@ -87,11 +87,10 @@ test.after(() => {
   delete process.env.WEREWOLF_WEB_ORIGIN;
 });
 
-test("a local instance redirects to the loopback callback dapp allows", () => {
+test("the cockpit redirects to the loopback callback dapp allows", () => {
   // dapp's native rule: http, loopback host, this exact path, any port.
-  assert.equal(ssoRedirectUri(req()), `http://127.0.0.1:4317${SSO_CALLBACK_PATH}`);
+  assert.equal(ssoRedirectUri(), `http://127.0.0.1:4317${SSO_CALLBACK_PATH}`);
   assert.equal(SSO_CALLBACK_PATH, "/api/cloud/sso/callback");
-  assert.equal(ssoAvailability(req()).available, true);
 });
 
 test("the authorize URL carries client_id, state and an S256 challenge", async () => {
@@ -114,7 +113,7 @@ test("a full round trip opens a psm session", async () => {
   const state = url.searchParams.get("state")!;
   const code = mintCode(url);
 
-  const { cookie, user, returnTo } = await completeSso(req({ code, state }));
+  const { user, returnTo } = await completeSso(req({ code, state }));
   assert.equal(user.id, "user-sso");
   assert.equal(returnTo, "/");
 
@@ -122,8 +121,7 @@ test("a full round trip opens a psm session", async () => {
   assert.equal(pkceChallenge(lastExchange.codeVerifier), url.searchParams.get("code_challenge"));
   assert.equal(lastExchange.redirectUri, url.searchParams.get("redirect_uri"));
 
-  const resolved = await sessionFromRequest(req({}, { cookie: `${SESSION_COOKIE}=${cookie}` }));
-  assert.equal(resolved?.id, "user-sso", "the session works like any other");
+  assert.equal((await currentUser())?.id, "user-sso", "the exchange left us signed in");
 });
 
 test("returnTo survives the round trip", async () => {
@@ -165,27 +163,6 @@ test("in-flight logins do not accumulate", async () => {
   assert.equal(pendingCount(), before, "a finished login releases its verifier");
 });
 
-test("a hosted instance uses its public origin, and says when dapp has not allowed it", () => {
-  setModeForTesting("hosted");
-  try {
-    const hosted = req({}, { host: "psm.werewolf.solutions", "x-forwarded-proto": "https" });
-    assert.equal(
-      ssoRedirectUri(hosted),
-      `https://psm.werewolf.solutions${SSO_CALLBACK_PATH}`,
-    );
-    const availability = ssoAvailability(hosted);
-    assert.equal(availability.available, false, "a public https callback is not a loopback URI");
-    assert.match(availability.reason!, /allowlist/);
-
-    // ...and once dapp has registered it, psm stops nagging
-    process.env.PSM_SSO_REGISTERED = "1";
-    assert.equal(ssoAvailability(hosted).available, true);
-    delete process.env.PSM_SSO_REGISTERED;
-  } finally {
-    setModeForTesting("dev");
-  }
-});
-
 test("the consent screen origin follows the API, except locally", () => {
   const previous = process.env.WEREWOLF_WEB_ORIGIN;
   delete process.env.WEREWOLF_WEB_ORIGIN;
@@ -217,11 +194,3 @@ test("an explicit web origin beats anything discovered", () => {
   }
 });
 
-test("an explicit public origin overrides the guessed one", () => {
-  process.env.PSM_PUBLIC_ORIGIN = "https://psm.example.com/";
-  try {
-    assert.equal(ssoRedirectUri(req()), `https://psm.example.com${SSO_CALLBACK_PATH}`);
-  } finally {
-    delete process.env.PSM_PUBLIC_ORIGIN;
-  }
-});

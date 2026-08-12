@@ -1,7 +1,16 @@
 # Design: hosted psm at `psm.werewolf.solutions`, with local projects still mapped
 
-- **Status:** phases 1–3 built in psm (2026-08-12); phase 2's provider side and phase 4
-  still outstanding — see "Where this stands" at the bottom
+- **Status: SUPERSEDED (2026-08-12).** The shape below — a psm *server* on the internet,
+  multi-tenant, with shell-out routes withheld from a hosted build — was built and then
+  retired the same day, once the droplet's actual constraints were checked: 1 GB of RAM
+  shared with dapp prod, staging, redis and nginx, and an ops doc that says it cannot run
+  `npm ci`. **What shipped instead is the simpler thing this document itself describes in
+  "Chosen shape": a hosted *page* and a local agent.** psm.werewolf.solutions is static
+  files; the browser signs in against werewolf-dapp as a separate `psm-web` application and
+  talks to `127.0.0.1` directly. There is no psm process on any server, so multi-tenancy,
+  hosted auth and shell-out isolation all became moot rather than solved.
+  Read `docs/deploy/PUBLISHING-A-NEW-APP.md` for what actually happens. This file is kept
+  for the reasoning in "Why this shape" and the security review, both of which still hold.
 - **Date:** 2026-08-11 (plan), 2026-08-12 (build)
 - **Repos touched:** `psm` (this repo) + `werewolf-dapp` (auth) + deployment
 - **Supersedes for the hosted case:** `docs/werewolf-sso-plan.md` (that plan's redirect_uri

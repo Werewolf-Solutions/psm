@@ -5,10 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "./scripts/dev.sh",
-    "prod": "./scripts/prod.sh",
     "agent": "PSM_MODE=agent tsx src/server/index.ts",
+    "web": "./scripts/static.sh",
     "server": "./scripts/dev.sh",
-    "start": "PSM_MODE=hosted tsx src/server/index.ts",
     "scan": "tsx src/cli.ts scan",
     "build:md": "tsx src/cli.ts build",
     "list": "tsx src/cli.ts list",
