@@ -12,6 +12,23 @@ let STATE = {
   mode: "dev", can: { runsCommands: true, scansImplicitly: true, canLink: true },
 };
 
+/**
+ * Every call about the machine goes through the agent.
+ *
+ * Served by psm itself these are `fetch` and `new EventSource` with the path
+ * untouched — same-origin, exactly as the cockpit always worked. Served from
+ * psm.werewolf.solutions they are re-pointed at the paired agent on loopback
+ * and carry its token. Routing them one by one is what makes a hosted board
+ * show *this* machine's projects rather than the hosted server's empty ones.
+ *
+ * Two things deliberately stay same-origin and so keep calling `fetch`:
+ * `/api/auth/*`, which is the session of whichever origin served the page (and
+ * is also how `detectHost` tells the two apart), and `/api/cloud/*` in
+ * cloud.js, which is a passthrough to PSM Cloud rather than to a machine.
+ */
+const agentApi = (path, init) => PsmAgent.api(path, init);
+const agentStream = (path) => PsmAgent.agentStream(path);
+
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, html) => {
   const n = document.createElement(tag);
@@ -88,7 +105,7 @@ async function refreshModelCatalog(project, engine, model, effort, effortSelect)
   }
   const mine = (select) => MODEL_FETCH_TOKENS.get(select) === token;
   try {
-    const response = await fetch(
+    const response = await agentApi(
       `/api/projects/${encodeURIComponent(project)}/ai/models?engine=${encodeURIComponent(engine)}`,
       { cache: "no-store" },
     );
@@ -106,7 +123,7 @@ async function refreshModelCatalog(project, engine, model, effort, effortSelect)
 }
 
 async function load() {
-  const r = await fetch("/api/projects");
+  const r = await agentApi("/api/projects");
   if (!r.ok) throw new Error(`projects unavailable (${r.status})`);
   const data = await r.json();
   STATE.projects = data.projects;
@@ -122,7 +139,7 @@ async function load() {
 
 async function fetchRuntimeServices(force = false) {
   try {
-    const response = await fetch("/api/runtime/services" + (force ? "?refresh=1" : ""));
+    const response = await agentApi("/api/runtime/services" + (force ? "?refresh=1" : ""));
     const services = (await response.json()).services || {};
     const signature = JSON.stringify(Object.values(services).map((service) => ({
       id: service.id,
@@ -141,7 +158,7 @@ async function fetchRuntimeServices(force = false) {
 // refresh the "Working on" lane; re-render only when it actually changed
 async function fetchSessions(rerender = true) {
   try {
-    const r = await fetch("/api/sessions");
+    const r = await agentApi("/api/sessions");
     const sessions = (await r.json()).sessions || [];
     const sig = JSON.stringify(
       sessions.map((s) => ({
@@ -198,7 +215,7 @@ function projectByName(name) {
 
 /** Mint this project's id server-side; throws so callers can decide how loud to be. */
 async function assignProjectId(project) {
-  const response = await fetch(`/api/projects/${encodeURIComponent(project.name)}/id`, { method: "POST" });
+  const response = await agentApi(`/api/projects/${encodeURIComponent(project.name)}/id`, { method: "POST" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "could not assign an id");
   project.id = data.id;
@@ -441,7 +458,7 @@ async function stopWorking(name) {
 
   let r;
   try {
-    r = await fetch(`/api/projects/${encodeURIComponent(name)}/working/stop`, { method: "POST" });
+    r = await agentApi(`/api/projects/${encodeURIComponent(name)}/working/stop`, { method: "POST" });
   } catch {
     toast("Could not stop working");
     return false;
@@ -705,7 +722,7 @@ async function saveDrawer() {
   };
   // don't send pinned:false as a stored override unless it was set; keep simple: always send
   const name = editing.name;
-  const r = await fetch(`/api/projects/${encodeURIComponent(name)}`, {
+  const r = await agentApi(`/api/projects/${encodeURIComponent(name)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -847,7 +864,7 @@ async function toggleWorking() {
 // persist an override so per-project choices are remembered
 async function patchProject(name, body) {
   try {
-    const r = await fetch(`/api/projects/${encodeURIComponent(name)}`, {
+    const r = await agentApi(`/api/projects/${encodeURIComponent(name)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -957,7 +974,7 @@ async function openWorkspaceChat(fromRoute = false) {
   }
   let w = { aiEngine: "claude", aiModel: null, aiEffort: null, aiFullAccess: false };
   try {
-    w = await (await fetch("/api/workspace")).json();
+    w = await (await agentApi("/api/workspace")).json();
   } catch {}
   openWorkspace(
     { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null,
@@ -1044,7 +1061,7 @@ function renderWebPane() {
     save.onclick = async () => {
       const port = Number(inp.value.trim());
       if (!port) return;
-      await fetch(`/api/projects/${encodeURIComponent(WS.name)}`, {
+      await agentApi(`/api/projects/${encodeURIComponent(WS.name)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ port }),
@@ -1141,7 +1158,7 @@ async function toggleDevMode(on = !DEV.on) {
   const button = $("#ws-dev");
   button.disabled = true;
   try {
-    const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/preview`);
+    const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/preview`);
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return toast(data.error || "Could not start the dev-mode preview");
     DEV.proxyUrl = data.url;
@@ -1340,7 +1357,7 @@ window.addEventListener("message", (event) => {
 
 function connectLogs(name) {
   if (WS.es) WS.es.close();
-  const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
+  const es = agentStream(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
   WS.es = es;
   es.onopen = () => ($("#ws-console").innerHTML = ""); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
@@ -1537,7 +1554,7 @@ async function loadTodos(force = false) {
   TODOS.error = null;
   renderTodos();
   try {
-    const response = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/todos`);
+    const response = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/todos`);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Could not load todos");
     TODOS.project = WS.name;
@@ -1627,7 +1644,7 @@ async function loadCapabilities(force = false) {
   CAPS.loading = true;
   renderCapabilities();
   try {
-    const response = await fetch("/api/catalog");
+    const response = await agentApi("/api/catalog");
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Could not load capability catalog");
     CAPS.project = WS.name;
@@ -1792,7 +1809,7 @@ async function reviewCustomCapability() {
         },
   };
   try {
-    const response = await fetch("/api/catalog/custom/preview", {
+    const response = await agentApi("/api/catalog/custom/preview", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(raw),
@@ -1812,7 +1829,7 @@ async function previewCapability(ref, action) {
   if (!capability || !WS.name || CAPS.applying) return;
   CAPS.preview = null;
   try {
-    const response = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/attachments/preview`, {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/attachments/preview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(action === "attach" ? { add: ref } : { remove: ref }),
@@ -1833,7 +1850,7 @@ async function confirmCapabilityChange() {
   renderCapabilityPreview();
   try {
     if (pending.action === "custom") {
-      const response = await fetch("/api/catalog/custom", {
+      const response = await agentApi("/api/catalog/custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1855,7 +1872,7 @@ async function confirmCapabilityChange() {
     const url = attach
       ? `/api/projects/${encodedProject}/attachments`
       : `/api/projects/${encodedProject}/attachments/${encodeURIComponent(pending.ref)}`;
-    const response = await fetch(url, {
+    const response = await agentApi(url, {
       method: attach ? "POST" : "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1984,7 +2001,7 @@ function applyPlannerPlan(plan) {
 }
 
 function connectPlannerRole(project, role) {
-  const es = new EventSource(
+  const es = agentStream(
     `/api/projects/${encodeURIComponent(project)}/planner/stream?role=${encodeURIComponent(role)}`,
   );
   PLANNER.streams[role] = es;
@@ -2051,7 +2068,7 @@ async function connectPlanner() {
   if (!PLANNER.streams.planner) connectPlannerRole(project, "planner");
   if (!PLANNER.streams.reviewer) connectPlannerRole(project, "reviewer");
   try {
-    const response = await fetch(`/api/projects/${encodeURIComponent(project)}/planner/state`);
+    const response = await agentApi(`/api/projects/${encodeURIComponent(project)}/planner/state`);
     const data = await response.json();
     if (PLANNER.project !== project) return;
     PLANNER.loop = data.state || null;
@@ -2086,7 +2103,7 @@ async function sendPlannerMessage() {
   renderPlanner();
   try {
     const endpoint = fresh ? "start" : "message";
-    const response = await fetch(
+    const response = await agentApi(
       `/api/projects/${encodeURIComponent(WS.name)}/planner/${endpoint}`,
       {
         method: "POST",
@@ -2115,7 +2132,7 @@ async function sendPlannerMessage() {
 
 async function cancelPlanner() {
   if (!WS.name) return;
-  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/planner/cancel`, { method: "POST" });
+  await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/planner/cancel`, { method: "POST" });
   toast("Planning stopped");
 }
 
@@ -2477,7 +2494,7 @@ async function loadPlan(force = false) {
   PLAN.loading = true;
   if (!PLAN.saved) renderPlan();
   try {
-    const response = await fetch(`/api/projects/${encodeURIComponent(project)}/plans`);
+    const response = await agentApi(`/api/projects/${encodeURIComponent(project)}/plans`);
     const data = await response.json();
     if (WS.name !== project) return;
     PLAN.saved = data.latest || null;
@@ -2498,7 +2515,7 @@ async function savePlan() {
   PLAN.loading = true;
   renderPlan();
   try {
-    const response = await fetch(
+    const response = await agentApi(
       `/api/projects/${encodeURIComponent(WS.name)}/plans/${encodeURIComponent(PLAN.saved.id)}`,
       {
         method: "PUT",
@@ -2529,7 +2546,7 @@ async function confirmPlan() {
   PLAN.loading = true;
   renderPlan();
   try {
-    const response = await fetch(
+    const response = await agentApi(
       `/api/projects/${encodeURIComponent(WS.name)}/plans/${encodeURIComponent(PLAN.saved.id)}/confirm`,
       {
         method: "POST",
@@ -2679,7 +2696,7 @@ function renderSessionPane(data) {
 async function fetchSessionState() {
   if (!WS.name) return;
   try {
-    const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/state`);
+    const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/state`);
     if (!r.ok) return;
     renderSessionPane(await r.json());
   } catch {}
@@ -2871,7 +2888,7 @@ async function answerQuestion(event) {
     const project = STATE.projects.find((p) => p.name === active.project);
     const fullAccess = WS.name === active.project ? WS.fullAccess : !!project?.aiFullAccess;
     const planner = active.scope === "planner";
-    const r = await fetch(`/api/projects/${encodeURIComponent(active.project)}/${planner ? "planner" : "ai"}/question`, {
+    const r = await agentApi(`/api/projects/${encodeURIComponent(active.project)}/${planner ? "planner" : "ai"}/question`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3049,7 +3066,7 @@ function connectAi(name) {
   const params = new URLSearchParams({ engine: WS.engine });
   if (WS.model) params.set("model", WS.model);
   if (WS.effort) params.set("effort", WS.effort);
-  const es = new EventSource(`/api/projects/${encodeURIComponent(name)}/ai/stream?${params}`);
+  const es = agentStream(`/api/projects/${encodeURIComponent(name)}/ai/stream?${params}`);
   WS.aiEs = es;
   // on every (re)connection the server replays the whole transcript, so wipe
   // first — this makes a dropped/reconnected stream rebuild cleanly instead of
@@ -3168,7 +3185,7 @@ async function fetchRecap() {
     banner.textContent = "Recalling where we left off…";
   }
   try {
-    const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/recap`);
+    const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/recap`);
     setRecap((await r.json()).summary);
   } catch {
     banner.classList.remove("loading");
@@ -3212,14 +3229,14 @@ function setAiLimit(limit) {
 async function fetchLimit() {
   if (!WS.name) return;
   try {
-    const r = await fetch(`/api/ai/limit?engine=${encodeURIComponent(WS.engine)}`);
+    const r = await agentApi(`/api/ai/limit?engine=${encodeURIComponent(WS.engine)}`);
     setAiLimit((await r.json()).limit);
   } catch {}
 }
 
 /** One place that hands a message to the project's AI with the current selection. */
 async function postAiMessage(name, message) {
-  const r = await fetch(`/api/projects/${encodeURIComponent(name)}/ai`, {
+  const r = await agentApi(`/api/projects/${encodeURIComponent(name)}/ai`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort, fullAccess: WS.fullAccess }),
@@ -3267,7 +3284,7 @@ async function sendAi() {
 
 async function cancelAi() {
   if (!WS.name) return;
-  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/ai/cancel`, { method: "POST" });
+  await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/cancel`, { method: "POST" });
 }
 
 /* ---- Deploy pane ---- */
@@ -3304,7 +3321,7 @@ function connectDeployLogs() {
   if (WS.depEs) WS.depEs.close();
   $("#ws-depconsole").innerHTML = "";
   setDepStatus("idle");
-  const es = new EventSource(
+  const es = agentStream(
     `/api/projects/${encodeURIComponent(WS.name)}/logs/stream?kind=${encodeURIComponent(depKind())}`,
   );
   WS.depEs = es;
@@ -3341,7 +3358,7 @@ async function deployRun() {
   WS.depArmed = false;
   $("#ws-dep-run").textContent = "Deploy";
   setDepStatus("running");
-  const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
+  const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind: depKind() }),
@@ -3354,7 +3371,7 @@ async function deployRun() {
 }
 
 async function deployStop() {
-  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
+  await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind: depKind() }),
@@ -3382,7 +3399,7 @@ async function wsRun() {
   const command = $("#ws-cmd").value.trim();
   if (!command) return toast("Set a run command first");
   setWsStatus("running");
-  const r = await fetch(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
+  const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),
@@ -3399,7 +3416,7 @@ async function wsRun() {
 
 async function wsStop() {
   if (!WS.name) return;
-  await fetch(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
+  await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind: "run" }),
@@ -3409,7 +3426,7 @@ async function wsStop() {
 
 async function pollProcs() {
   try {
-    const r = await fetch("/api/procs");
+    const r = await agentApi("/api/procs");
     STATE.procs = (await r.json()).procs || {};
   } catch {
     return;
@@ -3740,7 +3757,7 @@ async function loadProcs() {
   PROCS.loading = true;
   renderProcs();
   try {
-    const r = await fetch("/api/machine/processes");
+    const r = await agentApi("/api/machine/processes");
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || "Could not read the process list");
     PROCS.list = data.processes || [];
@@ -3861,7 +3878,7 @@ function procRow(proc) {
 }
 
 async function stopProc(proc, quiet = false) {
-  const r = await fetch(`/api/machine/processes/${proc.pid}/stop`, {
+  const r = await agentApi(`/api/machine/processes/${proc.pid}/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
@@ -4024,7 +4041,7 @@ async function loadPairing() {
   box.hidden = LINKS.mode !== "agent";
   if (box.hidden) return;
   try {
-    const r = await fetch("/api/agent/token");
+    const r = await agentApi("/api/agent/token");
     if (!r.ok) return (box.hidden = true);
     const data = await r.json();
     PAIRING.token = data.token;
@@ -4045,7 +4062,7 @@ async function loadLinks() {
   const list = $("#links-list");
   list.innerHTML = '<div class="links-empty">Loading…</div>';
   try {
-    const r = await fetch("/api/links");
+    const r = await agentApi("/api/links");
     const data = await r.json();
     LINKS.links = data.links || [];
     LINKS.mode = data.mode || "dev";
@@ -4111,7 +4128,7 @@ async function addLink() {
   renderLinks();
   setLinkError("");
   try {
-    const r = await fetch("/api/links", {
+    const r = await agentApi("/api/links", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind: LINKS.kind, path }),
@@ -4130,7 +4147,7 @@ async function addLink() {
 }
 
 async function unlink(link) {
-  const r = await fetch(`/api/links/${encodeURIComponent(link.id)}`, { method: "DELETE" });
+  const r = await agentApi(`/api/links/${encodeURIComponent(link.id)}`, { method: "DELETE" });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) return toast(data.error || "Could not unlink");
   LINKS.links = data.links || LINKS.links.filter((l) => l.id !== link.id);
@@ -4147,7 +4164,7 @@ async function browseTo(path) {
   list.innerHTML = '<div class="links-empty">Reading…</div>';
   try {
     const params = path ? `?path=${encodeURIComponent(path)}` : "";
-    const r = await fetch(`/api/fs/browse${params}`);
+    const r = await agentApi(`/api/fs/browse${params}`);
     const data = await r.json();
     if (!r.ok) {
       list.innerHTML = "";
@@ -4392,7 +4409,7 @@ async function fetchUsage(force = false, quiet = false) {
     });
     if (force) params.set("refresh", "1");
     const url = `/api/projects/${encodeURIComponent(scope.project)}/ai/usage?${params}`;
-    const response = await fetch(url);
+    const response = await agentApi(url);
     if (!response.ok) throw new Error("usage request failed");
     const snapshot = await response.json();
     const signature = usageSnapshotSignature(snapshot);
@@ -4448,7 +4465,7 @@ async function createProject() {
     applyHouseRules: $("#new-rules").checked,
     practices: checkedPractices("#new-practices-list"),
   };
-  const r = await fetch("/api/projects/new", {
+  const r = await agentApi("/api/projects/new", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -4497,7 +4514,7 @@ let PRACTICES = [];
 async function loadPractices() {
   if (PRACTICES.length) return PRACTICES;
   try {
-    const r = await fetch("/api/practices");
+    const r = await agentApi("/api/practices");
     const data = await r.json();
     PRACTICES = data.practices || [];
   } catch {
@@ -4528,7 +4545,7 @@ const RULES = { scope: "__global__", global: "", project: null };
 
 async function openRules(projectName) {
   await loadPractices();
-  RULES.global = await fetch("/api/house-rules").then((r) => r.json()).then((d) => d.content || "").catch(() => "");
+  RULES.global = await agentApi("/api/house-rules").then((r) => r.json()).then((d) => d.content || "").catch(() => "");
   const select = $("#rules-scope");
   select.innerHTML =
     '<option value="__global__">Workspace baseline (all projects)</option>' +
@@ -4550,7 +4567,7 @@ async function selectRulesScope(scope) {
     $("#rules-practices").hidden = true;
     return;
   }
-  const data = await fetch("/api/projects/" + encodeURIComponent(scope) + "/rules")
+  const data = await agentApi("/api/projects/" + encodeURIComponent(scope) + "/rules")
     .then((r) => r.json())
     .catch(() => ({ rules: "", practices: [] }));
   RULES.project = { name: scope, practices: data.practices || [] };
@@ -4563,7 +4580,7 @@ async function selectRulesScope(scope) {
 
 async function saveRules() {
   if (RULES.scope === "__global__") {
-    const ok = await fetch("/api/house-rules", {
+    const ok = await agentApi("/api/house-rules", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ content: $("#rules-text").value }),
@@ -4572,12 +4589,12 @@ async function saveRules() {
   }
   const name = RULES.scope;
   try {
-    await fetch("/api/projects/" + encodeURIComponent(name) + "/practices", {
+    await agentApi("/api/projects/" + encodeURIComponent(name) + "/practices", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ practices: checkedPractices("#rules-practices-list") }),
     });
-    await fetch("/api/projects/" + encodeURIComponent(name) + "/rules", {
+    await agentApi("/api/projects/" + encodeURIComponent(name) + "/rules", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ rules: $("#rules-text").value }),
@@ -4606,7 +4623,7 @@ async function openSkills() {
 async function loadSkills() {
   const project = $("#skills-scope").value;
   $("#skills-body").innerHTML = '<div class="cloud-empty">Loading…</div>';
-  const data = await fetch("/api/skills-usage" + (project ? "?project=" + encodeURIComponent(project) : ""))
+  const data = await agentApi("/api/skills-usage" + (project ? "?project=" + encodeURIComponent(project) : ""))
     .then((r) => r.json())
     .catch(() => ({ skills: [] }));
   const skills = data.skills || [];
@@ -4708,7 +4725,7 @@ $("#pairing-copy").onclick = async () => {
   }
 };
 $("#pairing-rotate").onclick = async () => {
-  const r = await fetch("/api/agent/token/rotate", { method: "POST" });
+  const r = await agentApi("/api/agent/token/rotate", { method: "POST" });
   if (!r.ok) return toast("Could not rotate the token");
   PAIRING.token = (await r.json()).token;
   PAIRING.shown = true;
@@ -4734,7 +4751,7 @@ $("#rescan").onclick = async () => {
   toast("Rescanned");
 };
 $("#export").onclick = async () => {
-  const r = await fetch("/api/export", { method: "POST" });
+  const r = await agentApi("/api/export", { method: "POST" });
   toast(r.ok ? "PROJECTS.md written" : "Export failed");
 };
 $("#search").oninput = (e) => {
