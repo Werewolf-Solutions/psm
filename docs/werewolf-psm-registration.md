@@ -1,7 +1,9 @@
 # Registering psm as a Werewolf cloud application
 
-- **Status:** done on local dev (verified end to end); outstanding on production
-- **Date:** 2026-08-12
+- **Status:** done on local dev (verified end to end); outstanding on production. The
+  hosted-callback question below is **decided** — two rows, `psm` and `psm-web` — and both
+  bootstrap scripts exist. What is left is running them against production.
+- **Date:** 2026-08-12, production re-checked 2026-08-13
 - **Repo that owns it:** `werewolf-dapp` (a database record, created by a script)
 
 ## What psm needs
@@ -53,39 +55,54 @@ callback redeemed the code → signed in. A replayed callback was refused.
 
 ## Production — outstanding
 
-On 2026-08-12, `https://werewolf.solutions/api/v1` answered:
+Re-checked 2026-08-13. `https://werewolf.solutions/api/v1` has **no cloud applications
+registered at all** — this is not psm-specific:
 
 ```
-POST /apps/psm/auth/exchange → 503 {"code":"app_not_configured",
-                                    "message":"Cloud application \"psm\" is not configured"}
+POST /apps/psm/auth/exchange     → 503 app_not_configured
+POST /apps/psm-web/auth/exchange → 503 app_not_configured
+POST /apps/todo/auth/exchange    → 503 app_not_configured
 ```
 
-`/apps/todo/auth/exchange` answered identically, and `/apps/:appKey/public` was absent
-there. That 404 is the controller mapping `app_not_configured` to 404, **not** a missing
-route — production's dapp code is current; the row simply has not been bootstrapped there. Running `bootstrap:psm` against the production
-database (with the production `PSM_BUSINESS_ID`) is what closes this.
+Use the **exchange** endpoint to check this, not `/apps/:key/public`. The latter answers
+404 for every key, which reads like a missing route and is not: the controller maps
+`app_not_configured` to 404. Production's dapp code is current; the collection is empty.
 
-## Hosted psm still needs a decision
+That `todo` is unregistered too is worth someone's attention separately — todo-app is
+live, so either it does not use this sign-in path in production or its cloud sign-in is
+broken there. Not investigated here.
+
+Running both bootstrap scripts against the production database closes psm's half. See
+`docs/deploy/PUBLISHING-A-NEW-APP.md` step 2 for the three ways to run them and why
+`mongosh` by hand is not one of them.
+
+## Hosted psm — decided: two rows
 
 `isRedirectAllowed` for a `native` client requires `http` + a loopback host, so
-`https://psm.werewolf.solutions/api/cloud/sso/callback` can never be accepted by that row
-— confirmed against local dapp, which returns `redirectAllowed:false` for it. Three ways
-forward, in order of preference:
+`https://psm.werewolf.solutions/auth/callback` can never be accepted by the `psm` row —
+confirmed against local dapp, which returns `redirectAllowed:false` for it. One row cannot
+serve both halves.
 
-1. **A second application for the hosted front end.** Keep `psm` native for local cockpits
-   and agents; add `psm-web` with `clientType: 'web'` and an exact `redirectUris` list.
-   Cleanest: the two clients have genuinely different trust properties, and revoking one
-   does not touch the other. Costs psm a config knob for which key to use.
-2. **Allow both on one row.** Extend `isRedirectAllowed` so a native client may also match
-   exact https entries in `redirectUris`. Smallest change for psm, but it widens the
-   native rule for every future native app.
-3. **Flip `psm` to `web`.** Simplest record, but it breaks loopback sign-in for every local
-   cockpit and agent. Avoid.
+**Resolved in favour of a second application** (psm commit `3b045e5`, 2026-08-12), which
+was option 1 of the three weighed here. The two clients have genuinely different trust
+properties, and revoking one does not touch the other:
 
-Until one lands, hosted psm hides "Continue with Werewolf" and says why
-(`ssoAvailability()` in `src/server/sso.ts`). Set `PSM_SSO_REGISTERED=1` once dapp accepts
-the hosted callback, and `PSM_PUBLIC_ORIGIN` if psm cannot infer its origin from proxy
-headers.
+| Row | `clientType` | Used by | Redirect |
+|---|---|---|---|
+| `psm` | `native` | the local cockpit and agents | loopback, any port, fixed path |
+| `psm-web` | `web` | the hosted page at psm.werewolf.solutions | exact https allowlist |
+
+`web/auth.js` hardcodes `APP_KEY = "psm-web"` and runs PKCE in the browser; the cockpit
+keeps its server-side loopback flow in `src/server/sso.ts`. Which one applies is decided by
+asking the page's own origin for `/api/auth/session`, not by guessing from the hostname.
+werewolf-dapp ships `server/scripts/bootstrap-psm-web.js` alongside `bootstrap-psm-cloud.js`.
+
+The two rejected options, for the record: widening `isRedirectAllowed` so a native client
+may also match exact https entries (smallest change, but loosens the native rule for every
+future app), and flipping `psm` to `web` (breaks loopback sign-in for every local install).
+
+Local instances set `PSM_SSO_REGISTERED=1` once dapp accepts their callback, and
+`PSM_PUBLIC_ORIGIN` if psm cannot infer its origin from proxy headers.
 
 ## Verifying any environment
 

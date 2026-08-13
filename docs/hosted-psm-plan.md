@@ -166,7 +166,7 @@ the repo.
    Proposal: both, listed per agent, with the id naming the *project* and the agent naming the
    *checkout*.
 
-## Where this stands (2026-08-12)
+## Where this stands (2026-08-12, revised 2026-08-13)
 
 Built, with tests:
 
@@ -206,16 +206,18 @@ Built, with tests:
 
 Not built / blocked:
 
-- **The `psm` CloudApplication record on production.** Local dev has it (dapp's
-  `npm run bootstrap:psm` creates it), and the redirect flow was driven end to end against
-  a local dapp on 2026-08-12 — consent screen, approval, code exchange, session, replay
-  refused. Production answered `503 app_not_configured` on the same date and is running an
-  current there — the row simply has not been bootstrapped. See
-  `docs/werewolf-psm-registration.md`, which also covers the choice hosted psm forces: a
-  `native` client cannot accept an https callback, so the hosted front end needs either its
-  own application row or a widened rule.
-- **Phase 4, the cross-machine index.** Agents do not yet push a project index, so hosted psm
-  has no projects of its own — it authenticates, serves the UI, and says so plainly.
+- **The CloudApplication rows on production.** Both flows were driven end to end against a
+  *local* dapp on 2026-08-12 — consent screen, approval, code exchange, session, replay
+  refused. Production has no cloud applications registered at all (re-checked 2026-08-13:
+  `psm`, `psm-web` and `todo` all answer `503 app_not_configured`), so this is a bootstrap
+  that has not been run rather than anything to design. The hosted-callback question that
+  used to sit here is **decided**: two rows, `psm` (`native`, cockpit and agents) and
+  `psm-web` (`web`, the hosted page), shipped in `3b045e5`. See
+  `docs/werewolf-psm-registration.md`.
+- **Phase 4, the cross-machine index.** A hosted page now shows real projects whenever an
+  agent is paired — every machine-bound call routes through it as of `5488f15`. What is
+  still missing is projects *without* a live agent: nothing pushes an index, so an unpaired
+  or offline machine is invisible rather than listed-but-dimmed.
 - **Static UI build.** `web/` is still unfingerprinted vanilla JS served from disk.
 - **Rate limiting, CSRF, audit logging** on hosted mutations. There are no hosted mutations
   yet beyond cloud passthrough, but they arrive with phase 4.
