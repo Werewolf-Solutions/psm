@@ -139,16 +139,43 @@ to get right:
   ETag revalidation — otherwise a returning visitor runs last week's JavaScript against
   this week's HTML.
 
-## 4. GitHub secrets 👤
+## 4. GitHub secrets ⚙️ once for the org, 👤 per environment
 
-`DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER` — **per repository**, they do not carry
-over between them. Same values dapp's deploy uses. The deploy user needs write access to
-`/var/www/<app>.werewolf.solutions`.
+`DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER` — set these **once as organization
+secrets** (Werewolf-Solutions → Settings → Secrets and variables → Actions →
+*New organization secret*), scoped to the repos that deploy. Every app repo then
+inherits them, and rotating the droplet key is one edit rather than one per repo.
+Setting them requires org-admin rights; a repo-scoped `gh` token gets 403 and the
+web UI is the reliable path.
+
+Repository secrets of the same name shadow the org's, and **environment** secrets
+shadow both. That precedence is the mechanism for staging: same workflow, same
+secret names, different machine.
+
+Two things the names do not tell you, and both have cost a red deploy:
+
+- **`DEPLOY_SSH_KEY` is the private half** — the file *without* `.pub`. A public key
+  here fails as `Permission denied (publickey)`, which reads like an authorization
+  problem on the droplet rather than a wrong upload.
+- **The key's public half must be in `~<DEPLOY_USER>/.ssh/authorized_keys`** on the
+  droplet (`ssh-copy-id -i <key>.pub <user>@<host>`), and `DEPLOY_USER` needs write
+  access to `/var/www/<app>.werewolf.solutions`. Inheriting the org secret does not
+  mean the target directory exists yet — that is step 3.
+
+Non-secrets belong in **environment variables**, not secrets: `DEPLOY_HOSTNAME` and
+`DEPLOY_TARGET_DIR` differ per environment, and being able to read them in the UI is
+worth more than hiding a hostname.
 
 ## 5. Deploy workflow ⚙️
 
-Copy `todo-app/.github/workflows/deploy.yml`. On push to `master`: install, test, build
-(if there is a build), rsync, smoke-check.
+Copy `psm/.github/workflows/deploy.yml`. On push to `master` it deploys
+**production**; `workflow_dispatch` offers a choice of environment, which is the
+one-button deploy. Steps: install, test, preflight, build (if there is a build),
+rsync, smoke-check.
+
+Put the **preflight before anything touches the droplet** — missing secrets, a public
+key pasted where a private one goes, a target directory that does not exist, a deploy
+user that cannot write to it. rsync reports all four as `unexplained error (code 255)`.
 
 ```yaml
 rsync -az --delete -e "ssh -i ~/.ssh/deploy_key" \
@@ -200,9 +227,9 @@ Roughly in order of how much time each would save:
    entirely mechanical once step 0 is decided.
 3. **The vhost install** (step 3) as an idempotent script alongside `dns.mjs`; the only
    genuinely manual part is the first certbot run.
-4. **A deploy preflight** that checks steps 1, 2 and 4 are done *before* the first push
-   to `master`, so the first deploy does not fail on a missing DNS record or an
-   unregistered app.
+4. ~~**A deploy preflight**~~ — done in psm's `deploy.yml` for steps 3 and 4 (secrets
+   present, private key, target directory writable). Still unchecked: DNS (step 1) and
+   whether the app is registered (step 2), both of which fail later and less clearly.
 
 ## Things that have actually gone wrong
 

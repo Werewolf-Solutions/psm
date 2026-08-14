@@ -1,15 +1,36 @@
-name: Deploy psm.werewolf.solutions
+name: Deploy psm
 
 on:
   push:
     branches:
       - master
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Where to deploy
+        type: choice
+        options:
+          - production
+          - staging
+        default: production
 
-concurrency:
-  group: deploy-${{ github.ref }}
-  cancel-in-progress: false
-
+# One workflow, two targets. Which one is decided by the environment: a push to
+# master goes to production, and the Actions "Run workflow" button offers either.
+#
+# Credentials are *not* configured here. DEPLOY_HOST / DEPLOY_USER /
+# DEPLOY_SSH_KEY come from organization secrets, so every Werewolf app repo
+# inherits one set and rotating the key is a single edit. An environment may
+# define a secret of the same name, and GitHub prefers the environment's — that
+# is the whole mechanism by which staging reaches a different machine without a
+# second workflow.
+#
+# Per-environment *non*-secrets are environment variables, because a hostname is
+# not a secret and being able to read it in the UI is worth more than hiding it:
+#   DEPLOY_HOSTNAME    psm.werewolf.solutions
+#   DEPLOY_TARGET_DIR  /var/www/psm.werewolf.solutions
+# Both fall back to production's values, so a repo with nothing configured still
+# deploys the way it did before environments existed.
+#
 # psm's hosted half has no server. The whole deploy is "rsync web/ to a directory
 # nginx serves" — no npm on the droplet, no pm2 app, no port, no .env. `pm2 list`
 # must look identical afterwards; that is part of acceptance.
@@ -19,12 +40,26 @@ concurrency:
 #
 # See docs/deploy/PUBLISHING-A-NEW-APP.md for the one-time droplet setup this
 # assumes, and werewolf-dapp/docs/11-operations.md for how a subdomain works here.
+
+concurrency:
+  # Per environment, not per ref: two pushes to master must not race each other
+  # onto the same directory, but a staging deploy has no reason to wait.
+  group: deploy-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    environment:
+      name: ${{ inputs.environment || 'production' }}
+      # Surfaces the deployed URL on the run and on the repo's home page.
+      url: https://${{ vars.DEPLOY_HOSTNAME || 'psm.werewolf.solutions' }}
+
     env:
-      TARGET_DIR: /var/www/psm.werewolf.solutions
+      TARGET_DIR: ${{ vars.DEPLOY_TARGET_DIR || '/var/www/psm.werewolf.solutions' }}
+      BASE_URL: https://${{ vars.DEPLOY_HOSTNAME || 'psm.werewolf.solutions' }}
+      ENVIRONMENT: ${{ inputs.environment || 'production' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +69,8 @@ jobs:
           node-version: 22
           cache: npm
 
+      # Everything that does not need the droplet runs first, so a missing
+      # secret is never reported as a test failure or vice versa.
       - run: npm ci
 
       # There is no build to break, so these are the only gates. They matter more
@@ -45,14 +82,51 @@ jobs:
       - name: Test
         run: npm test
 
+      # Fail here, with a name, rather than 40 lines later inside rsync's exit
+      # code. Every one of these has been the actual cause of a red deploy.
+      - name: Preflight — is this environment configured?
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          missing=""
+          [ -n "$DEPLOY_HOST" ]    || missing="$missing DEPLOY_HOST"
+          [ -n "$DEPLOY_USER" ]    || missing="$missing DEPLOY_USER"
+          [ -n "$DEPLOY_SSH_KEY" ] || missing="$missing DEPLOY_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::environment '$ENVIRONMENT' is missing:$missing"
+            echo "Set them as organization secrets (Werewolf-Solutions → Settings →"
+            echo "Secrets → Actions), or per environment to override the org value."
+            exit 1
+          fi
+          case "$DEPLOY_SSH_KEY" in
+            *"PUBLIC KEY"*)
+              echo "::error::DEPLOY_SSH_KEY holds a *public* key — upload the private half"
+              echo "(the file without .pub): gh secret set DEPLOY_SSH_KEY < ~/.ssh/<key>"
+              exit 1 ;;
+            *"PRIVATE KEY"*) ;;
+            *)
+              echo "::error::DEPLOY_SSH_KEY does not look like a PEM private key"
+              exit 1 ;;
+          esac
+          echo "environment: $ENVIRONMENT"
+          echo "target:      $TARGET_DIR"
+          echo "url:         $BASE_URL"
+
       # The page compares this to the version its paired agent reports, and warns
       # when they have drifted — the hosted half deploys from master while the
-      # agent runs whatever the user has checked out.
+      # agent runs whatever the user has checked out. The environment is stamped
+      # too, so a staging page is identifiable from the browser.
       - name: Stamp the version
         run: |
           node -e "
             const v = require('./package.json').version;
-            require('fs').writeFileSync('web/version.json', JSON.stringify({ version: v, commit: process.env.GITHUB_SHA?.slice(0,7) || null }) + '\n');
+            require('fs').writeFileSync('web/version.json', JSON.stringify({
+              version: v,
+              commit: process.env.GITHUB_SHA?.slice(0, 7) || null,
+              environment: process.env.ENVIRONMENT || null,
+            }) + '\n');
           "
           cat web/version.json
 
@@ -62,6 +136,38 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      # rsync reports every one of these as "unexplained error (code 255)", which
+      # says nothing about which of the three it was. Ask each question directly.
+      - name: Check the droplet accepts us
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=10 \
+              "$DEPLOY_USER@$DEPLOY_HOST" true 2>/tmp/ssh.err || {
+            echo "::error::ssh to $DEPLOY_USER@$DEPLOY_HOST was refused"
+            sed 's/^/  /' /tmp/ssh.err
+            echo "  'Permission denied (publickey)' means this key's public half is not in"
+            echo "  ~$DEPLOY_USER/.ssh/authorized_keys on the droplet, or DEPLOY_USER is not"
+            echo "  the user it was authorized for. Fix with:"
+            echo "    ssh-copy-id -i <key>.pub $DEPLOY_USER@$DEPLOY_HOST"
+            exit 1
+          }
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+              "test -d '$TARGET_DIR'" || {
+            echo "::error::$TARGET_DIR does not exist on the droplet"
+            echo "  One-time setup, as a sudoer — see docs/deploy/PUBLISHING-A-NEW-APP.md step 3:"
+            echo "    sudo mkdir -p $TARGET_DIR && sudo chown $DEPLOY_USER:www-data $TARGET_DIR"
+            exit 1
+          }
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+              "test -w '$TARGET_DIR'" || {
+            echo "::error::$DEPLOY_USER cannot write to $TARGET_DIR"
+            echo "    sudo chown $DEPLOY_USER:www-data $TARGET_DIR"
+            exit 1
+          }
+          echo "ok: $DEPLOY_USER@$DEPLOY_HOST can write $TARGET_DIR"
 
       - name: Sync web/ to the droplet
         # --delete keeps the target exact: a removed file should not linger and be
@@ -73,7 +179,7 @@ jobs:
             --exclude 'preview-inspector.js' \
             -e "ssh -i ~/.ssh/deploy_key" \
             web/ \
-            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${{ env.TARGET_DIR }}/"
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:${TARGET_DIR}/"
 
       - name: Check it is being served
         # Four checks, not one. The last two are the ones that fail silently:
@@ -85,7 +191,7 @@ jobs:
           for path in / /app.js /auth/callback; do
             code=""
             for attempt in 1 2 3 4 5; do
-              code=$(curl -s -o /dev/null -w '%{http_code}' "https://psm.werewolf.solutions$path" || true)
+              code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL$path" || true)
               [ "$code" = "200" ] && break
               echo "attempt $attempt: $path → $code"; sleep 5
             done
@@ -93,7 +199,7 @@ jobs:
             echo "ok: $path"
           done
 
-          code=$(curl -s -o /dev/null -w '%{http_code}' https://psm.werewolf.solutions/api/projects || true)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE_URL/api/projects" || true)
           [ "$code" = "404" ] || fail "/api/ is not sealed off — got $code, expected 404"
           echo "ok: /api/ returns 404"
 
@@ -101,8 +207,16 @@ jobs:
           # index.html there, so a *relative* <script src> would resolve to
           # /auth/app.js and quietly get index.html back. Assert the scripts are
           # referenced absolutely and that the path they resolve to is real JS.
-          html=$(curl -s https://psm.werewolf.solutions/auth/callback)
+          html=$(curl -s "$BASE_URL/auth/callback")
           echo "$html" | grep -q 'src="\./' && fail "index.html uses relative script paths; they break under /auth/callback"
-          type=$(curl -s -o /dev/null -w '%{content_type}' https://psm.werewolf.solutions/auth/app.js || true)
+          type=$(curl -s -o /dev/null -w '%{content_type}' "$BASE_URL/auth/app.js" || true)
           case "$type" in *javascript*) fail "/auth/app.js served JS — the fallback is masking a bad path";; esac
           echo "ok: assets are absolute and /auth/ does not shadow them"
+
+          # Proves this run's bytes are the ones being served, not a cached copy
+          # or a half-finished rsync.
+          served=$(curl -s "$BASE_URL/version.json" || true)
+          echo "serving: $served"
+          echo "$served" | grep -q "${GITHUB_SHA:0:7}" \
+            || fail "version.json does not name this commit (${GITHUB_SHA:0:7}) — stale cache or failed sync"
+          echo "ok: $BASE_URL is serving ${GITHUB_SHA:0:7} ($ENVIRONMENT)"
