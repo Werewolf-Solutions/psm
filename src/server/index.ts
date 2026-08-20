@@ -13,7 +13,7 @@ import { ensureProjectId } from "../identity.ts";
 import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
 import type { Attachment, Capability, Override, Project } from "../types.ts";
-import { activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, type ProcKind } from "./procs.ts";
+import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, transcript, type ProcKind } from "./procs.ts";
 import {
   activeSessions,
   aiLimit,
@@ -45,6 +45,7 @@ import {
   saveCustomCapability,
 } from "./catalog.ts";
 import { PlanConflictError, PlanNotFoundError, PlanValidationError, planStore } from "./plans.ts";
+import { NOTE_KINDS, NoteNotFoundError, NoteValidationError, noteStore } from "./notes.ts";
 import { ensurePreviewProxy } from "./preview.ts";
 import { BrowseError, browse } from "./browse.ts";
 import { StopError, machineProcesses, stopProcess } from "./machine.ts";
@@ -56,8 +57,15 @@ import {
   isLoopbackHost,
   rotateAgentToken,
 } from "./agent.ts";
-import { AuthError, currentUser, sessionContext, signOut } from "./session.ts";
-import { SSO_CALLBACK_PATH, completeSso, ssoAuthorizeUrl } from "./sso.ts";
+import {
+  AuthError,
+  currentUser,
+  deviceFingerprint,
+  exchangeCode,
+  sessionContext,
+  signOut,
+} from "./session.ts";
+import { ssoAvailability, ssoConfig, ssoRedirectUri } from "./sso.ts";
 import { runWithSession } from "../store.ts";
 import { subscriptionUsage } from "./usage.ts";
 import { modelCatalog } from "./models.ts";
@@ -80,7 +88,6 @@ import {
   checkout as cloudCheckout,
   cloudAvailable,
   devices as cloudDevices,
-  projectTodos as cloudProjectTodos,
   pullSync,
   pushSync,
   revokeDevice as cloudRevokeDevice,
@@ -124,29 +131,29 @@ app.use((_req, _res, next) => {
 });
 
 /* ---- Sign in with Werewolf (authorization code + PKCE) ----
- * A full-page handoff, the way todo-app does it: leave for dapp's consent
- * screen, come back with a code, redeem it here. The verifier stays server-side.
+ * The browser runs the flow — the same web/auth.js the hosted page runs, against
+ * the one `psm` application row. It comes back to /auth/callback (served by the
+ * SPA fallback below) and posts the code here, because dapp hands a web client
+ * its refresh credential as a cookie and a page on localhost cannot keep one.
  */
-app.get("/api/cloud/sso/start", async (req, res) => {
+app.post("/api/auth/exchange", async (req, res) => {
   try {
-    const returnTo = typeof req.query.returnTo === "string" && req.query.returnTo.startsWith("/")
-      ? req.query.returnTo // same-origin paths only — never an open redirect
-      : "/";
-    res.redirect(await ssoAuthorizeUrl(req, returnTo));
+    const { user } = await exchangeCode({
+      code: String(req.body?.code || ""),
+      codeVerifier: String(req.body?.codeVerifier || ""),
+      // The page reports the callback it actually used; dapp exact-matches it
+      // against the code it minted, so a mismatch is refused there.
+      redirectUri: String(req.body?.redirectUri || ssoRedirectUri(req)),
+      device: {
+        id: deviceFingerprint(String(req.headers["user-agent"] || "psm")),
+        name: "psm",
+        platform: String(req.headers["user-agent"] || "web").slice(0, 80),
+      },
+    });
+    res.json({ ok: true, user });
   } catch (err) {
-    res.status(502).json({ error: (err as Error).message || "Could not reach Werewolf" });
-  }
-});
-
-app.get(SSO_CALLBACK_PATH, async (req, res) => {
-  try {
-    const { returnTo } = await completeSso(req);
-    res.redirect(returnTo);
-  } catch (err) {
-    const message = (err as AuthError).message || "Sign-in failed";
-    // Hand the reason back through the page rather than a bare error body: the
-    // user is mid-redirect and has nowhere else to read it.
-    res.redirect(`/?sso_error=${encodeURIComponent(message)}`);
+    const error = err as AuthError;
+    res.status(error.status || 400).json({ error: error.message || "Sign-in failed" });
   }
 });
 
@@ -155,10 +162,50 @@ app.post("/api/auth/logout", async (_req, res) => {
   res.json({ ok: true });
 });
 
-// Who am I — the cockpit asks this on load.
-app.get("/api/auth/session", async (_req, res) => {
+/**
+ * What this psm is, and what it is currently serving as the page.
+ *
+ * `web/` has no build step and no hashed filenames, so a cockpit left open in a
+ * tab keeps running whatever JavaScript it loaded — across restarts, across
+ * upgrades, across an edit made thirty seconds ago. That page then calls routes
+ * this build may no longer have. The fingerprint is a stat of the files served,
+ * so the page can notice it has gone stale and offer a reload rather than
+ * failing at whichever button is pressed first.
+ */
+const WEB_ASSETS = ["index.html", "app.js", "auth.js", "agent.js", "cloud.js", "styles.css"];
+
+function webAssetVersion(): string {
+  const parts: string[] = [];
+  for (const name of WEB_ASSETS) {
+    try {
+      const stat = fs.statSync(path.join(WEB_DIR, name));
+      parts.push(`${name}:${stat.size}:${Math.round(stat.mtimeMs)}`);
+    } catch {
+      parts.push(`${name}:missing`);
+    }
+  }
+  return createHash("sha256").update(parts.join("|")).digest("hex").slice(0, 16);
+}
+
+app.get("/api/version", (_req, res) => {
+  res.json({ version: APP_VERSION, assets: webAssetVersion() });
+});
+
+/**
+ * Who am I — the cockpit asks this on load, and it doubles as the page's sign-in
+ * configuration. The page cannot work out where a *local* dapp's consent screen
+ * is (Vite's port moves), so the machine tells it.
+ */
+app.get("/api/auth/session", async (req, res) => {
   // Never 401s: "nobody" is a valid answer, and the usual one for a fresh cockpit.
-  res.json({ user: await currentUser().catch(() => null), provider: "werewolf" });
+  const user = await currentUser().catch(() => null);
+  // Signed in, the handoff is moot; signed out, the panel needs to know whether
+  // offering it would only lead to a dead end, and say why if it would.
+  const sso = user
+    ? { available: true }
+    : await ssoAvailability(req).catch(() => ({ available: false, reason: "Could not reach Werewolf." }));
+  const dapp = await ssoConfig(req).catch(() => null);
+  res.json({ user, provider: "werewolf", sso, dapp });
 });
 
 /* ---------- agent identity + pairing ---------- */
@@ -350,35 +397,6 @@ app.get("/api/cloud/devices", async (_req, res) => {
 app.delete("/api/cloud/devices/:id", async (req, res) => {
   try { res.json(await cloudRevokeDevice(req.params.id)); }
   catch (err) { cloudError(res, err); }
-});
-
-/**
- * A project's todos, from the Werewolf board. Read-only — the Todos pane links
- * out to the todo app for anything that changes a task.
- *
- * Not being signed in to Werewolf is a normal state here, not a failure: most
- * of psm works without a cloud session. It answers 200 with `signedIn: false`
- * so the pane can offer the Cloud sign-in rather than render an error.
- */
-/* Where "Open in Todo" points. Defaults to the local dev server because the
- * todo app is not deployed yet and psm is a localhost tool; set TODO_APP_URL to
- * https://todo.werewolf.solutions once it is. */
-const todoAppUrl = () =>
-  (process.env.TODO_APP_URL || "http://localhost:5200").replace(/\/+$/, "");
-
-app.get("/api/projects/:name/todos", async (req, res) => {
-  try {
-    const data = await cloudProjectTodos(req.params.name);
-    res.json({ signedIn: true, appUrl: todoAppUrl(), ...data });
-  } catch (err: any) {
-    // refreshSession throws a bare 401 ("Reconnect this device to PSM Cloud")
-    // when there is no stored refresh token — see cloud.ts:275-283.
-    if (err?.status === 401) {
-      res.json({ signedIn: false, appUrl: todoAppUrl(), project: req.params.name, tasks: [] });
-      return;
-    }
-    cloudError(res, err);
-  }
 });
 
 const CLOUD_OVERRIDE_KEYS: (keyof Override)[] = [
@@ -1196,6 +1214,28 @@ local.get("/api/projects/:name/logs/stream", (req, res) => {
   subscribe(res, req.params.name, parseKind(req.query.kind));
 });
 
+/* The whole transcript since the process started, as a file. The console shows
+ * a window of the most recent lines; this is how you get the rest — the boot
+ * output a chatty dev server has long since pushed out of view. */
+local.get("/api/projects/:name/logs/download", (req, res) => {
+  const kind = parseKind(req.query.kind);
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  const log = transcript(project.name, kind);
+  if (!log) return res.status(404).json({ error: `no ${kind} log for ${project.name} yet` });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const file = `${project.name}-${kind.replace(":", "-")}-${stamp}.log`;
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${file}"`);
+  // Says so when the transcript is the capped in-memory buffer rather than the
+  // file, so nobody reads a truncated log as a complete one.
+  res.send(
+    log.complete
+      ? log.text
+      : `[psm] older lines are not available — this is the last ${MAX_LOG_LINES} buffered lines\n${log.text}`,
+  );
+});
+
 /* ---------- cockpit: AI pane ---------- */
 
 function parseEngine(v: unknown, fallback: AiEngine): AiEngine {
@@ -1376,6 +1416,58 @@ local.post("/api/projects/:name/planner/cancel", (req, res) => {
   res.json({ ok: true, cancelled: cancelPlanning(project.name) });
 });
 
+/* ---------- project notes ----------
+ * The scratchpad beside each project: bugs and todos, features, ideas. Local
+ * files, so writing one never waits on a network or a cloud session.
+ */
+function noteError(res: express.Response, err: unknown) {
+  if (err instanceof NoteNotFoundError) return res.status(404).json({ error: err.message });
+  if (err instanceof NoteValidationError) return res.status(400).json({ error: err.message });
+  console.error("note operation failed", err);
+  return res.status(500).json({ error: "note operation failed" });
+}
+
+local.get("/api/projects/:name/notes", (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    res.json({ project: project.name, kinds: NOTE_KINDS, notes: noteStore.list(project.name) });
+  } catch (err) {
+    noteError(res, err);
+  }
+});
+
+local.post("/api/projects/:name/notes", (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    res.status(201).json({ ok: true, note: noteStore.create(project.name, req.body) });
+  } catch (err) {
+    noteError(res, err);
+  }
+});
+
+local.patch("/api/projects/:name/notes/:id", (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    res.json({ ok: true, note: noteStore.update(project.name, req.params.id, req.body) });
+  } catch (err) {
+    noteError(res, err);
+  }
+});
+
+local.delete("/api/projects/:name/notes/:id", (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    noteStore.remove(project.name, req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    noteError(res, err);
+  }
+});
+
 local.get("/api/projects/:name/plans", (req, res) => {
   const project = findProject(req.params.name);
   if (!project) return res.status(404).json({ error: "unknown project" });
@@ -1531,7 +1623,33 @@ local.get("/api/projects/:name/ai/recap", async (req, res) => {
 // The one line that decides whether this process can touch the machine.
 app.use(local);
 
+/**
+ * An unknown API path is an error in JSON, not Express's HTML "Cannot GET".
+ *
+ * Every caller here is a `fetch` that will try to parse the body, and a page
+ * left open across a psm upgrade *will* call a route that has since been
+ * removed — which is exactly how a stale tab reported "Cannot GET
+ * /api/cloud/sso/start" instead of anything a person could act on.
+ */
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `unknown API route: ${req.method} /api${req.path}`, code: "unknown_route" });
+});
+
 app.use(express.static(WEB_DIR));
+
+/**
+ * SPA fallback. The cockpit is a single page, and sign-in returns the browser to
+ * `/auth/callback` — a route the page owns and the filesystem knows nothing
+ * about, so without this the consent screen would hand back to a 404.
+ *
+ * `/api/*` is excluded deliberately: an unknown API path must stay a 404, not
+ * become HTML that a fetch() would try to parse as JSON. That mistake is how the
+ * hosted page's asset paths broke once already (src/web-assets.test.ts).
+ */
+app.get(/^(?!\/api\/).*/, (req, res, next) => {
+  if (req.method !== "GET" || req.path.includes(".")) return next();
+  res.sendFile(path.join(WEB_DIR, "index.html"));
+});
 
 // psm never leaves loopback. The public face is a static site; see src/mode.ts.
 const HOST = "127.0.0.1";

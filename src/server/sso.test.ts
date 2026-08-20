@@ -1,10 +1,14 @@
 /**
- * "Sign in with Werewolf" — the authorization-code + PKCE flow, checked against
- * a stand-in that enforces the same rules dapp does (single-use codes, PKCE
- * binding, redirect binding), so psm's half of the contract is pinned here.
+ * The server's half of "Sign in with Werewolf": where dapp's consent screen is,
+ * which callback this page will be returned to, and whether signing in can work
+ * at all before the browser is sent anywhere.
+ *
+ * The flow itself is in the browser now (web/auth.js) and the code exchange is in
+ * session.ts, which is where the cookie transport is pinned. What used to live
+ * here — a second, server-side PKCE flow against a separate `native` row — went
+ * away when psm collapsed to one application.
  */
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -17,42 +21,36 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "psm-sso-"));
 process.env.PSM_SESSION_SECRET = "test-sso-secret";
 process.env.PSM_DATA_DIR = sandbox;
 
-const pkceChallenge = (verifier: string) =>
-  crypto.createHash("sha256").update(verifier).digest("base64url");
-
-/** Codes dapp has minted: code → what it was bound to. */
-const issued = new Map<string, { challenge: string; redirectUri: string }>();
-const spent = new Set<string>();
-let lastExchange: any = null;
+/** What dapp knows about psm, flipped per test. */
+let registration: "web" | "native" | "missing" = "web";
+let allowedRedirect = "http://localhost:4317/auth/callback";
+let publicCalls = 0;
 
 const dapp = http.createServer((req, res) => {
-  let raw = "";
-  req.on("data", (c) => (raw += c));
-  req.on("end", () => {
-    const body = raw ? JSON.parse(raw) : {};
-    const send = (status: number, payload: unknown) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(payload));
-    };
-    if (req.url === "/apps/psm/auth/exchange") {
-      lastExchange = body;
-      const deny = () => send(401, { success: false, message: "Invalid or expired authorization code" });
-      const record = issued.get(body.code);
-      if (!record) return deny();
-      if (spent.has(body.code)) return deny(); // single-use
-      if (pkceChallenge(String(body.codeVerifier || "")) !== record.challenge) return deny();
-      if (body.redirectUri !== record.redirectUri) return deny(); // redirect binding
-      spent.add(body.code);
-      return send(200, {
-        success: true,
-        data: {
-          user: { id: "user-sso", name: "Ada", email: "ada@example.com" },
-          tokens: { accessToken: "sso-access", refreshToken: "sso-refresh", expiresIn: 900 },
-        },
-      });
+  const send = (status: number, payload: unknown) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(payload));
+  };
+  if (req.url?.startsWith("/apps/psm/public")) {
+    publicCalls += 1;
+    if (registration === "missing") {
+      // dapp's controller maps app_not_configured to 404 on this route.
+      return send(404, { success: false, code: "app_not_configured", message: "Application not found" });
     }
-    send(404, { success: false, message: "no such route" });
-  });
+    const redirectUri = new URL(req.url, "http://x").searchParams.get("redirectUri");
+    return send(200, {
+      success: true,
+      data: {
+        key: "psm",
+        name: "PSM",
+        clientType: registration,
+        scopes: ["psm:profile"],
+        // A web client is exact-matched — that is the rule the pinned ports exist for.
+        redirectAllowed: registration === "web" && redirectUri === allowedRedirect,
+      },
+    });
+  }
+  send(404, { success: false, message: "no such route" });
 });
 
 await new Promise<void>((resolve) => dapp.listen(0, "127.0.0.1", () => resolve()));
@@ -61,24 +59,26 @@ process.env.WEREWOLF_API_URL = `http://127.0.0.1:${dappPort}`;
 process.env.WEREWOLF_WEB_ORIGIN = "https://werewolf.test";
 process.env.PORT = "4317";
 
-const { SSO_CALLBACK_PATH, completeSso, pendingCount, ssoAuthorizeUrl, ssoRedirectUri, werewolfWebOrigin } =
-  await import("./sso.ts");
-const { currentUser } = await import("./session.ts");
+const {
+  SSO_CALLBACK_PATH,
+  resetSsoAvailability,
+  ssoAvailability,
+  ssoConfig,
+  ssoRedirectUri,
+  werewolfWebOrigin,
+} = await import("./sso.ts");
 
-const req = (query: Record<string, string> = {}, headers: Record<string, string> = {}) =>
-  ({ query, headers: { "user-agent": "test", ...headers } }) as any;
-
-/** Play dapp's part: mint a code for a challenge the way authorizeApp would. */
-function mintCode(url: URL): string {
-  const code = "code-" + crypto.randomBytes(6).toString("hex");
-  issued.set(code, {
-    challenge: url.searchParams.get("code_challenge")!,
-    redirectUri: url.searchParams.get("redirect_uri")!,
-  });
-  return code;
-}
+/** A request as express hands it over: the page's own origin is in the headers. */
+const req = (headers: Record<string, string> = {}) => ({ headers, query: {} }) as any;
 
 test.before(() => setModeForTesting("dev"));
+
+test.beforeEach(() => {
+  registration = "web";
+  allowedRedirect = "http://localhost:4317/auth/callback";
+  publicCalls = 0;
+  resetSsoAvailability();
+});
 
 test.after(() => {
   setModeForTesting(undefined);
@@ -87,80 +87,77 @@ test.after(() => {
   delete process.env.WEREWOLF_WEB_ORIGIN;
 });
 
-test("the cockpit redirects to the loopback callback dapp allows", () => {
-  // dapp's native rule: http, loopback host, this exact path, any port.
-  assert.equal(ssoRedirectUri(), `http://127.0.0.1:4317${SSO_CALLBACK_PATH}`);
-  assert.equal(SSO_CALLBACK_PATH, "/api/cloud/sso/callback");
+test("the callback is one path, whoever served the page", () => {
+  assert.equal(SSO_CALLBACK_PATH, "/auth/callback");
+  // Whatever origin the page came from is the origin it goes back to, because a
+  // web client is exact-matched and the browser cannot be sent somewhere else.
+  assert.equal(
+    ssoRedirectUri(req({ origin: "https://psm.werewolf.solutions" })),
+    "https://psm.werewolf.solutions/auth/callback",
+  );
+  // Same-origin GETs send no Origin header at all; Host is the answer there.
+  assert.equal(ssoRedirectUri(req({ host: "localhost:4317" })), "http://localhost:4317/auth/callback");
 });
 
-test("the authorize URL carries client_id, state and an S256 challenge", async () => {
-  const url = new URL(await ssoAuthorizeUrl(req()));
-  assert.equal(url.origin + url.pathname, "https://werewolf.test/authorize");
-  assert.equal(url.searchParams.get("client_id"), "psm");
-  assert.equal(url.searchParams.get("code_challenge_method"), "S256");
-  assert.ok(url.searchParams.get("state"));
-  assert.match(url.searchParams.get("code_challenge")!, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(url.searchParams.get("redirect_uri"), `http://127.0.0.1:4317${SSO_CALLBACK_PATH}`);
+test("a psm behind a proxy can be told its own public origin", () => {
+  process.env.PSM_PUBLIC_ORIGIN = "https://psm.example.com/";
+  try {
+    assert.equal(ssoRedirectUri(req({ host: "localhost:4317" })), "https://psm.example.com/auth/callback");
+  } finally {
+    delete process.env.PSM_PUBLIC_ORIGIN;
+  }
 });
 
-test("the verifier never appears in anything the browser is given", async () => {
-  const url = await ssoAuthorizeUrl(req());
-  assert.ok(!/code_verifier/i.test(url), "PKCE's secret half stays on the server");
+test("a registered web client that accepts this callback is available", async () => {
+  const availability = await ssoAvailability(req({ host: "localhost:4317" }));
+  assert.deepEqual(availability, { available: true });
 });
 
-test("a full round trip opens a psm session", async () => {
-  const url = new URL(await ssoAuthorizeUrl(req()));
-  const state = url.searchParams.get("state")!;
-  const code = mintCode(url);
-
-  const { user, returnTo } = await completeSso(req({ code, state }));
-  assert.equal(user.id, "user-sso");
-  assert.equal(returnTo, "/");
-
-  // dapp got the verifier that matches the challenge psm published
-  assert.equal(pkceChallenge(lastExchange.codeVerifier), url.searchParams.get("code_challenge"));
-  assert.equal(lastExchange.redirectUri, url.searchParams.get("redirect_uri"));
-
-  assert.equal((await currentUser())?.id, "user-sso", "the exchange left us signed in");
+test("an unregistered psm is reported as such, before the browser is sent anywhere", async () => {
+  registration = "missing";
+  const availability = await ssoAvailability(req({ host: "localhost:4317" }));
+  assert.equal(availability.available, false);
+  // The reason has to name what is wrong and what fixes it: this exact state is
+  // what production looked like, and "sign-in is broken" was all anyone saw.
+  assert.match(availability.reason!, /not registered with Werewolf/);
+  assert.match(availability.reason!, /clientType `web`/);
 });
 
-test("returnTo survives the round trip", async () => {
-  const url = new URL(await ssoAuthorizeUrl(req(), "/#/p/prj_123/web"));
-  const code = mintCode(url);
-  const { returnTo } = await completeSso(req({ code, state: url.searchParams.get("state")! }));
-  assert.equal(returnTo, "/#/p/prj_123/web");
+test("a row still registered as native says so, and names the migration", async () => {
+  // The state every existing dapp is in until the two rows are collapsed into
+  // one: psm is there, but as the native client the old flow used.
+  registration = "native";
+  const availability = await ssoAvailability(req({ host: "localhost:4317" }));
+  assert.equal(availability.available, false);
+  assert.match(availability.reason!, /registered as a native client/);
+  assert.match(availability.reason!, /redirectUris/);
 });
 
-test("a replayed callback is refused, and cannot spend the verifier twice", async () => {
-  const url = new URL(await ssoAuthorizeUrl(req()));
-  const state = url.searchParams.get("state")!;
-  const code = mintCode(url);
-
-  await completeSso(req({ code, state }));
-  await assert.rejects(() => completeSso(req({ code, state })), /did not start here|expired/);
+test("an unlisted callback is refused with the URI that has to be registered", async () => {
+  // psm on a non-default port, which a web client cannot improvise around.
+  const availability = await ssoAvailability(req({ host: "localhost:9999" }));
+  assert.equal(availability.available, false);
+  assert.match(availability.reason!, /will not accept this page's callback/);
+  assert.match(availability.reason!, /http:\/\/localhost:9999\/auth\/callback/);
 });
 
-test("a code without its state is refused before anything is exchanged", async () => {
-  const url = new URL(await ssoAuthorizeUrl(req()));
-  const code = mintCode(url);
-  await assert.rejects(() => completeSso(req({ code, state: "not-a-real-state" })), /did not start here/);
+test("the registration answer is cached per callback, not globally", async () => {
+  await ssoAvailability(req({ host: "localhost:4317" }));
+  await ssoAvailability(req({ host: "localhost:4317" }));
+  assert.equal(publicCalls, 1, "asking twice about the same page costs one call");
+
+  // A different origin is a different question, and must not read a cached "yes".
+  const other = await ssoAvailability(req({ origin: "https://psm.werewolf.solutions" }));
+  assert.equal(publicCalls, 2);
+  assert.equal(other.available, false);
 });
 
-test("a callback with neither code nor state says so", async () => {
-  await assert.rejects(() => completeSso(req({})), /missing its code/);
-});
-
-test("a declined consent screen reads as declined, not as a crash", async () => {
-  await assert.rejects(() => completeSso(req({ error: "access_denied" })), /declined/);
-  await assert.rejects(() => completeSso(req({ error: "server_error" })), /server_error/);
-});
-
-test("in-flight logins do not accumulate", async () => {
-  const before = pendingCount();
-  const url = new URL(await ssoAuthorizeUrl(req()));
-  assert.equal(pendingCount(), before + 1);
-  await completeSso(req({ code: mintCode(url), state: url.searchParams.get("state")! }));
-  assert.equal(pendingCount(), before, "a finished login releases its verifier");
+test("the page is told which dapp to sign in against", async () => {
+  const config = await ssoConfig(req({ host: "localhost:4317" }));
+  assert.equal(config.appKey, "psm", "one application row, one client_id");
+  assert.equal(config.apiBase, `http://127.0.0.1:${dappPort}`);
+  assert.equal(config.webOrigin, "https://werewolf.test");
+  assert.equal(config.redirectUri, "http://localhost:4317/auth/callback");
 });
 
 test("the consent screen origin follows the API, except locally", () => {
@@ -193,4 +190,3 @@ test("an explicit web origin beats anything discovered", () => {
     else process.env.WEREWOLF_WEB_ORIGIN = previous;
   }
 });
-

@@ -1,120 +1,196 @@
 # Registering psm as a Werewolf cloud application
 
-- **Status:** done on local dev (verified end to end); outstanding on production. The
-  hosted-callback question below is **decided** — two rows, `psm` and `psm-web` — and both
-  bootstrap scripts exist. What is left is running them against production.
-- **Date:** 2026-08-12, production re-checked 2026-08-13
-- **Repo that owns it:** `werewolf-dapp` (a database record, created by a script)
+- **Status:** psm's side is done and tested. **One thing is outstanding, and it is in
+  werewolf-dapp:** the `psm` CloudApplication row has to become a `web` client with psm's
+  callbacks listed. Until then sign-in refuses with a sentence saying exactly that — on the
+  local dapp *and* on production.
+- **Date:** 2026-08-17. Supersedes the two-row design of 2026-08-12.
+- **Repo that owns the remaining work:** `werewolf-dapp` (a database record, created by a
+  script).
 
-## What psm needs
+## The shape, in one table
 
-Signing in — "Continue with Werewolf", the only way in — keys off the `CloudApplication`
-row with `key: 'psm'`. Without it, dapp answers `503 app_not_configured` from
-`getApplication()` and sign-in cannot work.
+psm signs in as **one** application, the way todo-app does. One row, one `client_id`, one
+consent screen, one callback path, whether the page came from the local agent or from
+psm.werewolf.solutions.
 
-dapp already ships the script that creates it:
+| | |
+|---|---|
+| `key` | `psm` |
+| `clientType` | `web` |
+| `redirectUris` | the exact list below |
+| `scopes` | `psm:profile`, plus the data scopes if/when cloud sync is turned back on |
+| `trusted` | `true` (first-party) |
+
+**Superseded:** psm used to register twice — `psm` as `native` for the local cockpit and
+`psm-web` as `web` for the hosted page — because dapp's native rule (any loopback port) and
+its web rule (exact match) cannot both come from one row. Two rows meant two registrations
+to keep alive, two things to bootstrap, and a sign-in that could work in one posture and
+not the other. The cost of collapsing them is that **psm's ports are pinned**, exactly as
+todo-app pins 5200. That is the trade.
+
+## The redirect URIs
+
+A `web` client is exact-matched by `CloudApplication.isRedirectAllowed` — string equality,
+no port wildcard, and **`localhost` and `127.0.0.1` are different strings**. Register all
+of these:
+
+```js
+const REDIRECT_URIS = [
+  'https://psm.werewolf.solutions/auth/callback', // the hosted page
+  'http://localhost:8080/auth/callback',          // npm run web, the static host
+  'http://localhost:4317/auth/callback',          // npm run dev, the cockpit
+  'http://127.0.0.1:4317/auth/callback',          // the same cockpit, typed the other way
+];
+```
+
+Running psm on another port (`PORT=4000 npm run dev`) means signing in will be refused
+until that origin is registered too. psm says so rather than failing silently — see
+Verifying below.
+
+## Which dapp build is on the other end
+
+Checked 2026-08-17, and it matters: **the httpOnly refresh-cookie transport
+(`server/utils/appSessionCookie.js`) exists only on the `feat/todo-app` branch.**
+`dev`, `master` and the other feature branches have the app-SSO controller but no cookie —
+their `/apps/:key/auth/exchange` returns `refreshToken` in the JSON body and their
+`/auth/refresh` reads `req.body.refreshToken`.
+
+`clientType: 'web'` and the exact-match redirect rule are on every branch, so **registering
+the row works regardless**. What differs is where the refresh credential lives, and psm
+handles both without being told which is which — it presents the credential in the cookie
+*and* in the body, and a dapp with the cookie transport ignores the body for a web client.
+
+| | dapp with the cookie (`feat/todo-app`) | dapp without it (`dev`, `master`) |
+|---|---|---|
+| Cockpit (agent holds the session) | works | works |
+| Hosted page, first sign-in | works | works |
+| Hosted page, **after a reload** | stays signed in | signs in again |
+
+That last cell is the real cost. The hosted page holds a body-borne refresh token in memory
+only and never writes it to storage — anything storage can hold, injected script can read —
+so a reload has nothing to restore from. It resolves itself when `feat/todo-app` merges.
+
+## What has to change in werewolf-dapp
+
+Two things, neither of them large.
+
+### 1. A bootstrap script that does not require Stripe
+
+`server/scripts/bootstrap-psm-cloud.js` refuses to create the row at all unless the
+business has completed Stripe Connect onboarding:
+
+```js
+if (!business.stripe?.accountId || !business.stripe.isOnboarded) {
+  throw new Error('Complete Stripe Connect onboarding for the PSM business first');
+}
+```
+
+It provisions the Pro product and prices *before* it writes the CloudApplication, so psm's
+**identity** is gated behind **billing** — which sign-in has nothing to do with. That is
+why `todo` got registered locally and psm's production row never did:
+`bootstrap-todo.js` just upserts the row.
+
+Model the new one on `bootstrap-todo.js`. Billing stays where it is; run
+`bootstrap-psm-cloud.js` later, when there is something to sell and a Connect-onboarded
+business to sell it under, and let it update the same row's `stripe.*` fields.
+
+**This script now exists** as `werewolf-dapp/server/scripts/bootstrap-psm.js`, added
+2026-08-17. It is untracked on whatever branch is checked out, and requires only
+`config/database`, `models/Business` and `models/CloudApplication` — all of which are on
+every branch, so it runs wherever dapp is. **It has not been run against any database.**
+
+Read it before running it; the shape is `bootstrap-todo.js` with psm's key, `clientType:
+'web'`, the redirect list above, and `scopes: ['psm:profile']`. It is idempotent, and it
+prints what it did — `created`, or `migrated (native → web)`.
+
+`PSM_BUSINESS_ID` is **a decision, not a lookup** — whether psm reuses the business that
+publishes the other apps or gets its own is unmade until someone makes it.
+
+### 2. Retire the `psm-web` row
+
+The row is no longer used by anything: psm's page sends `client_id=psm` in every posture.
+Leaving an unused trusted row registered is a standing grant nobody needs. Set
+`isActive: false`, or delete it. (`bootstrap-psm-web.js` lives on `feat/todo-app` along with
+the cookie transport; nothing needs it now.)
+
+## Running it
+
+Local dapp first — the local row is currently `native`, so local sign-in is refused until
+this runs. The row already exists there, so it carries its own business and there is
+nothing to decide:
 
 ```bash
 cd werewolf-dapp/server
-PSM_BUSINESS_ID=<the Werewolf business _id> npm run bootstrap:psm
+node scripts/bootstrap-psm.js          # migrates the existing row: native → web
 ```
 
-`scripts/bootstrap-psm-cloud.js` upserts the row and wires the Stripe product and prices
-for PSM Pro. The identity-relevant part of what it writes:
+The local dapp API is on `:3000` and its consent screen is the Vite client on `:5173`; psm
+discovers both, and `WEREWOLF_WEB_ORIGIN` overrides the consent screen if it moves.
 
-```js
-clientType: 'native',      // loopback + PKCE
-trusted: true,             // first-party: consent is remembered
-scopes: ['psm:profile', 'psm:billing', 'psm:sync', 'psm:backup'],
-```
+Production, in preference order (from `docs/deploy/PUBLISHING-A-NEW-APP.md`):
 
-It needs `PSM_BUSINESS_ID` and a business that has completed Stripe Connect onboarding,
-because it also provisions billing.
-
-## Local development — working
-
-Verified against `http://localhost:3000/api/v1` on 2026-08-12. The row is present:
-
-```bash
-$ curl 'http://localhost:3000/api/v1/apps/psm/public?redirectUri=http%3A%2F%2F127.0.0.1%3A4331%2Fapi%2Fcloud%2Fsso%2Fcallback'
-{"success":true,"data":{"key":"psm","name":"PSM","clientType":"native",
- "scopes":["psm:profile","psm:billing","psm:sync","psm:backup"],"redirectAllowed":true}}
-```
-
-Note the query parameter is **`redirectUri`**, camelCase — `redirect_uri` is silently
-treated as absent and reports `redirectAllowed:false`, which is a misleading way to read
-"you asked the wrong question".
-
-Because psm is a `native` client, *any* loopback port is accepted with the path locked to
-`/api/cloud/sso/callback` — 4317, 4331, 9999 all verified. A local psm needs no
-per-port registration.
-
-The whole flow was then driven end to end against this dapp: identity login → consent
-screen ("Authorize PSM", naming the instance and the four scopes) → Approve → psm's
-callback redeemed the code → signed in. A replayed callback was refused.
-
-## Production — outstanding
-
-Re-checked 2026-08-13. `https://werewolf.solutions/api/v1` has **no cloud applications
-registered at all** — this is not psm-specific:
-
-```
-POST /apps/psm/auth/exchange     → 503 app_not_configured
-POST /apps/psm-web/auth/exchange → 503 app_not_configured
-POST /apps/todo/auth/exchange    → 503 app_not_configured
-```
-
-Use the **exchange** endpoint to check this, not `/apps/:key/public`. The latter answers
-404 for every key, which reads like a missing route and is not: the controller maps
-`app_not_configured` to 404. Production's dapp code is current; the collection is empty.
-
-That `todo` is unregistered too is worth someone's attention separately — todo-app is
-live, so either it does not use this sign-in path in production or its cloud sign-in is
-broken there. Not investigated here.
-
-Running both bootstrap scripts against the production database closes psm's half. See
-`docs/deploy/PUBLISHING-A-NEW-APP.md` step 2 for the three ways to run them and why
-`mongosh` by hand is not one of them.
-
-## Hosted psm — decided: two rows
-
-`isRedirectAllowed` for a `native` client requires `http` + a loopback host, so
-`https://psm.werewolf.solutions/auth/callback` can never be accepted by the `psm` row —
-confirmed against local dapp, which returns `redirectAllowed:false` for it. One row cannot
-serve both halves.
-
-**Resolved in favour of a second application** (psm commit `3b045e5`, 2026-08-12), which
-was option 1 of the three weighed here. The two clients have genuinely different trust
-properties, and revoking one does not touch the other:
-
-| Row | `clientType` | Used by | Redirect |
-|---|---|---|---|
-| `psm` | `native` | the local cockpit and agents | loopback, any port, fixed path |
-| `psm-web` | `web` | the hosted page at psm.werewolf.solutions | exact https allowlist |
-
-`web/auth.js` hardcodes `APP_KEY = "psm-web"` and runs PKCE in the browser; the cockpit
-keeps its server-side loopback flow in `src/server/sso.ts`. Which one applies is decided by
-asking the page's own origin for `/api/auth/session`, not by guessing from the hostname.
-werewolf-dapp ships `server/scripts/bootstrap-psm-web.js` alongside `bootstrap-psm-cloud.js`.
-
-The two rejected options, for the record: widening `isRedirectAllowed` so a native client
-may also match exact https entries (smallest change, but loosens the native rule for every
-future app), and flipping `psm` to `web` (breaks loopback sign-in for every local install).
-
-Local instances set `PSM_SSO_REGISTERED=1` once dapp accepts their callback, and
-`PSM_PUBLIC_ORIGIN` if psm cannot infer its origin from proxy headers.
+1. **From your laptop against the production Atlas URI** — no dapp deploy needed:
+   ```bash
+   MONGODB_URI='<prod Atlas URI>' PSM_BUSINESS_ID=<id> node scripts/bootstrap-psm.js
+   ```
+   Only blocked if Atlas's IP allowlist excludes you.
+2. **On the droplet**, which means merging the script through dapp's `dev` → `master`
+   first. Safe on 1 GB — the OOM constraint is about `npm ci`, not about running a script.
+3. Never by hand in `mongosh`: the row would exist with no reproducible provenance.
 
 ## Verifying any environment
 
 ```bash
-# 1. is the application there?
-curl "$API/apps/psm/public?redirectUri=http%3A%2F%2F127.0.0.1%3A4317%2Fapi%2Fcloud%2Fsso%2Fcallback"
-# want: {"success":true,...,"redirectAllowed":true}
-
-# 2. does the exchange route reach a configured app?
-curl -X POST "$API/apps/psm/auth/exchange" -H 'Content-Type: application/json' \
-  -d '{"code":"x","codeVerifier":"y","redirectUri":"http://127.0.0.1:4317/api/cloud/sso/callback"}'
-# want: 401 "Invalid or expired authorization code"  (not 503 app_not_configured)
+API=https://werewolf.solutions/api/v1     # or http://localhost:3000/api/v1
+curl "$API/apps/psm/public?redirectUri=http%3A%2F%2Flocalhost%3A4317%2Fauth%2Fcallback"
+# want: {"success":true,"data":{...,"clientType":"web","redirectAllowed":true}}
 ```
 
-Then in psm: `npm run dev`, click the account chip, **Continue with Werewolf**.
+The query parameter is **`redirectUri`**, camelCase; `redirect_uri` is silently read as
+absent and reports `redirectAllowed:false`, which is a misleading way to be told you asked
+the wrong question. A 404 here means *the app is not configured* — the controller maps
+`app_not_configured` to 404 on this route and 503 on `/auth/exchange` — not that the route
+is missing.
+
+psm asks this itself before it redirects anywhere, and reports the answer in the sign-in
+panel (`ssoAvailability()` in `src/server/sso.ts`, `checkRegistered()` in `web/auth.js`).
+The three states it distinguishes, each with its own sentence:
+
+| What dapp says | What psm shows |
+|---|---|
+| 404 / 503 | psm is not registered here; it needs a row with key `psm`, clientType `web` |
+| `clientType: 'native'` | registered as a native client, and this build signs in as web |
+| `redirectAllowed: false` | this page's callback is not in `redirectUris`, and names the URI |
+
+Then: `npm run dev`, click the account chip, **Sign in with Werewolf**.
+
+## Production, as last checked
+
+Re-checked **2026-08-17**: `https://werewolf.solutions/api/v1` has **no cloud applications
+registered at all**. `psm`, `psm-web` *and* `todo` every one answer
+`503 app_not_configured` on `/auth/exchange`, and `todo.werewolf.solutions` does not
+resolve. So there is no working production example of this flow to copy — todo-app works
+against a local dapp, which is where all four rows (`psm`, `psm-web`, `todo`, `nfc-pay`)
+actually exist.
+
+## Why `web` rather than `native`, and where the cookie goes
+
+dapp gives a `web` client its refresh credential as an httpOnly cookie
+(`ws_app_rt_psm`, scoped to `/api/v1/apps/psm/auth`) and omits it from the JSON —
+`server/utils/appSessionCookie.js`. A `native` row would hand a browser its refresh token
+in the response body, which for a page means storing it somewhere injected script can read.
+
+That cookie is `SameSite=Lax` and host-only on the API's host, which decides who redeems
+the code:
+
+- **Hosted page.** `psm.werewolf.solutions` → `werewolf.solutions` are different origins but
+  the same *site*, so the cookie is stored and sent. The page exchanges and refreshes
+  directly, exactly like todo-app.
+- **Cockpit.** `localhost:4317` → `werewolf.solutions` is genuinely cross-site; the browser
+  would neither store the cookie nor send it, and every reload would sign you out. So the
+  page posts its code to its own agent (`POST /api/auth/exchange`) and psm's server keeps
+  the cookie — a server has no SameSite rules. See `src/server/session.ts`.
+
+The PKCE half is identical in both: the verifier is minted in the page, kept in
+sessionStorage, and is useless to anyone without the exchange.

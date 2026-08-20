@@ -1,52 +1,57 @@
 /**
- * "Sign in with Werewolf" for the **hosted page**.
+ * "Sign in with Werewolf" — the whole flow, for every posture psm runs in.
  *
- * A direct port of todo-app's client/src/auth/{config,pkce,session}.ts to vanilla
- * JS, because psm's web/ has no build step. The flow is OAuth 2.0 authorization
- * code + PKCE against werewolf-dapp: leave for the consent screen, come back with
- * a 60-second single-use code, exchange it for a session.
+ * OAuth 2.0 authorization code + PKCE against werewolf-dapp, the same shape
+ * todo-app uses (client/src/auth/session.ts): leave for the consent screen, come
+ * back to /auth/callback with a 60-second single-use code, exchange it.
  *
- * **The refresh token never arrives here.** psm's hosted page is registered as
- * `psm-web` with `clientType: 'web'`, and for web clients dapp puts the refresh
- * token in an httpOnly cookie and omits it from the JSON — see
- * werewolf-dapp/server/utils/appSessionCookie.js. That is the whole reason for a
- * second application row: the `psm` row is `native` and would hand a browser its
- * refresh token in the response body. The access token here lives in a module
- * variable and never touches localStorage.
+ * ## One application
  *
- * A reload therefore has no token but still has the cookie, so `restore()` calls
- * refresh on startup and gets a session back without another round trip through
- * the consent screen.
+ * `client_id` is `psm`, always. psm used to register twice — `psm` as a native
+ * client for the local cockpit and `psm-web` for the hosted page — because dapp's
+ * native redirect rule (any loopback port) and its web rule (exact https match)
+ * cannot both come from one row. Two rows meant two registrations to keep alive,
+ * two consent screens, and a sign-in that could work in one posture and not the
+ * other. Now there is one `web` row and the ports are pinned instead, the way
+ * todo-app pins 5200 — see docs/werewolf-psm-registration.md for the exact list.
  *
- * **This file is for the hosted page only.** Served from the agent at
- * 127.0.0.1, psm keeps its server-side loopback flow (src/server/sso.ts), where
- * the verifier never reaches the browser at all. `PsmAuth.hosted` is the switch.
+ * ## Two transports, because of one cookie
+ *
+ * dapp gives a `web` client its refresh credential as an httpOnly cookie and
+ * omits it from the JSON (server/utils/appSessionCookie.js). That cookie is
+ * SameSite=Lax and host-only on the API's host, so:
+ *
+ *   hosted   psm.werewolf.solutions → werewolf.solutions is same-*site*: the
+ *            page exchanges and refreshes directly, and the cookie rides along.
+ *            Identical to todo-app.
+ *   cockpit  localhost:4317 → werewolf.solutions is cross-site, so the browser
+ *            would neither store nor send it. The page posts the code to its own
+ *            agent instead, which keeps the cookie (server/session.ts) and
+ *            answers /api/auth/session.
+ *
+ * The PKCE half — verifier, state, redirect, callback — is the same code in both.
+ * The access token, where this file holds one, lives in a module variable and
+ * never in storage.
  */
 (function () {
-  const HOSTED = !["localhost", "127.0.0.1", "[::1]", "::1"].includes(location.hostname);
+  /** Where dapp is. Replaced by the agent's own answer when it serves this page. */
+  let API_BASE =
+    localStorage.getItem("psm.dapp.api") || "https://werewolf.solutions/api/v1";
+  let WEB_ORIGIN = localStorage.getItem("psm.dapp.web") || "https://werewolf.solutions";
 
-  /**
-   * Where dapp is, from this page's point of view. Two different origins, and
-   * they are not the same thing: the API answers on werewolf.solutions, while the
-   * *consent screen* is a page in dapp's web client. Overridable from
-   * localStorage so the hosted bundle can be pointed at a local dapp for testing
-   * without a build step.
-   */
-  // Note the local default is `localhost`, not `127.0.0.1`. The refresh cookie is
-  // SameSite=Lax, and Lax is about *site*: psm.werewolf.solutions → werewolf.solutions
-  // is same-site so the cookie rides along, but localhost:8080 → 127.0.0.1:3000 is
-  // cross-site and it would be dropped, so a reload would silently lose the session.
-  const API_BASE =
-    localStorage.getItem("psm.dapp.api") ||
-    (HOSTED ? "https://werewolf.solutions/api/v1" : "http://localhost:3000/api/v1");
-  const WEB_ORIGIN =
-    localStorage.getItem("psm.dapp.web") ||
-    (HOSTED ? "https://werewolf.solutions" : "http://localhost:5173");
-
-  const APP_KEY = "psm-web";
+  const APP_KEY = "psm";
   const CALLBACK_PATH = "/auth/callback";
   /** Must match a registered redirect URI exactly — web clients are exact-match. */
   const redirectUri = () => `${location.origin}${CALLBACK_PATH}`;
+
+  /**
+   * Is there a psm agent behind this page? Decided by app.js, which asks
+   * /api/auth/session — a hostname guess gets it wrong for the static host on
+   * localhost:8080, which is every bit as serverless as psm.werewolf.solutions.
+   * Until it says otherwise, assume not: the direct flow is the safe default
+   * because it never posts a code to something that is not psm.
+   */
+  let servedByAgent = false;
 
   const VERIFIER_KEY = "psm.pkce.verifier";
   const STATE_KEY = "psm.pkce.state";
@@ -68,6 +73,20 @@
   /* In memory only, and deliberately not exposed. A reload drops it and
    * restore() fetches another. */
   let accessToken = null;
+
+  /**
+   * Point this page at a dapp. The agent knows things the page cannot work out:
+   * which dapp it is talking to, and where a *local* dapp's consent screen is
+   * (Vite's port moves when a previous dev server still holds 5173).
+   */
+  function configure(config) {
+    if (!config) return;
+    if (typeof config.servedByAgent === "boolean") servedByAgent = config.servedByAgent;
+    // localStorage still wins: it is the override that points a hosted bundle at
+    // a local dapp for testing, and it has no build step to go through.
+    if (config.apiBase && !localStorage.getItem("psm.dapp.api")) API_BASE = config.apiBase;
+    if (config.webOrigin && !localStorage.getItem("psm.dapp.web")) WEB_ORIGIN = config.webOrigin;
+  }
 
   /* ---- PKCE (RFC 7636), S256 only — dapp rejects anything else ---- */
 
@@ -98,7 +117,7 @@
 
   const authUrl = (action) => `${API_BASE}/apps/${APP_KEY}/auth/${action}`;
 
-  /** Every auth call needs the cookie, which is cross-origin in production. */
+  /** Every direct auth call needs the cookie, which is cross-origin in production. */
   const post = (url, body, headers) =>
     fetch(url, {
       method: "POST",
@@ -107,6 +126,58 @@
       body: JSON.stringify(body ?? {}),
     });
 
+  /** The same call, but to psm's own agent, which holds the cookie for us. */
+  const postToAgent = (path, body) =>
+    fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+
+  /**
+   * Is `psm` registered with this dapp, as a web client, with this page's
+   * callback? Asked before the redirect, because an unregistered or misregistered
+   * client_id sends the user to a consent screen that cannot explain itself —
+   * production has answered `app_not_configured` for every application row, and
+   * from here that looked simply like a broken button.
+   */
+  async function checkRegistered() {
+    let res;
+    try {
+      res = await fetch(
+        `${API_BASE}/apps/${APP_KEY}/public?redirectUri=${encodeURIComponent(redirectUri())}`,
+        { headers: { Accept: "application/json" } },
+      );
+    } catch (err) {
+      throw new Error(`Could not reach Werewolf at ${API_BASE} (${err.message}).`);
+    }
+    const body = await res.json().catch(() => null);
+    // 404 and 503 both mean "no such application row" — dapp's controller maps
+    // app_not_configured to 404 here and 503 on the exchange route.
+    if (res.status === 404 || res.status === 503) {
+      throw new Error(
+        `psm is not registered with Werewolf at ${API_BASE}, so signing in cannot work. ` +
+          "It needs one CloudApplication row with key `psm` and clientType `web`.",
+      );
+    }
+    if (!res.ok || !body?.success) {
+      throw new Error(body?.message || `Werewolf answered ${res.status} when asked about psm.`);
+    }
+    if (body.data?.clientType && body.data.clientType !== "web") {
+      throw new Error(
+        `Werewolf has psm registered as a ${body.data.clientType} client, and this build signs in ` +
+          "as a web client. The row needs clientType `web`.",
+      );
+    }
+    if (!body.data?.redirectAllowed) {
+      throw new Error(
+        `Werewolf will not accept this page's callback (${redirectUri()}). ` +
+          "A web client is exact-matched, so that URI has to be listed in the row's redirectUris.",
+      );
+    }
+  }
+
   /** Step 1 — leave for the consent screen. Does not return. */
   async function beginSignIn() {
     if (!window.isSecureContext) {
@@ -114,6 +185,7 @@
         "Signing in needs a secure context (https, or localhost). crypto.subtle is unavailable here.",
       );
     }
+    await checkRegistered();
     const verifier = createVerifier();
     const state = createState();
     // sessionStorage, not localStorage: this is one tab's in-flight login, and it
@@ -169,21 +241,52 @@
     // into a tab that started a different login.
     if (!state || state !== expectedState) throw new Error("Sign-in state did not match. Try again.");
 
-    const res = await post(authUrl("exchange"), {
+    const payload = {
       code,
       codeVerifier: verifier,
       redirectUri: redirectUri(),
       device: { id: deviceId(), name: "Browser", platform: navigator.platform || "web" },
-    });
+    };
+
+    // Through the agent when it serves this page: it can keep the refresh cookie
+    // that a cross-site browser would drop on the floor.
+    if (servedByAgent) {
+      const res = await postToAgent("/api/auth/exchange", payload);
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error || "Could not complete sign-in.");
+      rememberWho(body.user);
+      return body.user;
+    }
+
+    const res = await post(authUrl("exchange"), payload);
     const body = await res.json().catch(() => null);
     if (!res.ok || !body?.success) throw new Error(body?.message || "Could not complete sign-in.");
-
     accessToken = body.data.tokens.accessToken;
+    keepBodyRefreshToken(body.data.tokens.refreshToken);
+    rememberWho(body.data.user);
+    return body.data.user;
+  }
+
+  /**
+   * A dapp without the cookie transport hands a web client its refresh token in
+   * the response body (dev/master today; only feat/todo-app sets the cookie).
+   *
+   * It is held in a module variable and **never** written to storage: a refresh
+   * token in localStorage is readable by any injected script, which is the exact
+   * thing `clientType: 'web'` exists to prevent. The cost is that a reload has
+   * nothing to restore from and asks for a fresh sign-in — a real limitation,
+   * and the right side to err on. It goes away when dapp gains the cookie.
+   */
+  let bodyRefreshToken = null;
+  function keepBodyRefreshToken(token) {
+    bodyRefreshToken = typeof token === "string" && token ? token : null;
+  }
+
+  function rememberWho(user) {
     localStorage.setItem(SIGNED_IN_KEY, "1");
     try {
-      localStorage.setItem(WHO_KEY, JSON.stringify(body.data.user));
+      localStorage.setItem(WHO_KEY, JSON.stringify(user));
     } catch {}
-    return body.data.user;
   }
 
   /**
@@ -205,15 +308,23 @@
   }
 
   async function runRefresh() {
-    const res = await post(authUrl("refresh"), {});
+    // The agent's session is the agent's business; app.js asks it directly.
+    if (servedByAgent) return false;
+    // The cookie rides along on its own when dapp set one. The body covers the
+    // build that did not — and a dapp with the cookie transport ignores the body
+    // for a web client, so sending both is safe either way.
+    const res = await post(authUrl("refresh"), bodyRefreshToken ? { refreshToken: bodyRefreshToken } : {});
     const body = res.ok ? await res.json().catch(() => null) : null;
     if (!body?.success) {
       accessToken = null;
+      bodyRefreshToken = null;
       localStorage.removeItem(SIGNED_IN_KEY);
       localStorage.removeItem(WHO_KEY);
       return false;
     }
     accessToken = body.data.tokens.accessToken;
+    // Rotated on every use: keeping the spent one would fail the next refresh.
+    keepBodyRefreshToken(body.data.tokens.refreshToken);
     localStorage.setItem(SIGNED_IN_KEY, "1");
     return true;
   }
@@ -224,12 +335,15 @@
    * failed attempt just by loading the page.
    */
   async function restore() {
+    if (servedByAgent) return false; // /api/auth/session is the answer there
     if (!localStorage.getItem(SIGNED_IN_KEY)) return false;
     return refresh();
   }
 
   async function signOut() {
-    if (accessToken) {
+    if (servedByAgent) {
+      await postToAgent("/api/auth/logout", {}).catch(() => undefined);
+    } else if (accessToken) {
       // Revokes server-side and clears the cookie. Best effort — a failure here
       // must not leave the page thinking it is still signed in.
       await fetch(authUrl("logout"), {
@@ -239,6 +353,7 @@
       }).catch(() => undefined);
     }
     accessToken = null;
+    bodyRefreshToken = null;
     localStorage.removeItem(SIGNED_IN_KEY);
     localStorage.removeItem(WHO_KEY);
   }
@@ -268,11 +383,13 @@
   }
 
   window.PsmAuth = {
-    hosted: HOSTED,
-    apiBase: API_BASE,
-    webOrigin: WEB_ORIGIN,
+    configure,
+    get servedByAgent() { return servedByAgent; },
+    get apiBase() { return API_BASE; },
+    get webOrigin() { return WEB_ORIGIN; },
     appKey: APP_KEY,
     callbackPath: CALLBACK_PATH,
+    redirectUri,
     isCallback: () => location.pathname === CALLBACK_PATH,
     returnTo: () => sessionStorage.getItem(RETURN_KEY) || "",
     beginSignIn,

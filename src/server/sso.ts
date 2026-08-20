@@ -1,54 +1,38 @@
 /**
- * "Sign in with Werewolf" — OAuth 2.0 authorization code + PKCE, the flow
- * todo-app uses, designed for psm in docs/werewolf-sso-plan.md.
+ * "Sign in with Werewolf" — psm's half of it that has to live on a server.
  *
- * Being signed in at werewolf.solutions should sign you in to psm without
- * retyping a password. The browser is already authenticated there, so it visits
- * dapp's consent screen, dapp mints a 60-second single-use code bound to a PKCE
- * challenge and a redirect URI, and psm redeems it for a session.
+ * The flow itself is OAuth 2.0 authorization code + PKCE against werewolf-dapp,
+ * and it runs **in the browser**, in web/auth.js, exactly as todo-app's does.
+ * One application row (`psm`, `clientType: 'web'`), one client_id, one consent
+ * screen, one callback path — whether the page came from the local agent or from
+ * psm.werewolf.solutions.
  *
- * **The PKCE verifier never reaches the page.** todo-app has no server, so it
- * keeps the verifier in sessionStorage; psm has one, so the verifier is created
- * and kept here, keyed by the `state` parameter. Nothing sensitive crosses to
- * the browser at any point — it only ever carries the code, which is useless
- * without the verifier.
+ * What is left here is the part a page cannot do for itself:
  *
- * Redirect URIs are exact-matched by dapp (`CloudApplication.isRedirectAllowed`):
+ *  - **Where dapp is.** A local dapp's consent screen is on its Vite dev server,
+ *    whose port moves; only the machine can see which one is actually running.
+ *  - **Whether signing in can work at all.** dapp answers `app_not_configured`
+ *    until the row exists, and the consent screen cannot explain itself, so psm
+ *    asks first and says so in a sentence.
  *
- *   local   psm is registered `clientType: 'native'`, so any loopback port is
- *           accepted with the path locked to /api/cloud/sso/callback. Works out
- *           of the box on 4317, 4318, or wherever you run it.
- *   hosted  not this flow at all — psm.werewolf.solutions signs in as the
- *           separate `psm-web` application, in the browser (web/auth.js).
+ * The code exchange moved to server/session.ts, because for a web client dapp
+ * returns the refresh credential as an httpOnly cookie and a page on localhost
+ * cannot keep one. See the header there.
+ *
+ * Superseded: psm used to hold a second, server-side PKCE flow of its own for
+ * the loopback case, against a separate `native` row. Two rows meant two
+ * registrations, two consent screens and two things to keep working; the browser
+ * flow serves both postures now.
  */
-import crypto from "node:crypto";
 import type express from "express";
 
 import { getProjects } from "../index.ts";
+import { APP_KEY } from "./session.ts";
 import { machineProcesses } from "./machine.ts";
 import { currentWerewolfRuntime, werewolfApiUrl } from "./runtime.ts";
-import { AuthError, dappPost, openSession } from "./session.ts";
 
-/** Fixed by dapp for native clients; not ours to choose. */
-export const SSO_CALLBACK_PATH = "/api/cloud/sso/callback";
-
-const STATE_TTL_MS = 10 * 60 * 1000;
-
-interface Pending {
-  verifier: string;
-  redirectUri: string;
-  returnTo: string;
-  createdAt: number;
-}
-
-// In memory on purpose: an in-flight login is short-lived, and a restart losing
-// one costs a click. Persisting a verifier would be storing a credential.
-const pending = new Map<string, Pending>();
-
-function sweep() {
-  const cutoff = Date.now() - STATE_TTL_MS;
-  for (const [state, entry] of pending) if (entry.createdAt < cutoff) pending.delete(state);
-}
+/** Where the browser is sent back to. One path, every posture. */
+export const SSO_CALLBACK_PATH = "/auth/callback";
 
 /** Vite's default, and what todo-app's own config uses for a local dapp. */
 const VITE_DEFAULT_ORIGIN = "http://localhost:5173";
@@ -100,86 +84,137 @@ export function werewolfWebOrigin(apiUrl: string): string {
 }
 
 /**
- * The callback psm will ask dapp to redirect to. Loopback locally, because that
- * is what psm's native registration allows; the deployment's public origin when
- * hosted, which dapp has to be told about separately.
+ * The callback this page will be returned to. A web client is exact-matched
+ * (`CloudApplication.isRedirectAllowed`), so this string has to appear verbatim
+ * in the row's `redirectUris` — which is why psm's ports are pinned, the way
+ * todo-app pins 5200. `PSM_PUBLIC_ORIGIN` covers a psm behind a proxy.
  */
-export function ssoRedirectUri(): string {
-  // dapp's native rule for psm: http, loopback host, this exact path, any port.
-  // That is the whole story now — the hosted page signs in as `psm-web` in the
-  // browser and never comes through here.
-  const port = Number(process.env.PORT || 4317);
-  return `http://127.0.0.1:${port}${SSO_CALLBACK_PATH}`;
+export function ssoRedirectUri(req?: express.Request): string {
+  const configured = process.env.PSM_PUBLIC_ORIGIN;
+  if (configured) return `${configured.replace(/\/$/, "")}${SSO_CALLBACK_PATH}`;
+  const origin = pageOrigin(req);
+  return `${origin}${SSO_CALLBACK_PATH}`;
+}
+
+/** The origin the page asking us was served from. */
+function pageOrigin(req?: express.Request): string {
+  const header = req?.headers.origin;
+  if (typeof header === "string" && header) return header.replace(/\/$/, "");
+  const host = req?.headers.host;
+  // Same-origin GETs send no Origin at all, so Host is the usual answer here.
+  if (typeof host === "string" && host) return `http://${host}`;
+  return `http://localhost:${Number(process.env.PORT || 4317)}`;
 }
 
 /**
- * Start a sign-in: mint the PKCE pair, remember the verifier here, and return
- * the consent-screen URL for the browser to navigate to.
+ * Is psm registered with the dapp this instance is pointed at, as the kind of
+ * client this build expects, and will it accept this page's callback?
+ *
+ * Worth asking *before* the redirect. dapp's consent screen is a page on its web
+ * client, so an unregistered client_id sends the user away from psm to a screen
+ * that cannot explain itself, and they come back — if they come back — with
+ * nothing. Production has had no CloudApplication rows at all
+ * (`503 app_not_configured` for `psm`, `psm-web` and `todo` alike), which is
+ * exactly the case that used to look like "sign-in is broken" from here.
+ *
+ * Registration is a row in dapp's database. See docs/werewolf-psm-registration.md.
  */
-export async function ssoAuthorizeUrl(req: express.Request, returnTo = "/"): Promise<string> {
-  sweep();
-  const verifier = crypto.randomBytes(32).toString("base64url");
-  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
-  const state = crypto.randomBytes(16).toString("base64url");
-  const redirectUri = ssoRedirectUri();
-
-  pending.set(state, { verifier, redirectUri, returnTo, createdAt: Date.now() });
-
-  const params = new URLSearchParams({
-    client_id: "psm",
-    redirect_uri: redirectUri,
-    state,
-    code_challenge: challenge,
-    code_challenge_method: "S256",
-  });
-  // The consent screen is a page on dapp's web client, not an API endpoint.
-  return `${werewolfWebOrigin(await werewolfApiUrl())}/authorize?${params}`;
+export interface SsoAvailability {
+  available: boolean;
+  reason?: string;
 }
 
-/**
- * Redeem the code dapp sent back. Throws AuthError with something worth showing
- * — a failed sign-in is the moment a user most needs a real sentence.
- */
-export async function completeSso(
-  req: express.Request,
-): Promise<{ returnTo: string; user: { id: string; name?: string; email?: string } }> {
-  sweep();
-  const error = typeof req.query.error === "string" ? req.query.error : "";
-  const code = typeof req.query.code === "string" ? req.query.code : "";
-  const state = typeof req.query.state === "string" ? req.query.state : "";
+const CHECK_TTL_MS = 30_000;
+let lastCheck: { at: number; key: string; result: SsoAvailability } | null = null;
 
-  if (error) {
-    throw new AuthError(error === "access_denied" ? "Sign-in was declined." : error, 400);
-  }
-  if (!code || !state) throw new AuthError("This sign-in is missing its code.", 400);
-
-  const entry = pending.get(state);
-  // Single-use: consume it before anything can go wrong, so a replayed callback
-  // cannot reuse the verifier even if the exchange below fails.
-  pending.delete(state);
-  if (!entry) throw new AuthError("This sign-in did not start here, or it expired. Try again.", 400);
-
+export async function ssoAvailability(
+  req?: express.Request,
+  fetchImpl: typeof fetch = fetch,
+): Promise<SsoAvailability> {
   const apiUrl = await werewolfApiUrl();
-  const data = await dappPost(
-    "/apps/psm/auth/exchange",
-    {
-      code,
-      codeVerifier: entry.verifier,
-      redirectUri: entry.redirectUri,
-      device: {
-        id: crypto.createHash("sha256").update(entry.redirectUri).digest("hex").slice(0, 32),
-        name: "psm",
-        platform: String(req.headers["user-agent"] || "web").slice(0, 80),
-      },
-    },
-    apiUrl,
-  );
-
-  const { user } = openSession(data, apiUrl);
-  return { returnTo: entry.returnTo, user };
+  const redirectUri = ssoRedirectUri(req);
+  const key = `${apiUrl}\0${redirectUri}`;
+  if (lastCheck && lastCheck.key === key && Date.now() - lastCheck.at < CHECK_TTL_MS) {
+    return lastCheck.result;
+  }
+  const result = await probeRegistration(apiUrl, redirectUri, fetchImpl);
+  lastCheck = { at: Date.now(), key, result };
+  return result;
 }
 
-/** Test seam: the pending map is process-local and otherwise unreachable. */
-export function pendingCount(): number {
-  return pending.size;
+async function probeRegistration(
+  apiUrl: string,
+  redirectUri: string,
+  fetchImpl: typeof fetch,
+): Promise<SsoAvailability> {
+  // camelCase `redirectUri` — dapp treats `redirect_uri` as absent and answers
+  // redirectAllowed:false, which is a misleading way to read "wrong question".
+  const url = `${apiUrl}/apps/${APP_KEY}/public?redirectUri=${encodeURIComponent(redirectUri)}`;
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { headers: { Accept: "application/json" } });
+  } catch (err) {
+    return {
+      available: false,
+      reason: `Could not reach Werewolf at ${apiUrl} (${(err as Error).message}).`,
+    };
+  }
+  const body = (await response.json().catch(() => ({}))) as any;
+
+  // 404 and 503 are the same story: getApplication() found no row. dapp's
+  // controller maps app_not_configured to 404 on this route and 503 on exchange.
+  if (response.status === 404 || response.status === 503) {
+    return {
+      available: false,
+      reason:
+        `psm is not registered with Werewolf at ${apiUrl}, so signing in cannot work. ` +
+        "It needs one CloudApplication row with key `psm` and clientType `web` " +
+        "(see docs/werewolf-psm-registration.md).",
+    };
+  }
+  if (!response.ok || !body?.success) {
+    return {
+      available: false,
+      reason: body?.message || `Werewolf answered ${response.status} when asked about psm.`,
+    };
+  }
+
+  // A row from before the two rows were collapsed. The browser flow needs `web`:
+  // a native row would hand a page its refresh token, which is the whole reason
+  // dapp has a cookie transport at all.
+  if (body.data?.clientType && body.data.clientType !== "web") {
+    return {
+      available: false,
+      reason:
+        `Werewolf has psm registered as a ${body.data.clientType} client, and this build signs in ` +
+        "as a web client. The row needs clientType `web` and this callback in its redirectUris " +
+        `(${redirectUri}) — see docs/werewolf-psm-registration.md.`,
+    };
+  }
+  if (!body.data?.redirectAllowed) {
+    return {
+      available: false,
+      reason:
+        `Werewolf knows psm but will not accept this page's callback (${redirectUri}). ` +
+        "A web client is exact-matched, so that URI has to be listed in the row's redirectUris.",
+    };
+  }
+  return { available: true };
+}
+
+/** Test seam: forget the cached registration answer. */
+export function resetSsoAvailability(): void {
+  lastCheck = null;
+}
+
+/** What the page needs to start a sign-in for itself. */
+export async function ssoConfig(req?: express.Request) {
+  const apiUrl = await werewolfApiUrl();
+  return {
+    appKey: APP_KEY,
+    apiBase: apiUrl,
+    webOrigin: werewolfWebOrigin(apiUrl),
+    callbackPath: SSO_CALLBACK_PATH,
+    redirectUri: ssoRedirectUri(req),
+  };
 }

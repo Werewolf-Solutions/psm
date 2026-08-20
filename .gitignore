@@ -11,6 +11,8 @@ node_modules/
 # Local state psm writes beside itself.
 .psm-sessions.json
 .psm-plans/
+.psm-notes/
+.psm-logs/
 .psm-attachments-state.json
 .psm-catalog-cache.json
 .psm-catalog.json

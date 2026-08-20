@@ -6,7 +6,7 @@
   shared with dapp prod, staging, redis and nginx, and an ops doc that says it cannot run
   `npm ci`. **What shipped instead is the simpler thing this document itself describes in
   "Chosen shape": a hosted *page* and a local agent.** psm.werewolf.solutions is static
-  files; the browser signs in against werewolf-dapp as a separate `psm-web` application and
+  files; the browser signs in against werewolf-dapp as the one `psm` application and
   talks to `127.0.0.1` directly. There is no psm process on any server, so multi-tenancy,
   hosted auth and shell-out isolation all became moot rather than solved.
   Read `docs/deploy/PUBLISHING-A-NEW-APP.md` for what actually happens. This file is kept
@@ -198,21 +198,24 @@ Built, with tests:
 - **Deployment** — `Dockerfile` (hosted only; the agent is deliberately not containerised),
   `.env.example`, and a CI workflow running typecheck plus tests.
 
-- **Phase 2's redirect flow** (`src/server/sso.ts`, built 2026-08-12) — "Sign in with
-  Werewolf" as the full-page PKCE handoff todo-app uses, implemented per
-  `docs/werewolf-sso-plan.md`. The verifier is minted and kept server-side keyed by `state`,
-  so unlike todo-app nothing sensitive reaches the page. Local instances use the loopback
-  callback dapp's native registration already allows on any port.
+- **Phase 2's redirect flow** — "Sign in with Werewolf" as the full-page PKCE handoff
+  todo-app uses. Rebuilt 2026-08-17 as **one flow against one application row**: the browser
+  runs PKCE (`web/auth.js`) in every posture, and the only difference is who redeems the
+  code — the page directly when hosted (same-site with dapp, so it keeps the refresh
+  cookie), the agent when the agent serves the page (localhost is cross-site, so the server
+  keeps it). `src/server/sso.ts` is now only the registration preflight and consent-screen
+  discovery. Supersedes `docs/werewolf-sso-plan.md`, whose server-side verifier and loopback
+  callback belonged to the retired `native` row.
 
 Not built / blocked:
 
-- **The CloudApplication rows on production.** Both flows were driven end to end against a
-  *local* dapp on 2026-08-12 — consent screen, approval, code exchange, session, replay
-  refused. Production has no cloud applications registered at all (re-checked 2026-08-13:
-  `psm`, `psm-web` and `todo` all answer `503 app_not_configured`), so this is a bootstrap
-  that has not been run rather than anything to design. The hosted-callback question that
-  used to sit here is **decided**: two rows, `psm` (`native`, cockpit and agents) and
-  `psm-web` (`web`, the hosted page), shipped in `3b045e5`. See
+- **The CloudApplication row.** psm's side is done and tested; what is missing is the row
+  itself, and it now has to be a **`web`** client with psm's callbacks listed exactly. The
+  local dapp still has the old `native` row, so local sign-in is refused too — with a
+  message naming the migration. Production has no cloud applications registered at all
+  (re-checked 2026-08-17: `psm`, `psm-web` and `todo` all answer `503 app_not_configured`,
+  and todo.werewolf.solutions does not resolve). The two-row design shipped in `3b045e5` is
+  **withdrawn** in favour of one row. Runbook, including the script to add to dapp:
   `docs/werewolf-psm-registration.md`.
 - **Phase 4, the cross-machine index.** A hosted page now shows real projects whenever an
   agent is paired — every machine-bound call routes through it as of `5488f15`. What is

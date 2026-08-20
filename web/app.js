@@ -741,6 +741,11 @@ async function saveDrawer() {
 }
 
 /* ---------- workspace / cockpit ---------- */
+
+/* The log console renders a window over a buffer — see renderConsole below. */
+const LOG_WINDOW = 100; // lines rendered at once
+const LOG_BUFFER = 20000; // lines held in memory, well past the server's own cap
+
 let WS = {
   name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
   engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
@@ -775,15 +780,16 @@ let CAPS = {
   preview: null,
 };
 
-// This project's todos, read from the Werewolf board. `signedIn` is part of the
-// state rather than an error case: most of psm works without a cloud session, so
-// the pane has to be able to say "sign in" instead of "something went wrong".
-let TODOS = {
+// This project's notes: bugs and todos, features, ideas. Local to the machine,
+// so unlike the board this pane replaced there is no signed-out state to handle.
+let NOTES = {
   project: null,
-  tasks: [],
+  notes: [],
   loading: false,
-  signedIn: true,
-  appUrl: null,
+  saving: false,
+  filter: "all",
+  kind: "bug",
+  editing: null,
   error: null,
 };
 
@@ -884,14 +890,120 @@ function setWsStatus(status) {
   $("#ws-stop").disabled = !running;
 }
 
-function appendLine(entry, con = $("#ws-console")) {
-  const nearBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 60;
+/* ---- the log console ----------------------------------------------------
+ * A dev server can emit thousands of lines a minute, and every one of them used
+ * to become a DOM node. The console now renders a *window* — the last hundred
+ * lines — over a buffer that keeps the rest, and scrolling up widens the window
+ * a hundred at a time. Anything older than the buffer is still on disk: the
+ * Download button asks the agent for the whole transcript since the run started.
+ */
+
+/* Run and deploy each have a console, so the buffer belongs to the element
+ * rather than to WS — otherwise a deploy's output would widen the run window. */
+const LOG_VIEWS = new WeakMap();
+
+function logView(con) {
+  let view = LOG_VIEWS.get(con);
+  if (!view) {
+    view = { lines: [], window: LOG_WINDOW };
+    LOG_VIEWS.set(con, view);
+  }
+  return view;
+}
+
+function logNode(entry) {
   const line = el("div", "logline s-" + entry.stream);
   line.textContent = entry.line;
-  con.append(line);
-  // keep the DOM from growing without bound
-  while (con.childElementCount > 4000) con.firstElementChild.remove();
+  return line;
+}
+
+/** The "there is more above" header, and the control that reveals it. */
+function renderLogWindowBanner(con) {
+  const view = logView(con);
+  const hidden = Math.max(0, view.lines.length - view.window);
+  let banner = con.querySelector(".log-earlier");
+  if (!hidden) {
+    banner?.remove();
+    return;
+  }
+  if (!banner) {
+    banner = el("div", "log-earlier");
+    const more = el("button", "btn btn-small", `▲ Show ${LOG_WINDOW} earlier`);
+    more.onclick = () => {
+      view.window += LOG_WINDOW;
+      renderConsole(con, { keepScroll: true });
+    };
+    banner.append(el("span", "log-earlier-count"), more);
+  }
+  banner.querySelector(".log-earlier-count").textContent =
+    `${hidden.toLocaleString()} earlier ${hidden === 1 ? "line" : "lines"} not shown · Download for the full log`;
+  if (con.firstElementChild !== banner) con.prepend(banner);
+}
+
+/** Rebuild a console from its buffer. */
+function renderConsole(con = $("#ws-console"), { keepScroll = false } = {}) {
+  if (!con) return;
+  const view = logView(con);
+  // Widening the window pushes content down; holding the distance from the
+  // bottom keeps the line you were reading where you left it.
+  const fromBottom = con.scrollHeight - con.scrollTop;
+  con.innerHTML = "";
+  for (const entry of view.lines.slice(-view.window)) con.append(logNode(entry));
+  renderLogWindowBanner(con);
+  con.scrollTop = keepScroll ? con.scrollHeight - fromBottom : con.scrollHeight;
+}
+
+function clearConsole(con = $("#ws-console")) {
+  if (!con) return;
+  LOG_VIEWS.set(con, { lines: [], window: LOG_WINDOW });
+  con.innerHTML = "";
+}
+
+function appendLine(entry, con = $("#ws-console")) {
+  const view = logView(con);
+  view.lines.push(entry);
+  // The buffer is a ring too; the transcript on disk is what "everything" means.
+  if (view.lines.length > LOG_BUFFER) view.lines.splice(0, view.lines.length - LOG_BUFFER);
+  const nearBottom = con.scrollHeight - con.scrollTop - con.clientHeight < 60;
+  con.append(logNode(entry));
+  // Retire the oldest rendered line rather than re-rendering the whole window:
+  // this runs once per line on a busy stream.
+  while (con.querySelectorAll(".logline").length > view.window) {
+    con.querySelector(".logline").remove();
+  }
+  renderLogWindowBanner(con);
   if (nearBottom) con.scrollTop = con.scrollHeight;
+}
+
+/**
+ * The whole log since the run started — more than the console holds, and more
+ * than the server keeps in memory. Fetched through the agent rather than linked
+ * directly, because a paired hosted page authenticates with a bearer token that
+ * a plain <a download> could not carry.
+ */
+async function downloadLog(kind = "run") {
+  if (!WS.name) return;
+  try {
+    const response = await agentApi(
+      `/api/projects/${encodeURIComponent(WS.name)}/logs/download?kind=${encodeURIComponent(kind)}`,
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      return toast(error.error || "No log to download yet");
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = el("a");
+    link.href = url;
+    link.download = (response.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/)?.[1]
+      || `${WS.name}-${kind.replace(":", "-")}.log`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    toast(error.message || "Could not download the log");
+  }
 }
 
 function openWorkspace(p, pane = "logs", opts = {}) {
@@ -911,8 +1023,13 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   if (CAPS.project !== p.name) {
     CAPS = { project: p.name, catalog: [], loading: false, applying: false, preview: null };
   }
-  if (TODOS.project !== p.name) {
-    TODOS = { project: p.name, tasks: [], loading: false, signedIn: true, appUrl: TODOS.appUrl, error: null };
+  if (NOTES.project !== p.name) {
+    // The kind you were last writing carries over; the filter and any half-open
+    // editor belong to the project you just left.
+    NOTES = {
+      project: p.name, notes: [], loading: false, saving: false,
+      filter: "all", kind: NOTES.kind, editing: null, error: null,
+    };
   }
   WS.chatOnly = chat;
   WS.name = p.name;
@@ -945,8 +1062,8 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   for (const t of document.querySelectorAll(".ws-tab"))
     t.hidden = chat && t.dataset.pane !== "ai" && t.dataset.pane !== "session";
   $("#ws-cmd").value = p.runCommand || "";
-  $("#ws-console").innerHTML = "";
-  $("#ws-depconsole").innerHTML = "";
+  clearConsole();
+  clearConsole($("#ws-depconsole"));
   $("#ws-webframe").innerHTML = "";
   $("#ws-transcript").innerHTML = "";
   renderSessionPane(null);
@@ -1003,7 +1120,7 @@ function disconnectAi() {
 function switchPane(pane) {
   const allowed = WS.chatOnly
     ? new Set(["ai", "session"])
-    : new Set(["plan", "todos", "capabilities", "logs", "web", "ai", "session", "deploy"]);
+    : new Set(["plan", "notes", "capabilities", "logs", "web", "ai", "session", "deploy"]);
   if (!allowed.has(pane)) pane = WS.chatOnly ? "ai" : "plan";
   WS.pane = pane;
   for (const t of document.querySelectorAll(".ws-tab"))
@@ -1020,7 +1137,7 @@ function switchPane(pane) {
   if (pane === "session") fetchSessionState();
   if (pane === "plan") loadPlan();
   if (pane === "capabilities") loadCapabilities();
-  if (pane === "todos") loadTodos();
+  if (pane === "notes") loadNotes();
   if (pane === "ai" && !WS.recapFetched) {
     WS.recapFetched = true;
     fetchRecap(); // refresh "where we left off" (regenerates only if stale)
@@ -1359,7 +1476,7 @@ function connectLogs(name) {
   if (WS.es) WS.es.close();
   const es = agentStream(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
   WS.es = es;
-  es.onopen = () => ($("#ws-console").innerHTML = ""); // rebuild on (re)connect, don't duplicate
+  es.onopen = () => clearConsole(); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
     try {
       appendLine(JSON.parse(e.data));
@@ -1534,109 +1651,240 @@ function renderCapabilities() {
   }
 }
 
-/* ---- Todos pane ---------------------------------------------------------
- * This project's tasks from the Werewolf todo board, read-only. Editing lives
- * in the todo app, so there is one implementation of what a status cycle or a
- * reorder means — this pane's job is to show what is outstanding and get you
- * there in one click.
+/* ---- Notes pane ---------------------------------------------------------
+ * The scratchpad beside each project. This tab used to mirror the Werewolf todo
+ * board, which could show what was already tracked but not take down the thing
+ * you just noticed — a crash you are looking at right now, a feature the project
+ * is obviously asking for, a thought worth keeping. Notes are local files, so
+ * writing one never waits on a network or a cloud session.
  */
+const NOTE_KINDS = {
+  bug: { label: "Bug / todo", icon: "\u{1F41E}", plural: "Bugs & todos" },
+  feature: { label: "New feature", icon: "\u2728", plural: "New features" },
+  idea: { label: "Idea / thought", icon: "\u{1F4A1}", plural: "Ideas & thoughts" },
+};
+const noteKind = (kind) => NOTE_KINDS[kind] || NOTE_KINDS.idea;
 
-// Where "Open in Todo" points. The server decides (TODO_APP_URL, defaulting to
-// the local dev server) because the todo app is not deployed yet; this is only
-// the fallback for a response that predates the field.
-const TODO_APP_FALLBACK = "http://localhost:5200";
-const TODO_WEEKDAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+const notesPath = (suffix = "") =>
+  `/api/projects/${encodeURIComponent(WS.name)}/notes${suffix}`;
 
-async function loadTodos(force = false) {
-  if (!WS.name || WS.chatOnly || TODOS.loading) return;
-  if (!force && TODOS.project === WS.name && TODOS.tasks.length) return;
-  TODOS.loading = true;
-  TODOS.error = null;
-  renderTodos();
+async function loadNotes(force = false) {
+  if (!WS.name || WS.chatOnly || NOTES.loading) return;
+  if (!force && NOTES.project === WS.name && NOTES.notes.length) return;
+  NOTES.loading = true;
+  NOTES.error = null;
+  renderNotes();
   try {
-    const response = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/todos`);
+    const response = await agentApi(notesPath());
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "Could not load todos");
-    TODOS.project = WS.name;
-    TODOS.tasks = data.tasks || [];
-    TODOS.signedIn = data.signedIn !== false;
-    TODOS.appUrl = data.appUrl || TODO_APP_FALLBACK;
+    if (!response.ok) throw new Error(data.error || "Could not load notes");
+    NOTES.project = WS.name;
+    NOTES.notes = data.notes || [];
   } catch (error) {
-    TODOS.error = error.message || "Could not load todos";
+    NOTES.error = error.message || "Could not load notes";
   } finally {
-    TODOS.loading = false;
-    renderTodos();
+    NOTES.loading = false;
+    renderNotes();
   }
 }
 
-function renderTodos() {
-  const body = $("#todos-body");
-  const count = $("#todos-count");
-  const open = $("#todos-open");
+async function addNote() {
+  const field = $("#note-text");
+  const text = field.value.trim();
+  if (!text || NOTES.saving) return;
+  NOTES.saving = true;
+  renderNotes();
+  try {
+    const response = await agentApi(notesPath(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: NOTES.kind, text }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not save the note");
+    NOTES.notes = [data.note, ...NOTES.notes];
+    field.value = "";
+    // A filter that hides what was just written reads as the save having
+    // failed, so widen it to where the new note actually is.
+    if (NOTES.filter !== "all" && NOTES.filter !== data.note.kind) NOTES.filter = data.note.kind;
+  } catch (error) {
+    toast(error.message || "Could not save the note");
+  } finally {
+    NOTES.saving = false;
+    renderNotes();
+    field.focus();
+  }
+}
+
+async function patchNote(id, body) {
+  try {
+    const response = await agentApi(notesPath(`/${encodeURIComponent(id)}`), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Could not update the note");
+    NOTES.notes = NOTES.notes.map((note) => (note.id === id ? data.note : note));
+  } catch (error) {
+    toast(error.message || "Could not update the note");
+  } finally {
+    NOTES.editing = null;
+    renderNotes();
+  }
+}
+
+async function deleteNote(id) {
+  try {
+    const response = await agentApi(notesPath(`/${encodeURIComponent(id)}`), { method: "DELETE" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.error || "Could not delete the note");
+    }
+    NOTES.notes = NOTES.notes.filter((note) => note.id !== id);
+  } catch (error) {
+    toast(error.message || "Could not delete the note");
+  } finally {
+    renderNotes();
+  }
+}
+
+function visibleNotes() {
+  if (NOTES.filter === "all") return NOTES.notes.filter((note) => !note.done);
+  if (NOTES.filter === "done") return NOTES.notes.filter((note) => note.done);
+  return NOTES.notes.filter((note) => note.kind === NOTES.filter && !note.done);
+}
+
+/** One note, either as a row or — while it is being edited — as a textarea. */
+function noteCard(note) {
+  const card = el("article", `pnote pnote-${note.kind}${note.done ? " is-done" : ""}`);
+  card.dataset.noteId = note.id;
+
+  const head = el("div", "pnote-head");
+  const kind = el("span", "pnote-kind", `${noteKind(note.kind).icon} ${esc(noteKind(note.kind).label)}`);
+  const when = el("time", "pnote-when", esc(relTime(note.updatedAt)));
+  when.dateTime = new Date(note.updatedAt).toISOString();
+  head.append(kind, when);
+
+  if (NOTES.editing === note.id) {
+    const field = el("textarea", "pnote-edit");
+    field.value = note.text;
+    field.rows = Math.min(12, note.text.split("\n").length + 1);
+    const actions = el("div", "pnote-actions");
+    const save = el("button", "btn btn-small btn-primary", "Save");
+    save.onclick = () => patchNote(note.id, { text: field.value.trim() || note.text });
+    const cancel = el("button", "btn btn-small", "Cancel");
+    cancel.onclick = () => {
+      NOTES.editing = null;
+      renderNotes();
+    };
+    // The same chord that adds a note saves an edit.
+    field.onkeydown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") save.onclick();
+      if (event.key === "Escape") cancel.onclick();
+    };
+    actions.append(save, cancel);
+    card.append(head, field, actions);
+    setTimeout(() => field.focus(), 0);
+    return card;
+  }
+
+  // esc, because el() assigns innerHTML and a note is free-form prose the user
+  // typed — stack traces and markdown are exactly what lands here.
+  const text = el("p", "pnote-text", esc(note.text));
+  const actions = el("div", "pnote-actions");
+  const done = el("button", "btn btn-small", note.done ? "↩ Reopen" : "✓ Done");
+  done.onclick = () => patchNote(note.id, { done: !note.done });
+  const edit = el("button", "btn btn-small", "Edit");
+  edit.onclick = () => {
+    NOTES.editing = note.id;
+    renderNotes();
+  };
+  const move = el("select", "pnote-move");
+  for (const [value, meta] of Object.entries(NOTE_KINDS)) {
+    const option = el("option", "", `${meta.icon} ${esc(meta.label)}`);
+    option.value = value;
+    if (value === note.kind) option.selected = true;
+    move.append(option);
+  }
+  move.title = "Move this note to another kind";
+  move.onchange = () => patchNote(note.id, { kind: move.value });
+  const remove = el("button", "btn btn-small pnote-delete", "Delete");
+  remove.title = "Delete this note";
+  remove.onclick = () => {
+    // Deleting is the one irreversible thing here, so it asks — inline, because
+    // a browser confirm() would block the agent's own event loop conventions.
+    if (remove.dataset.armed) return deleteNote(note.id);
+    remove.dataset.armed = "1";
+    remove.textContent = "Really delete?";
+    setTimeout(() => {
+      delete remove.dataset.armed;
+      remove.textContent = "Delete";
+    }, 4000);
+  };
+  actions.append(done, edit, move, remove);
+  card.append(head, text, actions);
+  return card;
+}
+
+function renderNotes() {
+  const body = $("#note-body");
   if (!body) return;
 
-  // The link always works, even with nothing to show: an empty pane is the
-  // moment you most want to go and add something.
-  if (open) {
-    open.href = `${TODOS.appUrl || TODO_APP_FALLBACK}/?project=${encodeURIComponent(WS.name || "")}`;
-    open.title = `Open the todo board filtered to ${WS.name}`;
+  $("#note-save").disabled = NOTES.saving;
+  $("#note-save").textContent = NOTES.saving ? "Saving…" : "Add note";
+  for (const button of document.querySelectorAll("#note-kinds .note-kind")) {
+    button.classList.toggle("on", button.dataset.kind === NOTES.kind);
   }
+  for (const button of document.querySelectorAll("#note-filters .note-filter")) {
+    button.classList.toggle("on", button.dataset.filter === NOTES.filter);
+  }
+
+  const openNotes = NOTES.notes.filter((note) => !note.done);
+  const counts = Object.keys(NOTE_KINDS).map((kind) => {
+    const total = openNotes.filter((note) => note.kind === kind).length;
+    return total ? `${total} ${total === 1 ? noteKind(kind).label.toLowerCase() : noteKind(kind).plural.toLowerCase()}` : null;
+  }).filter(Boolean);
+  $("#note-count").textContent = counts.length ? counts.join(" · ") : "";
 
   body.innerHTML = "";
 
-  if (TODOS.loading) {
-    count.textContent = "loading…";
+  if (NOTES.loading && !NOTES.notes.length) {
+    body.append(el("div", "note-empty", "Loading notes…"));
+    return;
+  }
+  if (NOTES.error) {
+    body.append(el("div", "note-empty", esc(NOTES.error)));
     return;
   }
 
-  if (TODOS.error) {
-    count.textContent = "";
-    body.append(el("div", "todos-empty", TODOS.error));
-    return;
-  }
-
-  if (!TODOS.signedIn) {
-    count.textContent = "";
-    const note = el("div", "todos-empty");
-    note.append(
-      el("p", "", "Not signed in to Werewolf, so there are no todos to show."),
-      el("p", "", "Use ☁ Cloud in the top bar to connect this device."),
+  const notes = visibleNotes();
+  if (!notes.length) {
+    const empty = el("div", "note-empty");
+    empty.append(
+      el("p", "", NOTES.notes.length
+        ? "Nothing under this filter."
+        : `No notes for ${esc(WS.name || "this project")} yet.`),
+      el("p", "", "Write down a bug, a feature worth building, or a thought you do not want to lose."),
     );
-    body.append(note);
+    body.append(empty);
     return;
   }
 
-  const open_ = TODOS.tasks.filter((t) => t.status !== "done");
-  count.textContent = `${open_.length} open · ${TODOS.tasks.length} total`;
-
-  if (!TODOS.tasks.length) {
-    const note = el("div", "todos-empty");
-    note.append(
-      el("p", "", `Nothing on the board is tagged ${esc(WS.name)}.`),
-      el("p", "", "Tag a task with this project in the todo app and it will appear here."),
-    );
-    body.append(note);
+  // Grouped by kind under the "All" filter, because bugs and daydreams are read
+  // in different moods; a single-kind filter is already its own group.
+  if (NOTES.filter === "all") {
+    for (const kind of Object.keys(NOTE_KINDS)) {
+      const group = notes.filter((note) => note.kind === kind);
+      if (!group.length) continue;
+      const section = el("section", "note-group");
+      section.append(el("h3", "note-group-title", `${noteKind(kind).icon} ${esc(noteKind(kind).plural)}`));
+      for (const note of group) section.append(noteCard(note));
+      body.append(section);
+    }
     return;
   }
-
-  // Open work first — that is what the pane is for. Within each group, the
-  // board's own order is preserved.
-  const ordered = [...TODOS.tasks].sort((a, b) => (a.status === "done") - (b.status === "done"));
-  const list = el("ul", "todos-list");
-  for (const task of ordered) {
-    const row = el("li", `todo-row todo-${task.status}`);
-    const when = el("span", "todo-when", task.weekday === null || task.weekday === undefined
-      ? ""
-      : TODO_WEEKDAYS[task.weekday]);
-    const marker = el("span", "todo-marker", esc(task.marker || "[]"));
-    // esc, because el() assigns innerHTML and task text is free-form prose —
-    // todo.md is full of ** and <, and this is the user's own text arriving
-    // over the network.
-    const text = el("span", "todo-text", esc(task.text));
-    row.append(when, marker, text);
-    list.append(row);
-  }
-  body.append(list);
+  for (const note of notes) body.append(noteCard(note));
 }
 
 async function loadCapabilities(force = false) {
@@ -3319,13 +3567,13 @@ function setDepStatus(status) {
 
 function connectDeployLogs() {
   if (WS.depEs) WS.depEs.close();
-  $("#ws-depconsole").innerHTML = "";
+  clearConsole($("#ws-depconsole"));
   setDepStatus("idle");
   const es = agentStream(
     `/api/projects/${encodeURIComponent(WS.name)}/logs/stream?kind=${encodeURIComponent(depKind())}`,
   );
   WS.depEs = es;
-  es.onopen = () => ($("#ws-depconsole").innerHTML = ""); // rebuild on (re)connect, don't duplicate
+  es.onopen = () => clearConsole($("#ws-depconsole")); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
     try {
       appendLine(JSON.parse(e.data), $("#ws-depconsole"));
@@ -3443,10 +3691,38 @@ $("#ws-close").onclick = () => closeWorkspace();
 $("#ws-backdrop").onclick = () => closeWorkspace();
 $("#ws-run").onclick = wsRun;
 $("#ws-stop").onclick = wsStop;
-$("#ws-clear").onclick = () => ($("#ws-console").innerHTML = "");
+$("#ws-clear").onclick = () => clearConsole();
+$("#ws-download").onclick = () => downloadLog();
 $("#ws-tabs").onclick = (e) => {
   const t = e.target.closest(".ws-tab");
   if (t) switchPane(t.dataset.pane);
+};
+
+/* ---- Notes pane controls ---- */
+$("#note-compose").onsubmit = (e) => {
+  e.preventDefault();
+  addNote();
+};
+$("#note-text").onkeydown = (e) => {
+  // The composer is a textarea because a stack trace is worth pasting whole, so
+  // Enter has to stay Enter and the chord is what saves.
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    addNote();
+  }
+};
+$("#note-kinds").onclick = (e) => {
+  const button = e.target.closest(".note-kind");
+  if (!button) return;
+  NOTES.kind = button.dataset.kind;
+  renderNotes();
+  $("#note-text").focus();
+};
+$("#note-filters").onclick = (e) => {
+  const button = e.target.closest(".note-filter");
+  if (!button) return;
+  NOTES.filter = button.dataset.filter;
+  renderNotes();
 };
 $("#ws-reload").onclick = () => {
   const iframe = $("#ws-webframe").querySelector("iframe");
@@ -3552,6 +3828,7 @@ $("#ws-targets").onclick = (e) => {
 $("#ws-dep-run").onclick = deployRun;
 $("#ws-dep-stop").onclick = deployStop;
 $("#ws-dep-ai").onclick = guideWithAI;
+$("#ws-dep-download").onclick = () => downloadLog(depKind());
 
 /* ---------- actions ---------- */
 let toastTimer;
@@ -3561,6 +3838,32 @@ function toast(msg) {
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), 2200);
+}
+
+/* ---- is this page still the page psm is serving? -------------------------
+ * web/ has no build step and no hashed filenames, so a cockpit left open in a
+ * tab keeps running whatever it loaded — through restarts, upgrades, and an edit
+ * made a minute ago. It then calls routes this build may no longer have, and the
+ * first sign of trouble is whichever button is pressed first failing in a way
+ * that looks like the feature is broken rather than the page being old.
+ *
+ * Only for an agent-served page: a paired hosted page is *meant* to be a
+ * different build from the agent it talks to.
+ */
+let PAGE_ASSETS = null;
+
+async function checkPageFreshness() {
+  if (hostedPage() || $("#stale-page").dataset.dismissed) return;
+  try {
+    const r = await fetch("/api/version", { credentials: "same-origin" });
+    if (!r.ok) return;
+    const { assets } = await r.json();
+    if (!assets) return;
+    if (PAGE_ASSETS === null) PAGE_ASSETS = assets; // what this page was loaded from
+    else if (assets !== PAGE_ASSETS) $("#stale-page").hidden = false;
+  } catch {
+    /* the agent being down is a different problem, with its own screen */
+  }
 }
 
 /* ---------- new project + house rules modals ---------- */
@@ -3581,17 +3884,19 @@ function closeModals() {
 }
 
 /* ---------- signing in ----------
- * Two arrangements, one screen, chosen by where the page is served from:
+ * One flow, one application row (`psm`), run by this page in every posture —
+ * web/auth.js has it, and it is todo-app's flow. What differs is only who
+ * redeems the code, because dapp gives a web client its refresh credential as a
+ * SameSite=Lax cookie:
  *
- *   the cockpit (127.0.0.1)  psm's own server is the confidential client. It
- *                            runs the PKCE flow, holds the tokens, and this page
- *                            just asks /api/auth/session who is signed in.
- *   the hosted page          there is no psm server, so the browser runs the
- *                            flow itself as `psm-web` (web/auth.js). dapp keeps
- *                            the refresh token in an httpOnly cookie.
+ *   the hosted page   psm.werewolf.solutions is same-*site* with dapp, so the
+ *                     page exchanges directly and the cookie rides along.
+ *   the cockpit       localhost is cross-site with dapp and the browser would
+ *                     drop that cookie, so the page hands its code to the agent
+ *                     and asks /api/auth/session who is signed in.
  *
- * Either way the page never holds a refresh token, which is the property that
- * matters. `PsmAuth.hosted` is the switch.
+ * Either way the page never holds a refresh credential, which is the property
+ * that matters. `SERVED_BY_AGENT` is the switch, and detectHost() sets it.
  * ---------------------------------------------------------------------- */
 let AUTH = { user: null, required: false, checked: false, sso: { available: false } };
 
@@ -3614,6 +3919,9 @@ async function detectHost() {
   }
   // agent.js starts from a hostname guess; this is the answer.
   PsmAgent.setServedByAgent(SERVED_BY_AGENT);
+  // auth.js needs it before the callback is redeemed: the agent-served page
+  // hands its code to the agent, which can keep dapp's refresh cookie.
+  PsmAuth.configure({ servedByAgent: SERVED_BY_AGENT });
   return SERVED_BY_AGENT;
 }
 const hostedPage = () => SERVED_BY_AGENT === false;
@@ -3634,13 +3942,19 @@ async function loadSession({ justSignedIn = false } = {}) {
       // out. `restore()` no-ops when there was never a session.
       AUTH.user = (await PsmAuth.restore()) ? AUTH.user || PsmAuth.cachedUser() || { id: "me" } : null;
       AUTH.required = false; // the board degrades to "pair an agent", not a wall
+      // Whether dapp will accept this page is only knowable by asking dapp, and
+      // beginSignIn() asks before it redirects. Offer the button; it explains
+      // itself if the row is missing.
       AUTH.sso = { available: true };
     } else {
+      // The agent holds the session — it keeps dapp's refresh cookie, which this
+      // page could not. The same call tells us which dapp to sign in against.
       const r = await fetch("/api/auth/session", { credentials: "same-origin" });
       const data = await r.json();
       AUTH.user = data.user || null;
       AUTH.required = !!data.required;
       AUTH.sso = data.sso || { available: true };
+      PsmAuth.configure({ servedByAgent: true, ...(data.dapp || {}) });
     }
   } catch {
     AUTH.user = null;
@@ -3648,20 +3962,6 @@ async function loadSession({ justSignedIn = false } = {}) {
   AUTH.checked = true;
   renderAccount();
   return AUTH.user;
-}
-
-/**
- * The redirect flow reports failures by bouncing back to "/" with a reason —
- * mid-redirect there is nowhere else to put it.
- */
-function consumeSsoError() {
-  const params = new URLSearchParams(location.search);
-  const message = params.get("sso_error");
-  if (!message) return null;
-  params.delete("sso_error");
-  const query = params.toString();
-  history.replaceState(null, "", location.pathname + (query ? `?${query}` : "") + location.hash);
-  return message;
 }
 
 function renderAccount() {
@@ -3722,8 +4022,8 @@ function setAuthError(message) {
 }
 
 async function signOutOfPsm() {
-  if (hostedPage()) await PsmAuth.signOut().catch(() => {});
-  else await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
+  // PsmAuth knows which end holds the session — dapp directly, or the agent.
+  await PsmAuth.signOut().catch(() => {});
   AUTH.user = null;
   renderAccount();
   toast("Signed out");
@@ -4671,10 +4971,9 @@ $("#auth-dismiss").onclick = closeAuth;
 $("#auth-sso").onclick = async () => {
   // A full-page handoff, not a popup: the consent screen needs the
   // werewolf.solutions session cookie, and we get the browser back on a callback.
+  // One flow for both postures now, against the one `psm` application row.
   try {
-    if (hostedPage()) return await PsmAuth.beginSignIn();
-    const returnTo = location.pathname + location.search + location.hash;
-    location.href = `/api/cloud/sso/start?returnTo=${encodeURIComponent(returnTo)}`;
+    await PsmAuth.beginSignIn();
   } catch (err) {
     setAuthError(err.message || "Could not start sign-in");
   }
@@ -4688,6 +4987,13 @@ $("#procs-open").onclick = openProcs;
 $("#procs-close").onclick = closeModals;
 $("#procs-refresh").onclick = loadProcs;
 $("#procs-stale").onclick = stopStale;
+$("#stale-reload").onclick = () => location.reload();
+$("#stale-dismiss").onclick = () => {
+  // Dismissing is for "I know, I am mid-thought" — it does not un-stale the page,
+  // so it stays dismissed rather than reappearing every twenty seconds.
+  $("#stale-page").dataset.dismissed = "1";
+  $("#stale-page").hidden = true;
+};
 $("#links-open").onclick = openLinks;
 $("#links-close").onclick = closeModals;
 $("#link-kinds").onclick = (e) => {
@@ -4795,7 +5101,11 @@ async function boot() {
   // replay a code that is already spent.
   let callbackError = null;
   await detectHost();
-  if (hostedPage() && PsmAuth.isCallback()) {
+  // Take the fingerprint now, while the page and what served it still agree.
+  checkPageFreshness();
+  // Every posture comes back here now — the cockpit and the hosted page run the
+  // same flow, and differ only in who redeems the code (see web/auth.js).
+  if (PsmAuth.isCallback()) {
     try {
       AUTH.user = await PsmAuth.completeSignIn(location.search);
     } catch (err) {
@@ -4804,7 +5114,7 @@ async function boot() {
     history.replaceState(null, "", "/" + PsmAuth.returnTo());
   }
 
-  const ssoError = consumeSsoError() || callbackError;
+  const ssoError = callbackError;
   await loadSession({ justSignedIn: !!AUTH.user && !callbackError });
   if (authGateRequired() || (ssoError && !AUTH.user)) {
     openAuth();
@@ -4850,3 +5160,4 @@ setInterval(() => {
 }, 3000);
 setInterval(() => fetchUsage(true, true), USAGE_REFRESH_MS);
 setInterval(() => fetchRuntimeServices(), 15_000);
+setInterval(checkPageFreshness, 20_000);

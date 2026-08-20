@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 
 /** A managed process: a project's dev server, or a deploy to a target. */
@@ -22,11 +25,47 @@ interface ProcEntry {
   startedAt: number;
   detectedPort: number | null; // web port sniffed from the run output
   log: LogLine[];
+  file: fs.WriteStream | null; // the full transcript, for Download
   subscribers: Set<Response>;
 }
 
-const MAX_LOG = 3000; // ring-buffer cap per process
+/** Ring-buffer cap per process. Exported so a capped download can say so. */
+export const MAX_LOG_LINES = 3000;
 const registry = new Map<string, ProcEntry>();
+
+/**
+ * The full transcript, on disk.
+ *
+ * The in-memory buffer above is a ring, so a chatty dev server pushes its own
+ * startup out of it within a minute — which is exactly the part you want when
+ * something went wrong at boot. Download promises "since it started", so the
+ * lines go to a file as well and the ring stays what the console replays.
+ */
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOG_DIR = process.env.PSM_LOG_DIR || path.resolve(__dirname, "..", "..", ".psm-logs");
+
+/** One file per process, named so it is obvious what it holds. */
+export function logFile(name: string, kind: ProcKind): string {
+  const safe = (value: string) => value.replace(/[^A-Za-z0-9._-]+/g, "_");
+  return path.join(LOG_DIR, `${safe(name)}__${safe(kind)}.log`);
+}
+
+/** Truncate and reopen: a run's transcript starts when the run does. */
+function openLogFile(p: ProcEntry): void {
+  p.file?.end();
+  p.file = null;
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+    p.file = fs.createWriteStream(logFile(p.name, p.kind), { flags: "w", mode: 0o600 });
+    // A disk that fills up, or a read-only checkout: the console must keep
+    // working, so a failed transcript is dropped rather than thrown.
+    p.file.on("error", () => {
+      p.file = null;
+    });
+  } catch {
+    p.file = null;
+  }
+}
 
 // strip terminal colour/cursor escape sequences so logs read as plain text
 const ANSI_RE = /\u001b\[[0-9;?]*[A-Za-z]/g;
@@ -101,7 +140,10 @@ function pushLine(p: ProcEntry, stream: LogLine["stream"], text: string) {
     if (raw === "") continue;
     const entry: LogLine = { t: Date.now(), stream, line: raw };
     p.log.push(entry);
-    if (p.log.length > MAX_LOG) p.log.shift();
+    if (p.log.length > MAX_LOG_LINES) p.log.shift();
+    // Timestamped on disk, because a downloaded transcript is read away from
+    // the console that showed when each line arrived.
+    p.file?.write(`${new Date(entry.t).toISOString()} ${stream} ${raw}\n`);
     const payload = `data: ${JSON.stringify(entry)}\n\n`;
     for (const res of p.subscribers) res.write(payload);
     // sniff the dev-server URL from a run's own output (the reliable source of truth)
@@ -142,6 +184,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     startedAt: Date.now(),
     detectedPort: null,
     log: [],
+    file: null,
     subscribers: new Set(),
   };
   p.command = command;
@@ -150,8 +193,10 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
   p.exitCode = null;
   p.startedAt = Date.now();
   p.detectedPort = null; // re-sniff on each run
+  p.log = []; // a restart's console starts clean, like its transcript
   registry.set(key, p);
 
+  openLogFile(p);
   pushLine(p, "sys", `$ ${command}`);
 
   // detached so we can signal the whole process group (kills grandchildren too);
@@ -177,6 +222,10 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     p.child = null;
     pushLine(p, "sys", `[psm] process exited (${signal ? `signal ${signal}` : `code ${code}`})`);
     broadcastStatus(p);
+    // Flush before the file can be downloaded — the last lines are the ones
+    // someone downloading after a crash has come for.
+    p.file?.end();
+    p.file = null;
   });
 
   return p;
@@ -221,6 +270,30 @@ export function stopAll(name: string): ProcKind[] {
   return stopped;
 }
 
+/**
+ * The whole transcript of the current (or last) run, as plain text.
+ *
+ * The file is the real answer — it holds every line since the process started.
+ * The ring buffer is the fallback for a run that predates this feature, or one
+ * whose file could not be opened; it is capped, so it is labelled as such.
+ */
+export function transcript(name: string, kind: ProcKind): { text: string; complete: boolean } | null {
+  const p = registry.get(keyOf(name, kind));
+  try {
+    const text = fs.readFileSync(logFile(name, kind), "utf8");
+    // An entry that was never started this session must not claim a stale file
+    // from a previous one is its own.
+    if (p?.startedAt || text) return { text, complete: true };
+  } catch {
+    /* fall back to whatever is in memory */
+  }
+  if (!p || !p.log.length) return null;
+  const text = p.log
+    .map((entry) => `${new Date(entry.t).toISOString()} ${entry.stream} ${entry.line}\n`)
+    .join("");
+  return { text, complete: p.log.length < MAX_LOG_LINES };
+}
+
 /** Attach an SSE response: replay the buffered log, then stream live. */
 export function subscribe(res: Response, name: string, kind: ProcKind): void {
   res.setHeader("Content-Type", "text/event-stream");
@@ -243,6 +316,7 @@ export function subscribe(res: Response, name: string, kind: ProcKind): void {
       startedAt: 0,
       detectedPort: null,
       log: [],
+      file: null,
       subscribers: new Set(),
     };
     registry.set(keyOf(name, kind), p);

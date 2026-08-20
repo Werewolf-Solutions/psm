@@ -181,6 +181,9 @@ export function agentGuard(options: GuardOptions = {}): express.RequestHandler {
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    // A downloaded log names itself in this header; cross-origin JS cannot read
+    // it unless it is exposed, and the paired page would fall back to a guess.
+    res.setHeader("Access-Control-Expose-Headers", "content-disposition");
     res.setHeader("Access-Control-Max-Age", "600");
     // Chrome's Private Network Access preflight, sent for public→private
     // requests. Without the answer the fetch never leaves the browser.

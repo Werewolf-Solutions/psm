@@ -207,10 +207,11 @@
         <button class="btn btn-primary" id="ws-run">▶ Run</button>
         <button class="btn" id="ws-stop">■ Stop</button>
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
+        <button class="btn" id="ws-download" title="Download the whole log since this run started">⤓ Log</button>
       </div>
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab" data-pane="plan">Plan</button>
-        <button class="ws-tab" data-pane="todos">Todos</button>
+        <button class="ws-tab" data-pane="notes">Notes</button>
         <button class="ws-tab" data-pane="capabilities">Capabilities</button>
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
@@ -219,14 +220,29 @@
         <button class="ws-tab" data-pane="deploy">Deploy</button>
       </div>
       <div class="ws-panes">
-        <!-- This project's todos, read from the Werewolf board. Read-only: the
-             "Open in Todo" link is how anything gets changed. -->
-        <div class="ws-todos" id="ws-todos" data-pane="todos" hidden>
-          <div class="todos-toolbar">
-            <span class="todos-count" id="todos-count"></span>
-            <a class="btn" id="todos-open" target="_blank" rel="noopener">Open in Todo ↗</a>
+        <!-- This project's own notes: bugs and todos, features, ideas. Written
+             here and kept in a local file beside the project's plans. -->
+        <div class="ws-notes" id="ws-notes" data-pane="notes" hidden>
+          <form class="note-compose" id="note-compose">
+            <div class="note-kinds" id="note-kinds" role="radiogroup" aria-label="What kind of note">
+              <button type="button" class="note-kind on" data-kind="bug">🐞 Bug / todo</button>
+              <button type="button" class="note-kind" data-kind="feature">✨ New feature</button>
+              <button type="button" class="note-kind" data-kind="idea">💡 Idea / thought</button>
+            </div>
+            <textarea id="note-text" rows="3" placeholder="What did you just notice? ⌘/Ctrl+Enter to save."></textarea>
+            <div class="note-compose-actions">
+              <span class="note-count" id="note-count"></span>
+              <button class="btn btn-primary" type="submit" id="note-save">Add note</button>
+            </div>
+          </form>
+          <div class="note-filters" id="note-filters">
+            <button type="button" class="note-filter on" data-filter="all">All</button>
+            <button type="button" class="note-filter" data-filter="bug">🐞 Bugs / todos</button>
+            <button type="button" class="note-filter" data-filter="feature">✨ Features</button>
+            <button type="button" class="note-filter" data-filter="idea">💡 Ideas</button>
+            <button type="button" class="note-filter" data-filter="done">✓ Done</button>
           </div>
-          <div class="todos-body" id="todos-body"></div>
+          <div class="note-body" id="note-body"></div>
         </div>
 
         <div class="ws-plan" id="ws-plan" data-pane="plan" hidden>
@@ -401,6 +417,7 @@
             <code class="ws-depcmd" id="ws-depcmd">—</code>
             <span class="ws-dep-status" id="ws-dep-status"></span>
             <button class="btn" id="ws-dep-ai" title="Ask the AI to walk you through deploying">Guide me with AI</button>
+            <button class="btn" id="ws-dep-download" title="Download the whole log for this deploy">⤓ Log</button>
             <button class="btn" id="ws-dep-stop" hidden>■ Stop</button>
             <button class="btn btn-primary" id="ws-dep-run">Deploy</button>
           </div>
@@ -685,6 +702,14 @@
     <datalist id="ai-models"></datalist>
 
     <div class="toast" id="toast" hidden></div>
+    <!-- web/ has no build step, so a tab left open keeps running the JavaScript
+         it loaded. This appears when the agent is serving a different page than
+         the one running here. -->
+    <div class="stale-page" id="stale-page" hidden>
+      <span>psm has been updated — this page is running the old version.</span>
+      <button class="btn btn-primary btn-small" id="stale-reload">Reload</button>
+      <button class="icon-btn" id="stale-dismiss" aria-label="Dismiss">✕</button>
+    </div>
 
     <script src="/auth.js"></script>
     <script src="/agent.js"></script>

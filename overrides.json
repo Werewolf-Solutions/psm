@@ -382,5 +382,23 @@
     "aiEngine": "codex",
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high"
+  },
+  "proteus": {
+    "category": "AI & automation",
+    "status": "active",
+    "priority": "high",
+    "pinned": true,
+    "stack": "Electron, React, TypeScript, FFmpeg, hybrid AI",
+    "description": "Proteus — a local-first, AI-assisted desktop video editor for assembling footage, understanding scenario changes, and applying reviewable automatic edits.",
+    "next": "Build the offline import-to-export vertical slice: project persistence, folder scan, proxies, Assemble All, manual timeline preview, save/reopen, and MP4 export.",
+    "runCommand": "npm run dev",
+    "aiFullAccess": true,
+    "aiEngine": "codex",
+    "aiModel": "gpt-5.6-sol",
+    "aiEffort": "high",
+    "port": 5174
+  },
+  "null": {
+    "runCommand": "npm run dev"
   }
 }
