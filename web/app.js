@@ -205,6 +205,11 @@ function projectHash(key, pane = "plan") {
   return `#/p/${encodeURIComponent(key)}/${encodeURIComponent(pane)}`;
 }
 
+/** Rooms have their own space, so a room id can never be read as a project id. */
+function workroomHash(id, pane = "ai") {
+  return `#/w/${encodeURIComponent(id)}/${encodeURIComponent(pane)}`;
+}
+
 function projectByRouteKey(key) {
   return (
     STATE.projects.find((project) => project.id === key) ||
@@ -1363,9 +1368,9 @@ async function createWorkroom(event) {
  * work — with the project-only panes hidden and the members named across the
  * top. `chatOnly` is what the workspace-wide chat already uses for this.
  */
-async function openWorkroom(id, fromRoute = false) {
+async function openWorkroom(id, fromRoute = false, pane = "ai") {
   if (!fromRoute) {
-    location.hash = `#/w/${encodeURIComponent(id)}/ai`;
+    location.hash = workroomHash(id, pane);
     return;
   }
   let room;
@@ -1385,7 +1390,7 @@ async function openWorkroom(id, fromRoute = false) {
       aiExtraProjects: [], aiEngine: room.engine, aiModel: room.model, aiEffort: room.effort,
       aiFullAccess: false, // a workroom is never handed the sandbox-off flag
     },
-    "ai",
+    pane,
     { chatOnly: true, title: room.title, fromRoute: true, kind: "work", id: room.id, room },
   );
 }
@@ -1449,7 +1454,15 @@ function switchPane(pane) {
     fetchRecap(); // refresh "where we left off" (regenerates only if stale)
     fetchLimit(); // surface a usage limit before the user types anything
   }
-  if (WS.name) history.replaceState(null, "", projectHash(routeKey(projectByName(WS.name)) || WS.name, pane));
+  // A workroom lives under #/w/. Writing its id into a #/p/ URL — which is what
+  // the project fallback did — pointed the router at a project that does not
+  // exist, so the next tab click or reload answered "Project not found" and
+  // closed the room.
+  if (WS.kind === "work" && WS.id) {
+    history.replaceState(null, "", workroomHash(WS.id, pane));
+  } else if (WS.name) {
+    history.replaceState(null, "", projectHash(routeKey(projectByName(WS.name)) || WS.name, pane));
+  }
   renderQuickSwitch();
 }
 
@@ -1844,7 +1857,7 @@ function closeWorkspace(fromRoute = false) {
 function routeFromHash() {
   const room = location.hash.match(/^#\/w\/([^/]+)(?:\/([^/]+))?$/);
   if (room) {
-    openWorkroom(decodeURIComponent(room[1]), true);
+    openWorkroom(decodeURIComponent(room[1]), true, decodeURIComponent(room[2] || "ai"));
     return;
   }
   const match = location.hash.match(/^#\/p\/([^/]+)(?:\/([^/]+))?$/);
@@ -3271,6 +3284,34 @@ function scheduleSessionRefresh(delay = 150) {
 let ACTIVE_QUESTION = null;
 const QUESTIONS_LATER = new Set();
 
+/**
+ * The key one AI conversation's questions are filed under.
+ *
+ * A project is its name. A workroom has no name that means anything to the
+ * server — its title is whatever the user typed and its session key is an
+ * internal string — so it is `work:<id>`, which both the open cockpit and the
+ * Working on lane can produce for the same room. They have to agree: the modal
+ * is opened from whichever notices the question first, and closed by the other
+ * when it goes away. When they disagreed, a workroom's question opened and then
+ * immediately closed itself, and answering it asked for a project by the room's
+ * title.
+ */
+function conversationKey(kind = WS.kind, id = WS.id, name = WS.name) {
+  return kind === "work" ? `work:${id}` : name;
+}
+
+/** The same, for a row of the Working on lane. */
+function sessionConversationKey(session) {
+  return conversationKey(session.kind, session.id, session.name);
+}
+
+/** Where an answer for that conversation is posted. */
+function questionBase(key) {
+  return key.startsWith("work:")
+    ? `/api/work-sessions/${encodeURIComponent(key.slice("work:".length))}`
+    : `/api/projects/${encodeURIComponent(key)}`;
+}
+
 function questionKey(project, request, scope = "ai", role = "") {
   return `${scope}:${role || ""}:${project}:${request?.id || ""}`;
 }
@@ -3297,7 +3338,7 @@ function clearQuestion(project, requestId = null, scope = "ai", role = null) {
     (!role || ACTIVE_QUESTION.role === role) &&
     (!requestId || ACTIVE_QUESTION.request.id === requestId)
   ) closeQuestion();
-  if (scope === "ai" && WS.name === project && (!requestId || WS.question?.id === requestId)) {
+  if (scope === "ai" && conversationKey() === project && (!requestId || WS.question?.id === requestId)) {
     WS.question = null;
     if (WS.sessionState) WS.sessionState.question = null;
     $("#ws-session-answer").hidden = true;
@@ -3367,18 +3408,20 @@ function renderQuestionField(question, index) {
   return field;
 }
 
-function openQuestion(project, request, force = false, scope = "ai", role = null) {
+function openQuestion(project, request, force = false, scope = "ai", role = null, label = null) {
   if (!request?.id || !request.questions?.length) return;
   const key = questionKey(project, request, scope, role || "");
   if (!force && QUESTIONS_LATER.has(key)) return;
   if (ACTIVE_QUESTION && !$("#question-modal").hidden && !force) return;
   if (force) QUESTIONS_LATER.delete(key);
   ACTIVE_QUESTION = { project, request, scope, role };
-  $("#question-project").textContent = project === "__workspace__"
-    ? "Workspace chat"
-    : scope === "planner"
-      ? `${project} · ${role}`
-      : project;
+  $("#question-project").textContent = label
+    ? label
+    : project === "__workspace__"
+      ? "Workspace chat"
+      : scope === "planner"
+        ? `${project} · ${role}`
+        : project;
   $("#question-title").textContent = `${request.engine || "AI"} needs your input`;
   const body = $("#question-body");
   body.innerHTML = "";
@@ -3392,13 +3435,17 @@ function syncPendingQuestions(sessions) {
   const pending = sessions.filter((session) => session.question);
   if (ACTIVE_QUESTION?.scope === "ai") {
     const stillPending = pending.some(
-      (session) => session.name === ACTIVE_QUESTION.project && session.question.id === ACTIVE_QUESTION.request.id,
+      (session) =>
+        sessionConversationKey(session) === ACTIVE_QUESTION.project &&
+        session.question.id === ACTIVE_QUESTION.request.id,
     );
     if (!stillPending) closeQuestion();
   }
   if (!ACTIVE_QUESTION) {
-    const next = pending.find((session) => !QUESTIONS_LATER.has(questionKey(session.name, session.question)));
-    if (next) openQuestion(next.name, next.question);
+    const next = pending.find(
+      (session) => !QUESTIONS_LATER.has(questionKey(sessionConversationKey(session), session.question)),
+    );
+    if (next) openQuestion(sessionConversationKey(next), next.question, false, "ai", null, next.name);
   }
 }
 
@@ -3445,14 +3492,9 @@ async function answerQuestion(event) {
   submit.disabled = true;
   try {
     const project = STATE.projects.find((p) => p.name === active.project);
-    const fullAccess = WS.name === active.project ? WS.fullAccess : !!project?.aiFullAccess;
+    const fullAccess = conversationKey() === active.project ? WS.fullAccess : !!project?.aiFullAccess;
     const planner = active.scope === "planner";
-    // A workroom's question comes back under its session key, which is not a
-    // project name — answer it on the room's own endpoint.
-    const base = active.project.startsWith("__psm_work__:")
-      ? `/api/work-sessions/${encodeURIComponent(active.project.slice("__psm_work__:".length))}`
-      : `/api/projects/${encodeURIComponent(active.project)}`;
-    const r = await agentApi(`${base}/${planner ? "planner" : "ai"}/question`, {
+    const r = await agentApi(`${questionBase(active.project)}/${planner ? "planner" : "ai"}/question`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3473,7 +3515,7 @@ async function answerQuestion(event) {
     clearQuestion(active.project, active.request.id, active.scope, active.role);
     if (!planner) {
       await fetchSessions();
-      if (WS.name === active.project) fetchSessionState();
+      if (conversationKey() === active.project) fetchSessionState();
     }
     toast("Answer sent");
   } catch {
@@ -3669,8 +3711,8 @@ function connectAi(name) {
       WS.question = status.question || null;
       syncAiControls();
       if (WS.pane === "session") renderSessionPane({ ...(WS.sessionState || {}), ...status, recent: WS.sessionState?.recent || [] });
-      if (WS.question) openQuestion(name, WS.question);
-      else clearQuestion(name);
+      if (WS.question) openQuestion(conversationKey(), WS.question, false, "ai", null, $("#ws-name").textContent);
+      else clearQuestion(conversationKey());
       setAiBusy(status.busy);
     } catch {}
   });
@@ -3694,13 +3736,13 @@ function connectAi(name) {
       $("#ws-session-answer").hidden = false;
       refreshComposer();
       renderWorkingButton();
-      openQuestion(name, question);
+      openQuestion(conversationKey(), question, false, "ai", null, $("#ws-name").textContent);
       fetchSessions();
     } catch {}
   });
   es.addEventListener("question-cleared", (e) => {
     try {
-      clearQuestion(name, JSON.parse(e.data).id);
+      clearQuestion(conversationKey(), JSON.parse(e.data).id);
       fetchSessions();
     } catch {}
   });

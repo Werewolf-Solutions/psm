@@ -158,3 +158,22 @@ test("a workroom is addressable, and never mistaken for a project", () => {
   assert.match(app, /function aiBase\(/);
   assert.match(app, /\/api\/work-sessions\//);
 });
+
+test("a workroom's questions and URLs never pretend to be a project's", () => {
+  const app = read("app.js");
+  // Both the open cockpit and the Working on lane raise the same question. They
+  // have to name it the same way, or the modal opens from one and is closed by
+  // the other — and the answer is posted to a project named after the room.
+  assert.match(app, /function conversationKey\(/);
+  assert.match(app, /function sessionConversationKey\(/);
+  assert.match(app, /function questionBase\(/);
+  assert.ok(
+    !/openQuestion\(name, /.test(app),
+    "openQuestion should be given a conversation key, not whatever the caller called the target",
+  );
+
+  // switchPane used to write the open target into a #/p/ URL. For a room that
+  // is a project id that does not exist, so the next reload lost the room.
+  assert.match(app, /function workroomHash\(/);
+  assert.match(app, /WS\.kind === "work" && WS\.id\s*\)\s*\{\s*history\.replaceState\(null, "", workroomHash/);
+});
