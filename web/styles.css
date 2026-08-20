@@ -1493,10 +1493,23 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .ws-member {
   display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
   background: var(--card); color: var(--text); border-radius: 999px;
-  padding: 3px 11px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  padding: 3px 11px; font-size: 12.5px; font-weight: 600;
 }
-.ws-member:hover { border-color: var(--accent); color: var(--accent); }
-.ws-member.missing { text-decoration: line-through; color: var(--st-paused); border-color: var(--st-paused); }
+.ws-member:hover { border-color: var(--accent); }
+.ws-member-name { background: none; border: none; padding: 0; color: inherit; font: inherit; cursor: pointer; }
+.ws-member:hover .ws-member-name { color: var(--accent); }
+.ws-member.missing .ws-member-name { text-decoration: line-through; color: var(--st-paused); }
+.ws-member.missing { border-color: var(--st-paused); }
+.ws-member-drop {
+  background: none; border: none; padding: 0 0 0 2px; color: var(--faint);
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.ws-member-drop:hover { color: var(--st-paused); }
+.ws-member-add {
+  border: 1px dashed var(--line); border-radius: 999px; background: none; color: var(--muted);
+  font-size: 12px; font-weight: 600; padding: 3px 8px; cursor: pointer;
+}
+.ws-member-add:hover { border-color: var(--accent); color: var(--accent); }
 .ws-member-primary {
   font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em;
   background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 1px 6px;

@@ -117,3 +117,39 @@ test("an id from a URL has to look like one", () => {
 test("the AI session key is namespaced away from every project name", () => {
   assert.equal(workSessionKey("wrk_abc"), "__psm_work__:wrk_abc");
 });
+
+test("a project can be added to a room after it is made", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "werewolf-dapp"] }, known);
+  const wider = s.setProjects(room.id, ["todo-app", "werewolf-dapp", "psm"], known);
+  assert.deepEqual(wider.projects, ["todo-app", "werewolf-dapp", "psm"]);
+  assert.equal(wider.primaryProject, "todo-app", "adding at the end leaves the start where it was");
+});
+
+test("removing the first project moves where the AI starts", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "werewolf-dapp", "psm"] }, known);
+  const narrower = s.setProjects(room.id, ["werewolf-dapp", "psm"], known);
+  assert.deepEqual(narrower.projects, ["werewolf-dapp", "psm"]);
+  assert.equal(narrower.primaryProject, "werewolf-dapp");
+});
+
+test("a room cannot be narrowed down to one project", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "werewolf-dapp"] }, known);
+  assert.throws(
+    () => s.setProjects(room.id, ["todo-app"], known),
+    WorkSessionValidationError,
+  );
+  assert.deepEqual(s.get(room.id).projects, ["todo-app", "werewolf-dapp"], "and the room is unchanged");
+});
+
+test("a project psm cannot see cannot be added either", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "werewolf-dapp"] }, known);
+  assert.throws(
+    () => s.setProjects(room.id, ["todo-app", "werewolf-dapp", "ghost"], known),
+    WorkSessionValidationError,
+  );
+  assert.deepEqual(s.get(room.id).projects, ["todo-app", "werewolf-dapp"]);
+});

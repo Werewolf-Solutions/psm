@@ -1941,6 +1941,19 @@ local.get("/api/work-sessions/:id", (req, res) => {
   }
 });
 
+// Change who is in the room. The AI notices on its next turn: the scope it was
+// given is part of what its conversation was started with, so a different one
+// forks the thread rather than resuming with stale authority.
+local.patch("/api/work-sessions/:id", (req, res) => {
+  try {
+    const known = new Set(getProjects().map((project) => project.name));
+    const room = workSessions.setProjects(req.params.id, req.body?.projects, known);
+    res.json({ ok: true, workSession: workroomView(room) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
 local.post("/api/work-sessions/:id/archive", (req, res) => {
   try {
     const room = workSessions.archive(req.params.id);

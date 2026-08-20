@@ -1225,6 +1225,7 @@ let WORKROOMS = [];
  */
 function renderMembers(room) {
   const strip = $("#ws-members");
+  WS.room = room;
   if (!room) {
     strip.hidden = true;
     strip.innerHTML = "";
@@ -1232,26 +1233,76 @@ function renderMembers(room) {
   }
   strip.hidden = false;
   strip.innerHTML = "";
-  const label = el("span", "ws-members-label", "Working on");
-  strip.append(label);
+  strip.append(el("span", "ws-members-label", "Working on"));
   for (const member of room.members) {
-    const chip = el("button", `ws-member${member.present ? "" : " missing"}`);
-    chip.textContent = member.name;
-    if (member.name === room.primaryProject) chip.append(el("span", "ws-member-primary", "start"));
-    chip.title = member.present
+    const chip = el("span", `ws-member${member.present ? "" : " missing"}`);
+    const open = el("button", "ws-member-name", member.name);
+    open.title = member.present
       ? `${member.path}${member.gitBranch ? ` · ${member.gitBranch}` : ""} — open this project`
       : "psm can no longer find this project — the workroom cannot run until it is back";
-    chip.onclick = () => {
+    open.onclick = () => {
       const project = projectByName(member.name);
       if (project) window.open(projectHash(routeKey(project), "plan"), "_blank");
     };
+    chip.append(open);
+    if (member.name === room.primaryProject) chip.append(el("span", "ws-member-primary", "start"));
+    // Two is the floor: one project is a project, not a room.
+    if (room.projects.length > 2) {
+      const drop = el("button", "ws-member-drop", "×");
+      drop.title = `Take ${member.name} out of this workroom`;
+      drop.onclick = () => setRoomProjects(room.projects.filter((name) => name !== member.name));
+      chip.append(drop);
+    }
     strip.append(chip);
   }
+
+  // Adding a project is a change of scope, so it belongs here beside the names
+  // it changes rather than behind the dialog that created the room.
+  const candidates = STATE.projects
+    .filter((p) => !p.archived && !room.projects.includes(p.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (candidates.length) {
+    const add = el("select", "ws-member-add");
+    add.title = "Add another project to this workroom";
+    add.append(new Option("+ Add project", ""));
+    for (const project of candidates) add.append(new Option(project.name, project.name));
+    add.onchange = () => {
+      const chosen = add.value;
+      add.value = "";
+      if (chosen) setRoomProjects([...room.projects, chosen]);
+    };
+    strip.append(add);
+  }
+
   const note = el("span", "ws-members-note");
   note.textContent = room.ready
     ? "Only these projects are writable."
     : "A project is missing — sending is blocked.";
   strip.append(note);
+}
+
+/**
+ * Change who is in the open room.
+ *
+ * The AI is not told directly. Reconnecting the transcript is what tells it: the
+ * server resolves the room's scope on every connection, sees a different one,
+ * and starts a fresh conversation — which is the point. A thread that was told
+ * it could edit two repositories must not carry on believing that once there
+ * are three, and the transcript says so where the user can read it.
+ */
+async function setRoomProjects(projects) {
+  if (WS.kind !== "work" || !WS.id) return;
+  const r = await agentApi(`/api/work-sessions/${encodeURIComponent(WS.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projects }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(data.error || "Could not change the workroom");
+  renderMembers(data.workSession);
+  if (aiPaneOpen()) connectAi(WS.name);
+  fetchSessions();
+  toast(`Workroom now spans ${data.workSession.projects.join(", ")}`);
 }
 
 async function loadWorkrooms() {

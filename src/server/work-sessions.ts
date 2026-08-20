@@ -204,6 +204,37 @@ export class WorkSessionStore {
     return this.get(id);
   }
 
+  /**
+   * Change who is in the room.
+   *
+   * The whole membership is replaced rather than patched one name at a time, so
+   * the same validation that built the room governs every later change: still at
+   * least two, still projects psm can see, still no duplicates. Order still
+   * carries meaning, so the first name is the new primary — removing the project
+   * the AI starts in moves it, which is a real change of scope and one the
+   * conversation is expected to notice.
+   */
+  setProjects(id: string, value: unknown, known: ReadonlySet<string>): WorkSession {
+    const session = this.get(id);
+    const projects = parseProjects(value, known);
+    this.database.exec("BEGIN");
+    try {
+      this.database.prepare("DELETE FROM work_session_projects WHERE session_id = ?").run(session.id);
+      const member = this.database.prepare(
+        "INSERT INTO work_session_projects (session_id, project, position) VALUES (?, ?, ?)",
+      );
+      projects.forEach((project, position) => member.run(session.id, project, position));
+      this.database
+        .prepare("UPDATE work_sessions SET primary_project = ?, updated_at = ? WHERE id = ?")
+        .run(projects[0], Date.now(), session.id);
+      this.database.exec("COMMIT");
+    } catch (err) {
+      this.database.exec("ROLLBACK");
+      throw err;
+    }
+    return this.get(session.id);
+  }
+
   /** Bump `updated_at`, so the list is ordered by what is actually being worked on. */
   touch(id: string): void {
     this.database
