@@ -821,6 +821,14 @@ local.delete("/api/projects/:name/attachments/:ref", (req, res) => {
 // Update the human-curated override for one project.
 local.patch("/api/projects/:name", (req, res) => {
   const name = req.params.name;
+  // An override only means something for a target that exists. Without this a
+  // caller that PATCHes an unset name writes a permanent entry — one called
+  // "null" turned up in overrides.json this way — that no project ever claims
+  // and nothing ever cleans up. `__workspace__` is not a scanned project but is
+  // a real target: it holds the workspace chat's engine settings.
+  if (name !== WORKSPACE_NAME && !findProject(name)) {
+    return res.status(404).json({ error: `no project named ${name}` });
+  }
   const all = loadOverrides();
   const current: Override = all[name] || {};
   for (const key of OVERRIDE_KEYS) {

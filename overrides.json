@@ -397,8 +397,5 @@
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high",
     "port": 5174
-  },
-  "null": {
-    "runCommand": "npm run dev"
   }
 }
