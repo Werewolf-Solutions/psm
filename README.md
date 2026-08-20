@@ -17,6 +17,9 @@ npm install
 npm run dev             # → http://localhost:4317   (set PORT to change)
 ```
 
+Node 22.5 or newer — psm keeps your notes in a local SQLite database through Node's
+built-in `node:sqlite`, which older releases do not have.
+
 To try the hosted page locally — the same static files nginx serves at
 psm.werewolf.solutions — run the static host alongside an agent:
 
@@ -113,30 +116,36 @@ the werewolf-dapp project and uses its port — which also survives Vite climbin
 5175 when an old one is still holding 5173 — and falls back to `http://localhost:5173`.
 `WEREWOLF_WEB_ORIGIN` overrides the lot.
 
-### Continue with Werewolf
+### Sign in with Werewolf
 
 The same OAuth 2.0 authorization-code + PKCE handoff todo-app uses: leave for dapp's
-consent screen, come back to psm with a 60-second single-use code, redeem it for a
-session. Because the browser is already signed in at werewolf.solutions, there is no
+consent screen, come back to `/auth/callback` with a 60-second single-use code, redeem it
+for a session. Because the browser is already signed in at werewolf.solutions, there is no
 password to retype — and psm never sees one.
 
-**The PKCE verifier never reaches the page.** todo-app has no server, so it keeps the
-verifier in `sessionStorage`; psm has one, so the verifier is minted and held server-side
-keyed by `state`. The browser only ever carries the code, which is useless without it.
+**One application.** `client_id` is `psm` in every posture — one row, one consent screen,
+one callback path. psm used to register twice (`psm` as a `native` client for the cockpit,
+`psm-web` for the hosted page) because dapp's native rule and its web rule cannot come from
+one row; the cost of collapsing them is that psm's ports are **pinned** and registered
+exactly, the way todo-app pins 5200. See `docs/werewolf-psm-registration.md` for the list.
 
-Redirect URIs are exact-matched by dapp. psm is registered `clientType: 'native'`, whose
-rule is *any loopback port with the path locked to `/api/cloud/sso/callback`* — so a local
-cockpit works on 4317, 4318, or anywhere else with no per-port registration.
+**Two transports, because of one cookie.** dapp gives a `web` client its refresh credential
+as an httpOnly cookie and omits it from the JSON, and that cookie is `SameSite=Lax` and
+host-only on the API's host:
 
-The **hosted page signs in separately**, as its own `psm-web` application with
-`clientType: 'web'`, because a public https origin is not a loopback URI. That is not a
-workaround: web clients are the ones dapp gives an httpOnly refresh cookie to, so the page
-never holds a refresh token at all.
+- The **hosted page** at psm.werewolf.solutions is same-*site* with werewolf.solutions, so
+  it exchanges and refreshes directly and the cookie rides along — exactly like todo-app.
+- The **cockpit** on localhost is cross-site, so the browser would drop the cookie on the
+  floor. The page posts its code to its own agent instead, and psm's server keeps the
+  cookie. A server has no SameSite rules.
 
-**For the local cockpit, psm's server is the confidential client.** The verifier and the
-refresh token stay in the psm process; the browser holds nothing. The hosted page is the
-other arrangement — dapp keeps its refresh token in an httpOnly cookie. Both avoid the
-thing that matters: a refresh token somewhere JavaScript can read.
+The PKCE half is the same code in both, and the verifier never leaves the tab that minted
+it. Either way, no refresh credential ends up anywhere JavaScript can read.
+
+**It says so when it cannot work.** dapp answers `app_not_configured` until the row exists,
+and its consent screen cannot explain itself, so psm asks first — before redirecting — and
+puts the answer in the sign-in panel: not registered, registered as the wrong client type,
+or this exact callback not allowed.
 
 Historical note: psm redeemed the code server-side and handed the browser a cookie carrying nothing
 but an opaque session id and a signature over it. dapp's rotating refresh token stays
@@ -170,7 +179,7 @@ and nginx, and it cannot even run `npm ci` without being OOM-killed.
 
 Everything the page needs from a server, it gets from somewhere that already exists:
 
-- **Accounts** from werewolf-dapp (`/apps/psm-web/auth/*`), with the browser doing PKCE the
+- **Accounts** from werewolf-dapp (`/apps/psm/auth/*`), with the browser doing PKCE the
   way todo-app does. dapp puts the refresh token in an httpOnly cookie for `clientType: 'web'`
   clients, so the page never holds one.
 - **Projects, logs, AI and everything else** from **your own machine** — the page talks to
@@ -392,6 +401,12 @@ that. Every shipped change bumps something; docs-only changes need not.
   only after confirmation hands work to the normal agent.
 - Structured plans live in `.psm-plans/`; attachment ownership lives in
   `.psm-attachments-state.json`; custom manifests live in `.psm-catalog.json` (all gitignored).
+- What you *write* — the per-project notes pane: bugs and todos, features, ideas — is kept in
+  a local SQLite database at `.psm-data/psm.db` (gitignored), so one note is edited without
+  rewriting a file and nothing is lost to a crash mid-write. It uses Node's built-in
+  `node:sqlite`, so there is nothing to install; the schema is migrated forward on startup by
+  `src/server/db.ts`. Notes written before the database (`.psm-notes/*.json`) are imported once,
+  automatically, and those files are then left alone.
 - psm listens on `127.0.0.1` and rejects non-loopback Host/Origin requests. Custom manifests
   may contain environment variable names, never values; export required variables before
   starting psm.

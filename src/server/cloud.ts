@@ -131,10 +131,6 @@ export async function revokeDevice(id: string): Promise<any> {
   return cloudRequest(`/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function projectTodos(project: string): Promise<any> {
-  return cloudRequest(`/todos?project=${encodeURIComponent(project)}`);
-}
-
 export function syncRevision(): number {
   return state.syncRevision;
 }

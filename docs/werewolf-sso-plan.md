@@ -1,6 +1,10 @@
 # Design: "Sign in with Werewolf" — browser-handoff SSO for psm
 
-- **Status:** proposed (plan-first; no code written yet)
+- **Status:** **superseded 2026-08-17.** Kept for the reasoning; do not build from it.
+  The handoff shipped, then changed shape: psm now signs in as **one** `web` application
+  with PKCE in the browser, so this document's server-side verifier, loopback callback and
+  `/api/cloud/sso/start` no longer exist. Current design:
+  `docs/werewolf-psm-registration.md` and the "Sign in with Werewolf" section of the README.
 - **Date:** 2026-07-22
 - **Repos touched:** `werewolf-dapp` (server auth) + `psm` (this repo)
 

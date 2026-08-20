@@ -82,7 +82,7 @@ function renderCloudLogin() {
         "<h3>Sign in to use PSM Cloud</h3>",
         "<p>Sync, encrypted backups, devices and billing need a Werewolf account. Your local workspace works without one.</p>",
         '<div class="cloud-actions">',
-          '<button class="btn btn-primary" id="cloud-sso">🐺 Continue with Werewolf</button>',
+          '<button class="btn btn-primary" id="cloud-sso">🐺 Sign in with Werewolf</button>',
         "</div>",
       "</div>",
       CLOUD.authError ? '<div class="cloud-warning">' + esc(CLOUD.authError) + "</div>" : "",
@@ -94,9 +94,15 @@ function renderCloudLogin() {
     "</div>",
   ].join("");
 
-  $("#cloud-sso").onclick = () => {
-    const returnTo = location.pathname + location.search + location.hash;
-    location.href = "/api/cloud/sso/start?returnTo=" + encodeURIComponent(returnTo);
+  // One flow, wherever it is started from — PsmAuth knows which posture this is
+  // and whether dapp will accept this page before it redirects anywhere.
+  $("#cloud-sso").onclick = async () => {
+    try {
+      await PsmAuth.beginSignIn();
+    } catch (err) {
+      CLOUD.authError = err.message || "Could not start sign-in";
+      renderCloudLogin();
+    }
   };
 }
 

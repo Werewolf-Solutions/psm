@@ -47,4 +47,9 @@ echo "psm dev test — port $PORT"
 echo "  workspace root: $(node -p "require('path').resolve(require('./psm.config.json').workspaceRoot)")"
 echo
 
-exec env PSM_MODE="$PSM_MODE" PORT="$PORT" npx tsx src/server/index.ts
+# node:sqlite (psm's local database, see src/server/db.ts) is still flagged
+# experimental upstream, and psm should not warn about its own storage on every
+# boot. Scoped to the server process, like everything else here.
+exec env PSM_MODE="$PSM_MODE" PORT="$PORT" \
+  NODE_OPTIONS="--disable-warning=ExperimentalWarning" \
+  npx tsx src/server/index.ts
