@@ -40,6 +40,7 @@ import {
   type AiEngine,
 } from "./ai.ts";
 import { attachmentManager, WiringConflictError, WiringValidationError } from "./attach.ts";
+import { repoStatus, repoStatuses } from "./git.ts";
 import {
   WorkSessionNotFoundError,
   WorkSessionValidationError,
@@ -1884,6 +1885,33 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
 
 mountAiRoutes("/api/projects/:name", (req) => projectConversation(req.params.name));
 mountAiRoutes("/api/work-sessions/:id", (req) => workroomConversation(req.params.id));
+
+/* ---------- git: what has changed, per repository ---------- */
+
+// One project's checkout.
+local.get("/api/projects/:name/git", async (req, res) => {
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  res.json({ repos: [await repoStatus(project.name, project.path)] });
+});
+
+// Every member of a workroom, in the room's own order — the primary first, so
+// the pane reads the way the room does. A member psm can no longer find is
+// reported as absent rather than skipped: a room missing a repository is
+// something to see here, since it is also why sending is blocked.
+local.get("/api/work-sessions/:id/git", async (req, res) => {
+  try {
+    const room = workSessions.get(req.params.id);
+    const repos = room.projects.map((name) => ({ name, project: findProject(name) }));
+    res.json({
+      repos: await repoStatuses(
+        repos.map((entry) => ({ project: entry.name, path: entry.project?.path ?? "" })),
+      ),
+    });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
 
 /* ---------- workrooms: several projects, one conversation ---------- */
 

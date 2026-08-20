@@ -1183,8 +1183,11 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   // hide the run/web/deploy cockpit when this is the workspace-wide chat
   $("#ws-runbar").hidden = chat;
   $("#ws-status").hidden = chat;
+  const roomPanes = new Set(["ai", "session", "changes"]);
   for (const t of document.querySelectorAll(".ws-tab"))
-    t.hidden = chat && t.dataset.pane !== "ai" && t.dataset.pane !== "session";
+    t.hidden = chat && !roomPanes.has(t.dataset.pane);
+  // The workspace-wide chat has no repositories of its own to show.
+  $("#ws-tabs").querySelector('[data-pane="changes"]').hidden = chat && opts.kind !== "work";
   // A workroom has no working button of its own: it is not a project, and
   // "working on" is a mark psm keeps per project.
   $("#ws-working").hidden = WS.kind === "work";
@@ -1481,8 +1484,8 @@ function disconnectAi() {
 
 function switchPane(pane) {
   const allowed = WS.chatOnly
-    ? new Set(["ai", "session"])
-    : new Set(["plan", "notes", "capabilities", "logs", "web", "ai", "session", "deploy"]);
+    ? new Set(["ai", "session", "changes"])
+    : new Set(["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy"]);
   if (!allowed.has(pane)) pane = WS.chatOnly ? "ai" : "plan";
   WS.pane = pane;
   for (const t of document.querySelectorAll(".ws-tab"))
@@ -1497,6 +1500,7 @@ function switchPane(pane) {
   if (pane === "web") renderWebPane();
   if (pane === "deploy") openDeployPane();
   if (pane === "session") fetchSessionState();
+  if (pane === "changes") loadChanges();
   if (pane === "plan") loadPlan();
   if (pane === "capabilities") loadCapabilities();
   if (pane === "notes") loadNotes();
@@ -3576,6 +3580,135 @@ async function answerQuestion(event) {
   }
 }
 
+/* ---- Changes pane: git state, one block per repository ---- */
+
+let CHANGES = { target: null, loading: false, repos: [], error: null };
+
+function changesUrl() {
+  return WS.kind === "work"
+    ? `/api/work-sessions/${encodeURIComponent(WS.id)}/git`
+    : `/api/projects/${encodeURIComponent(WS.name)}/git`;
+}
+
+async function loadChanges() {
+  if (!WS.name) return;
+  const target = conversationKey();
+  CHANGES = { target, loading: true, repos: CHANGES.target === target ? CHANGES.repos : [], error: null };
+  renderChanges();
+  try {
+    const r = await agentApi(changesUrl());
+    const data = await r.json().catch(() => ({}));
+    // The pane can be left while git is still running; a late answer must not
+    // paint another target's repositories over this one.
+    if (conversationKey() !== target) return;
+    if (!r.ok) throw new Error(data.error || "could not read the repositories");
+    CHANGES = { target, loading: false, repos: data.repos || [], error: null };
+  } catch (err) {
+    if (conversationKey() !== target) return;
+    CHANGES = { target, loading: false, repos: [], error: err.message || "could not read the repositories" };
+  }
+  renderChanges();
+}
+
+/** "3 changes across 2 repositories", or the reason there is nothing to say. */
+function changesSummaryText() {
+  if (CHANGES.error) return CHANGES.error;
+  if (CHANGES.loading && !CHANGES.repos.length) return "Reading…";
+  const repos = CHANGES.repos.filter((repo) => repo.isRepo);
+  if (!repos.length) return "No git repositories here.";
+  const dirty = repos.filter((repo) => !repo.clean);
+  if (!dirty.length) return `${repos.length} repositor${repos.length === 1 ? "y" : "ies"} · all clean`;
+  const files = dirty.reduce((n, repo) => n + repo.staged + repo.unstaged + repo.untracked, 0);
+  return `${files} change${files === 1 ? "" : "s"} across ${dirty.length} of ${repos.length} repositor${
+    repos.length === 1 ? "y" : "ies"
+  }`;
+}
+
+function renderChanges() {
+  $("#changes-summary").textContent = changesSummaryText();
+  const body = $("#changes-body");
+  body.innerHTML = "";
+  if (CHANGES.error) {
+    body.append(el("p", "hint", CHANGES.error));
+    return;
+  }
+  if (!CHANGES.repos.length) {
+    body.append(el("p", "hint", CHANGES.loading ? "Reading the repositories…" : "Nothing to show."));
+    return;
+  }
+  for (const repo of CHANGES.repos) body.append(repoBlock(repo));
+}
+
+function repoBlock(repo) {
+  const block = el("section", "repo-block" + (repo.clean ? " clean" : ""));
+
+  const head = el("div", "repo-head");
+  const name = el("div", "repo-name");
+  name.append(el("strong", null, repo.project));
+  if (!repo.isRepo) {
+    name.append(el("span", "repo-flag", repo.error ? "unreadable" : "not a git repository"));
+  } else if (repo.detached) {
+    name.append(el("span", "repo-branch detached", "detached HEAD"));
+  } else if (repo.branch) {
+    name.append(el("span", "repo-branch", repo.branch));
+  }
+  if (repo.upstream) {
+    const track = el("span", "repo-track");
+    track.textContent =
+      repo.ahead || repo.behind
+        ? `${repo.upstream} · ${repo.ahead ? `${repo.ahead} ahead` : ""}${
+            repo.ahead && repo.behind ? ", " : ""
+          }${repo.behind ? `${repo.behind} behind` : ""}`
+        : `${repo.upstream} · in step`;
+    name.append(track);
+  } else if (repo.isRepo && repo.branch) {
+    name.append(el("span", "repo-track", "no upstream"));
+  }
+  head.append(name);
+
+  const counts = el("div", "repo-counts");
+  if (repo.isRepo) {
+    if (repo.clean) counts.append(el("span", "pill", "clean"));
+    if (repo.staged) counts.append(el("span", "pill staged", `${repo.staged} staged`));
+    if (repo.unstaged) counts.append(el("span", "pill unstaged", `${repo.unstaged} modified`));
+    if (repo.untracked) counts.append(el("span", "pill untracked", `${repo.untracked} untracked`));
+  }
+  head.append(counts);
+  block.append(head);
+
+  if (repo.lastCommit) {
+    const commit = el("div", "repo-commit");
+    commit.append(el("code", null, repo.lastCommit.hash));
+    commit.append(document.createTextNode(` ${repo.lastCommit.subject} · ${repo.lastCommit.when}`));
+    block.append(commit);
+  }
+
+  if (repo.changes?.length) {
+    const files = el("div", "repo-files");
+    for (const change of repo.changes) {
+      const row = el("div", "repo-file");
+      row.append(el("code", `repo-code ${change.untracked ? "untracked" : change.staged ? "staged" : "unstaged"}`, change.code));
+      row.append(el("span", "repo-path", change.path));
+      files.append(row);
+    }
+    block.append(files);
+    if (repo.truncated) block.append(el("p", "hint", "…and more — this repository has a lot of changes."));
+  }
+
+  if (repo.branches?.length > 1) {
+    const branches = el("div", "repo-branches");
+    branches.append(el("span", "repo-branches-label", "branches"));
+    for (const branch of repo.branches) {
+      const chip = el("span", `repo-branch-chip${branch.current ? " on" : ""}`, branch.name);
+      chip.title = branch.when ? `last commit ${branch.when}` : "";
+      branches.append(chip);
+    }
+    block.append(branches);
+  }
+
+  return block;
+}
+
 /* ---- AI pane ---- */
 
 // The AI tab and the Web tab's dev bar both drive one selection: whichever set
@@ -5470,6 +5603,7 @@ $("#work-open").onclick = () => openWorkModal();
 $("#work-close").onclick = () => closeWorkModal();
 $("#work-backdrop").onclick = () => closeWorkModal();
 $("#work-form").onsubmit = createWorkroom;
+$("#changes-refresh").onclick = () => loadChanges();
 $("#usage-open").onclick = openUsage;
 $("#usage-refresh").onclick = () => fetchUsage(true);
 $("#usage-close").onclick = closeModals;

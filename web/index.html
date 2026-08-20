@@ -256,6 +256,7 @@
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab" data-pane="plan">Plan</button>
         <button class="ws-tab" data-pane="notes">Notes</button>
+        <button class="ws-tab" data-pane="changes">Changes</button>
         <button class="ws-tab" data-pane="capabilities">Capabilities</button>
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
@@ -287,6 +288,17 @@
             <button type="button" class="note-filter" data-filter="done">✓ Done</button>
           </div>
           <div class="note-body" id="note-body"></div>
+        </div>
+
+        <!-- git state, one block per repository. In a workroom that is every
+             member; in a project it is the one. Read-only: psm shows you where
+             the work sits, it does not commit for you. -->
+        <div class="ws-changes" id="ws-changes" data-pane="changes" hidden>
+          <div class="changes-toolbar">
+            <span class="changes-summary" id="changes-summary"></span>
+            <button class="btn" id="changes-refresh">Refresh</button>
+          </div>
+          <div class="changes-body" id="changes-body"></div>
         </div>
 
         <div class="ws-plan" id="ws-plan" data-pane="plan" hidden>
