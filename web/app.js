@@ -677,6 +677,7 @@ function openDrawer(p) {
   refreshModelCatalog(p.name, drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort, $("#d-effort"));
 
   $("#d-full").checked = !!p.aiFullAccess;
+  renderScopePicker(p);
   $("#d-deploy-staging").value = p.deployStaging || "";
   $("#d-deploy-production").value = p.deployProduction || "";
   $("#d-category").value = p.overridden.includes("category") ? p.category : "";
@@ -693,6 +694,56 @@ function openDrawer(p) {
 
   $("#backdrop").hidden = false;
   $("#drawer").hidden = false;
+}
+
+/**
+ * Which other projects this project's AI may edit.
+ *
+ * Checkboxes over a text field on purpose: the server takes project names and
+ * looks the paths up itself before every turn, so there is nothing useful a
+ * free-typed path could say. Archived projects are left out — pointing an agent
+ * at something nobody is maintaining is not a thing to make easy.
+ */
+function renderScopePicker(p) {
+  const list = $("#d-scope-list");
+  const chosen = new Set(p.aiExtraProjects || []);
+  const options = STATE.projects
+    .filter((other) => other.name !== p.name && (!other.archived || chosen.has(other.name)))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  list.innerHTML = options
+    .map(
+      (other) =>
+        `<label class="scope-item"><input type="checkbox" value="${esc(other.name)}"${
+          chosen.has(other.name) ? " checked" : ""
+        } /> ${esc(other.name)}</label>`,
+    )
+    .join("") || '<span class="hint">No other projects to choose from.</span>';
+  list.onchange = () => renderScopeSummary(p.name);
+  renderScopeSummary(p.name);
+}
+
+function chosenScope() {
+  return [...$("#d-scope-list").querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+/** Say the scope back, in the same words the AI is given. */
+function renderScopeSummary(name) {
+  const chosen = chosenScope();
+  $("#d-scope-summary").textContent = chosen.length
+    ? `This AI may edit ${[name, ...chosen].join(" and ")}. No other project is writable.`
+    : `This AI may edit ${name} only.`;
+}
+
+/** The same promise, kept in view beside the composer. */
+function renderScopeChip() {
+  const extra = WS.extraProjects || [];
+  for (const node of aiControlNodes("scope")) {
+    node.hidden = !extra.length;
+    node.textContent = `+${extra.length} repo${extra.length === 1 ? "" : "s"}`;
+    node.title = extra.length
+      ? `This AI may also edit ${extra.join(", ")}. No other project is writable.`
+      : "";
+  }
 }
 
 function closeDrawer() {
@@ -717,6 +768,7 @@ async function saveDrawer() {
     aiModel: $("#d-model").value.trim(),
     aiEffort: $("#d-effort").value,
     aiFullAccess: $("#d-full").checked,
+    aiExtraProjects: chosenScope(),
     deployStaging: $("#d-deploy-staging").value.trim(),
     deployProduction: $("#d-deploy-production").value.trim(),
   };
@@ -733,6 +785,10 @@ async function saveDrawer() {
     if (WS.name === name) {
       WS.workingOn = body.workingOn;
       renderWorkingButton();
+      // The scope chip is a promise about the open conversation, so it has to
+      // follow the save rather than wait for the cockpit to be reopened.
+      WS.extraProjects = projectByName(name)?.aiExtraProjects || [];
+      renderScopeChip();
     }
     toast("Saved");
   } else {
@@ -748,7 +804,7 @@ const LOG_BUFFER = 20000; // lines held in memory, well past the server's own ca
 
 let WS = {
   name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-  engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+  engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
 
@@ -879,6 +935,13 @@ async function patchProject(name, body) {
   } catch {
     return false;
   }
+}
+
+for (const node of [$("#ws-scope"), $("#web-scope")].filter(Boolean)) {
+  node.onclick = () => {
+    const project = projectByName(WS.name);
+    if (project) openDrawer(project);
+  };
 }
 
 function setWsStatus(status) {
@@ -1040,6 +1103,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   WS.effort = p.aiEffort || "";
   WS.actualModel = null;
   WS.fullAccess = !!p.aiFullAccess;
+  WS.extraProjects = p.aiExtraProjects || [];
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
   WS.depTarget = "staging";
   WS.depArmed = false;
@@ -1094,7 +1158,7 @@ async function openWorkspaceChat(fromRoute = false) {
     w = await (await agentApi("/api/workspace")).json();
   } catch {}
   openWorkspace(
-    { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null,
+    { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null, aiExtraProjects: [],
       aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiEffort: w.aiEffort || null, aiFullAccess: !!w.aiFullAccess },
     "ai",
     { chatOnly: true, title: "psm · all projects", fromRoute: true },
@@ -1517,7 +1581,7 @@ function closeWorkspace(fromRoute = false) {
   if (WS.depEs) WS.depEs.close();
   WS = {
     name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-    engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+    engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
   };
   $("#ws-backdrop").hidden = true;
@@ -3173,8 +3237,8 @@ async function answerQuestion(event) {
 // of controls the user touches, WS is the single source of truth and both
 // mirrors are redrawn from it.
 const AI_CONTROLS = [
-  { engine: "#ws-engine", model: "#ws-model", effort: "#ws-effort", full: "#ws-full", current: "#ws-model-current", usage: "#usage-open" },
-  { engine: "#web-engine", model: "#web-model", effort: "#web-effort", full: "#web-full", current: "#web-model-current", usage: "#web-usage" },
+  { engine: "#ws-engine", model: "#ws-model", effort: "#ws-effort", full: "#ws-full", current: "#ws-model-current", usage: "#usage-open", scope: "#ws-scope" },
+  { engine: "#web-engine", model: "#web-model", effort: "#web-effort", full: "#web-full", current: "#web-model-current", usage: "#web-usage", scope: "#web-scope" },
 ];
 const aiControlNodes = (key) => AI_CONTROLS.map((set) => $(set[key])).filter(Boolean);
 
@@ -3203,6 +3267,7 @@ function syncAiControls() {
     renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort);
     $(set.full).checked = WS.fullAccess;
   }
+  renderScopeChip();
   renderAiModel();
 }
 

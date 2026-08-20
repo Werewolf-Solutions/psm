@@ -234,6 +234,11 @@ export interface Override {
   aiModel?: string; // optional model id/alias passed to the selected AI CLI
   aiEffort?: string; // optional reasoning/effort level passed to the selected AI CLI
   aiFullAccess?: boolean; // let the AI run commands, not just edit files
+  // other projects this project's AI may also edit, by name. Names, not paths:
+  // psm resolves them itself before every turn, so a stale or renamed entry
+  // drops out of scope rather than pointing the CLI at a directory that has
+  // since become something else.
+  aiExtraProjects?: string[];
   attachments?: Attachment[]; // human-approved capability bindings
 }
 
@@ -268,6 +273,7 @@ export interface Project {
   aiModel: string | null;
   aiEffort: string | null;
   aiFullAccess: boolean;
+  aiExtraProjects: string[]; // merged: other projects this AI may also edit
   attachments: Attachment[];
   // provenance so the UI can show what's auto vs overridden
   overridden: (keyof Override)[];

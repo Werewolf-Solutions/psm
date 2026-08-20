@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 import type { ImplementationPlan } from "../types.ts";
 import { planStore } from "./plans.ts";
+import { childEnv } from "./procs.ts";
 import { composeSystemRules } from "./rules.ts";
+import { writeFileAtomic } from "../store.ts";
 
 /**
  * The AI pane: shells out to a coding CLI (`claude` by default, `codex`
@@ -16,7 +18,9 @@ import { composeSystemRules } from "./rules.ts";
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SESSIONS_FILE = path.resolve(__dirname, "..", "..", ".psm-sessions.json");
+/** Where transcripts and provider session ids are kept. Tests point it away. */
+const SESSIONS_FILE =
+  process.env.PSM_SESSIONS_FILE || path.resolve(__dirname, "..", "..", ".psm-sessions.json");
 
 export type AiEngine = "claude" | "codex";
 export type AiModel = string | null;
@@ -96,6 +100,8 @@ export interface AiQuestionRequest {
 interface AiSession {
   name: string;
   cwd: string;
+  /** Other repositories this conversation may work in. Absolute, resolved. */
+  extraDirs: string[];
   engine: AiEngine;
   model: AiModel; // configured model id/alias for the selected CLI
   effort: AiEffort; // configured reasoning/effort level for the selected CLI
@@ -167,6 +173,7 @@ interface PersistedSession {
   summary: string | null;
   summaryAt: number;
   question?: AiQuestionRequest | null;
+  extraDirs?: string[];
   updatedAt: number;
 }
 
@@ -183,6 +190,9 @@ function loadSessions(): void {
     sessions.set(name, {
       name,
       cwd: "", // filled in when the client next subscribes
+      // Restored so a restart is not mistaken for a scope change: the thread
+      // survives, and only a genuinely different scope forks it.
+      extraDirs: Array.isArray(p.extraDirs) ? p.extraDirs : [],
       engine: p.engine || "claude",
       model: normalizeModel(p.model),
       effort: normalizeEffort(p.effort),
@@ -221,11 +231,17 @@ function saveSessions(): void {
       summary: s.summary,
       summaryAt: s.summaryAt,
       question: s.question,
+      extraDirs: s.extraDirs,
       updatedAt: Date.now(),
     };
   }
   try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: map, limits }));
+    // 0600, and replaced rather than truncated. This file holds every
+    // transcript psm has kept and the provider session ids that resume them:
+    // readable by anyone with an account on the machine is wrong, and a crash
+    // partway through a write used to cost the lot, since a half-written JSON
+    // document does not parse and the loader drops what it cannot read.
+    writeFileAtomic(SESSIONS_FILE, JSON.stringify({ sessions: map, limits }), 0o600);
   } catch {
     /* best effort */
   }
@@ -275,13 +291,106 @@ loadSessions();
 const sys = (text: string): AiEvent => ({ t: Date.now(), role: "system", text });
 const short = (id: string | null) => (id ? id.slice(0, 8) : "—");
 
-function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel, effort: AiEffort): AiSession {
+/**
+ * The directories one conversation may work in, besides its own.
+ *
+ * Everything a caller offers is a claim about the filesystem, so each one is
+ * resolved here rather than trusted: `realpath` first, which is what turns a
+ * symlink pointing out of the workspace into the thing it actually points at,
+ * and which drops a checkout that has been moved or deleted instead of handing
+ * the CLI a path that no longer exists.
+ *
+ * Nesting is dropped too. A directory inside `primary` — or inside another root
+ * already kept — is already in scope, and listing it twice makes the scope line
+ * shown to the user disagree with the argv without changing what is writable.
+ *
+ * Sorted, so that a scope is compared by value: the same set chosen in a
+ * different order is the same scope and must not fork the conversation.
+ */
+export function resolveExtraDirs(primary: string, candidates: readonly string[]): string[] {
+  const real = (dir: string): string | null => {
+    try {
+      return fs.realpathSync(dir);
+    } catch {
+      return null; // gone, or never there
+    }
+  };
+  const root = real(primary) ?? path.resolve(primary);
+  const contains = (parent: string, child: string) =>
+    child === parent || child.startsWith(parent + path.sep);
+
+  const kept: string[] = [];
+  for (const candidate of [...candidates].sort()) {
+    if (typeof candidate !== "string" || !candidate.trim()) continue;
+    const dir = real(candidate);
+    if (!dir || contains(root, dir) || kept.some((seen) => contains(seen, dir))) continue;
+    kept.push(dir);
+  }
+  return kept;
+}
+
+/**
+ * The flags that put those directories in scope.
+ *
+ * Both CLIs spell this the same way — `--add-dir <dir>`, repeated — though they
+ * mean subtly different things by it: Claude Code widens what the session may
+ * read *and* write, while codex widens what is writable alongside the primary
+ * workspace and reads wherever its sandbox mode already allows. Checked against
+ * Claude Code 2.1.237 and codex-cli 0.147.0.
+ *
+ * A codex old enough to lack the flag will reject the turn rather than run it,
+ * which is the failure to want: quietly not widening the scope would leave the
+ * user with a promise on screen that the sandbox never made.
+ *
+ * Verified end to end on Claude Code — two selected repositories written, a
+ * third refused, the denial recorded by the CLI rather than merely declined by
+ * the model. Not verified on codex: its sandbox is bubblewrap, and whether an
+ * out-of-scope write is refused also depends on the user's own
+ * `approvals_reviewer` setting, which can route the escalation to an automatic
+ * reviewer instead of refusing it. Worth running the same canary in a plain
+ * terminal before this is offered as a guarantee for codex.
+ *
+ * This is the single source for what is actually in scope. The sentence the user
+ * is shown comes from the same list (see `scopeContext`), so the promise on
+ * screen cannot drift from the argv that gets spawned. If the two CLIs diverge
+ * again, they diverge here.
+ */
+export function writableRootArgs(dirs: readonly string[]): string[] {
+  return dirs.flatMap((dir) => ["--add-dir", dir]);
+}
+
+/** The scope, said plainly, from the same list that built the argv. */
+function scopeContext(primary: string, dirs: readonly string[], readOnly: boolean): string {
+  if (!dirs.length) return "";
+  const verb = readOnly ? "may read" : "may edit";
+  return [
+    "## Scope",
+    "",
+    `This conversation spans more than one repository. You ${verb} these directories:`,
+    ...[primary, ...dirs].map((dir) => `- ${dir}`),
+    "",
+    readOnly
+      ? "Nothing outside them is in scope. Plan for all of them together."
+      : "Nothing outside them is writable. Keep the repositories coherent with each other — "
+        + "a change to one side of an interface needs the other side in the same turn — and run "
+        + "each repository's own checks inside that repository.",
+  ].join("\n");
+}
+
+function getSession(
+  name: string,
+  cwd: string,
+  engine: AiEngine,
+  model: AiModel,
+  effort: AiEffort,
+  extraDirs: string[] = [],
+): AiSession {
   const normalizedModel = normalizeModel(model);
   const normalizedEffort = normalizeEffort(effort);
   let s = sessions.get(name);
   if (!s) {
     s = {
-      name, cwd, engine, model: normalizedModel, effort: normalizedEffort, actualModel: null, sessionId: null, busy: false, child: null,
+      name, cwd, extraDirs, engine, model: normalizedModel, effort: normalizedEffort, actualModel: null, sessionId: null, busy: false, child: null,
       log: [], subscribers: new Set(), summary: null, summaryAt: 0, queue: [], question: null,
     };
     sessions.set(name, s);
@@ -307,6 +416,25 @@ function getSession(name: string, cwd: string, engine: AiEngine, model: AiModel,
     s.effort = normalizedEffort;
     pushEvent(s, sys(`— ${engine} effort set to ${normalizedEffort || "default"} —`));
   }
+  // A conversation carries the authority it was started with: the provider
+  // resumes a thread by id, and that thread was told what it could touch. Widen
+  // or narrow the scope and resuming would keep the old sentence and the new
+  // flags, so start a fresh one instead.
+  if (s.extraDirs.join("\u0000") !== extraDirs.join("\u0000")) {
+    const had = s.extraDirs.length || s.sessionId || s.log.length;
+    s.extraDirs = extraDirs;
+    s.sessionId = null;
+    s.summary = null;
+    s.summaryAt = 0;
+    if (s.question) broadcast(s, "question-cleared", { id: s.question.id });
+    s.question = null;
+    if (had) {
+      const scope = extraDirs.length
+        ? extraDirs.map((dir) => path.basename(dir)).join(", ")
+        : "this project only";
+      pushEvent(s, sys(`— writable scope changed (${scope}); starting a new conversation —`));
+    }
+  }
   s.cwd = cwd;
   return s;
 }
@@ -324,12 +452,19 @@ function broadcast(s: AiSession, event: string, data: unknown) {
   for (const res of s.subscribers) res.write(payload);
 }
 
-function resetConversation(name: string, cwd: string, engine: AiEngine, model: AiModel, effort: AiEffort): AiSession {
+function resetConversation(
+  name: string,
+  cwd: string,
+  engine: AiEngine,
+  model: AiModel,
+  effort: AiEffort,
+  extraDirs: string[] = [],
+): AiSession {
   const existing = sessions.get(name);
   if (existing?.busy || existing?.queue.length) {
     throw new Error(`${sessionIdentity(name).role} session is still working`);
   }
-  const s = getSession(name, cwd, engine, model, effort);
+  const s = getSession(name, cwd, engine, model, effort, extraDirs);
   if (s.question) broadcast(s, "question-cleared", { id: s.question.id });
   s.engine = engine;
   s.model = normalizeModel(model);
@@ -782,25 +917,70 @@ export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
     : ["--effort", value];
 }
 
-function buildCommand(
-  s: AiSession,
+/**
+ * Whether one turn may run with the sandbox off.
+ *
+ * The project's saved setting is a **ceiling**, not a default. A request may ask
+ * for less than it — the AI pane's toggle takes effect on the next send, before
+ * the PATCH that persists it has landed — and may never ask for more.
+ *
+ * It used to read `req.body.fullAccess ?? saved`, which let the request name its
+ * own authority: a POST carrying `fullAccess: true` earned
+ * `--dangerously-bypass-approvals-and-sandbox` on a project whose full access
+ * was switched off. Everything that reaches the loopback port could do it,
+ * including a page psm did not serve. Sandboxing is only a boundary if crossing
+ * it requires something the caller does not control.
+ */
+export function permittedFullAccess(saved: boolean, requested: unknown): boolean {
+  return saved && requested !== false;
+}
+
+/**
+ * Everything one turn's command line depends on.
+ *
+ * A plain description rather than the live session, so that what psm is about to
+ * spawn can be inspected — and tested — without a session, a subscriber or a
+ * child process. `buildCommand` reads nothing else off the session, which is the
+ * property worth keeping: the argv is a function of this and nothing more.
+ */
+export interface TurnSpec {
+  name: string; // the session key — decides planner/reviewer vs agent
+  cwd: string;
+  engine: AiEngine;
+  model: AiModel;
+  effort: AiEffort;
+  sessionId: string | null;
+  extraDirs: readonly string[];
+}
+
+export function buildCommand(
+  s: TurnSpec,
   message: string,
   fullAccess: boolean,
   extraContext = "",
 ): { cmd: string; args: string[] } {
-  const rules = [composeSystemRules(s.cwd), extraContext, INTERACTION_RULES]
+  const readOnly = sessionIdentity(s.name).role !== "agent";
+  // read-only wins over full access: a planner is a planner whatever the
+  // project's setting says.
+  const sandbox = readOnly ? "read-only" : fullAccess ? "off" : "workspace-write";
+  const scope = writableRootArgs(s.extraDirs);
+  const rules = [
+    composeSystemRules(s.cwd),
+    scopeContext(s.cwd, s.extraDirs, readOnly),
+    extraContext,
+    INTERACTION_RULES,
+  ]
     .map((part) => part.trim())
     .filter(Boolean)
     .join("\n\n");
-  const readOnly = sessionIdentity(s.name).role !== "agent";
   if (s.engine === "codex") {
-    const sandbox = readOnly
+    const sandboxArgs = sandbox === "read-only"
       ? ["-s", "read-only"]
-      : fullAccess
+      : sandbox === "off"
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : ["-s", "workspace-write"];
     const model = s.model ? ["--model", s.model] : [];
-    const base = ["--json", "--skip-git-repo-check", ...model, ...effortArgs(s.engine, s.effort), ...sandbox];
+    const base = ["--json", "--skip-git-repo-check", ...model, ...effortArgs(s.engine, s.effort), ...sandboxArgs, ...scope];
     if (s.sessionId) {
       const prompt = `${INTERACTION_RULES}\n\n---\n\n${message}`;
       return { cmd: "codex", args: ["exec", ...base, "resume", s.sessionId, prompt] };
@@ -813,6 +993,7 @@ function buildCommand(
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (s.model) args.push("--model", s.model);
   args.push(...effortArgs(s.engine, s.effort));
+  args.push(...scope);
   args.push(
     "--permission-mode",
     readOnly ? "plan" : fullAccess ? "bypassPermissions" : "acceptEdits",
@@ -976,8 +1157,9 @@ export function send(
   message: string,
   fullAccess: boolean,
   extraContext = "",
+  extraDirs: string[] = [],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
-  const s = getSession(name, cwd, engine, model, effort);
+  const s = getSession(name, cwd, engine, model, effort, extraDirs);
   if (!message.trim()) return { ok: false, error: "empty message" };
   if (s.question) return { ok: false, question: true, error: "AI is waiting for your answer" };
   // refuse to accept a turn into a known usage limit — it would just fail and
@@ -1188,15 +1370,16 @@ export function startFreshAgentSession(
   effort: AiEffort,
   message: string,
   fullAccess: boolean,
+  extraDirs: string[] = [],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   const limit = aiLimit(engine);
   if (limit?.hard) return { ok: false, error: limit.message, limited: true };
   try {
-    resetConversation(project, cwd, engine, model, effort);
+    resetConversation(project, cwd, engine, model, effort, extraDirs);
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  return send(project, cwd, engine, model, effort, message, fullAccess);
+  return send(project, cwd, engine, model, effort, message, fullAccess, "", extraDirs);
 }
 
 export function answerQuestion(
@@ -1280,7 +1463,11 @@ function startTurn(
   let child: ChildProcess;
   try {
     // stdin 'ignore' so the CLI doesn't wait on stdin (prompt is an arg)
-    child = spawn(cmd, args, { cwd: s.cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, FORCE_COLOR: "0" } });
+    child = spawn(cmd, args, {
+      cwd: s.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...childEnv(), FORCE_COLOR: "0" },
+    });
   } catch (err) {
     pushEvent(s, sys(`[psm] could not launch ${s.engine}: ${(err as Error).message}`));
     finishTurn(s);
@@ -1411,7 +1598,7 @@ export function restoreCachedRecap(name: string, value: unknown): void {
   let session = sessions.get(name);
   if (!session) {
     session = {
-      name, cwd: "", engine: "claude", model: null, effort: null, actualModel: null, sessionId: null,
+      name, cwd: "", extraDirs: [], engine: "claude", model: null, effort: null, actualModel: null, sessionId: null,
       busy: false, child: null, log: [], subscribers: new Set(), summary: null,
       summaryAt: 0, queue: [], question: null,
     };
@@ -1502,8 +1689,9 @@ export function subscribeAi(
   engine: AiEngine,
   model: AiModel,
   effort: AiEffort,
+  extraDirs: string[] = [],
 ): void {
-  const s = getSession(name, cwd, engine, model, effort);
+  const s = getSession(name, cwd, engine, model, effort, extraDirs);
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");

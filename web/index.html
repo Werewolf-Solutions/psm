@@ -178,6 +178,13 @@
         <label class="check">
           <input type="checkbox" id="d-full" /> AI full access (run commands, not just edit)
         </label>
+        <!-- Other repositories this project's AI may work in. Chosen by project,
+             never by path: psm looks the paths up itself before every turn. -->
+        <div class="d-scope">
+          <span class="d-scope-label">AI may also edit</span>
+          <div class="d-scope-list" id="d-scope-list"></div>
+          <p class="hint" id="d-scope-summary"></p>
+        </div>
         <label>Category
           <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
         </label>
@@ -338,6 +345,7 @@
             <label class="ws-full" title="Let the AI run shell commands, not just edit files">
               <input type="checkbox" id="ws-full" /> Full access
             </label>
+            <button class="ai-scope" id="ws-scope" hidden title="Which repositories this AI may edit"></button>
             <button id="usage-open" class="btn" title="View usage for the selected provider and model">Usage</button>
             <span class="ws-ai-status" id="ws-ai-status"></span>
           </div>
@@ -391,6 +399,7 @@
             <label class="ws-full" title="Let the AI run shell commands, not just edit files">
               <input type="checkbox" id="web-full" /> Full access
             </label>
+            <button class="ai-scope" id="web-scope" hidden title="Which repositories this AI may edit"></button>
             <button id="web-usage" class="btn" title="View usage for the selected provider and model">Usage</button>
             <span class="dev-spacer"></span>
             <button class="btn" id="web-pick" title="Arm the picker, then click an element in the preview">＋ Add note</button>
