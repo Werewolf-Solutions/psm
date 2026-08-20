@@ -163,6 +163,10 @@ async function fetchSessions(rerender = true) {
     const sig = JSON.stringify(
       sessions.map((s) => ({
         name: s.name,
+        kind: s.kind || "project",
+        id: s.id || "",
+        projects: s.projects || [],
+        ready: s.ready !== false,
         reasons: s.reasons || [],
         busy: !!s.busy,
         waiting: !!s.waiting,
@@ -228,9 +232,10 @@ function renderQuickSwitch() {
   const nav = $("#quick-switch");
   if (!nav) return;
   nav.innerHTML = "";
-  const names = [...new Set(STATE.sessions.map((session) => session.name))]
+  const names = [...new Set(STATE.sessions.filter((s) => s.kind !== "work").map((session) => session.name))]
     .filter((name) => STATE.projects.some((project) => project.name === name));
-  const show = names.length > 0 || !!WS?.name;
+  const rooms = STATE.sessions.filter((session) => session.kind === "work");
+  const show = names.length > 0 || rooms.length > 0 || !!WS?.name;
   nav.classList.toggle("has-items", show);
   if (!show) return;
   const home = el("button", "quick-pill", "Home");
@@ -243,6 +248,13 @@ function renderQuickSwitch() {
     button.onclick = () => {
       location.hash = projectHash(routeKey(projectByName(name)), WS?.name === name ? WS.pane : "plan");
     };
+    nav.append(button);
+  }
+  for (const room of rooms) {
+    const button = el("button", "quick-pill quick-room", esc(room.name));
+    button.classList.toggle("on", WS?.kind === "work" && WS?.id === room.id);
+    button.title = `Workroom · ${(room.projects || []).join(", ")}`;
+    button.onclick = () => openWorkroom(room.id);
     nav.append(button);
   }
 }
@@ -487,10 +499,17 @@ async function stopWorking(name) {
 }
 
 function sessionCard(sess, proj) {
-  const c = el("div", "sess-card" + (sess.busy ? " busy" : "") + (sess.waiting ? " waiting" : ""));
+  const room = sess.kind === "work";
+  const c = el(
+    "div",
+    "sess-card" + (room ? " sess-room" : "") + (sess.busy ? " busy" : "") + (sess.waiting ? " waiting" : ""),
+  );
   const top = el("div", "sess-top");
   const name = el("div", "sess-name");
   name.append(el("span", "sess-dot"), document.createTextNode(sess.name));
+  // A room is not a project, and the lane holds both. Say which this is, or the
+  // two are told apart only by a title someone chose.
+  if (room) name.append(el("span", "sess-kind", "workroom"));
 
   const actions = el("div", "sess-actions");
   actions.append(el("span", "sess-when", sessionWhen(sess)));
@@ -502,14 +521,29 @@ function sessionCard(sess, proj) {
     };
     actions.append(answer);
   }
-  const stop = el("button", "sess-stop", "Stop working");
-  stop.title = "Stop AI and project processes, close the AI session, and clear the manual mark";
-  stop.onclick = async (e) => {
-    e.stopPropagation();
-    stop.disabled = true;
-    if (!(await stopWorking(sess.name))) stop.disabled = false;
-  };
-  actions.append(stop);
+  if (room) {
+    // Archiving is the only way out of the lane for a room — there is no manual
+    // mark to clear and no dev server of its own to stop.
+    const archive = el("button", "sess-stop", "Archive");
+    archive.title = "Close this workroom and take it off the board";
+    archive.onclick = async (e) => {
+      e.stopPropagation();
+      archive.disabled = true;
+      await agentApi(`/api/work-sessions/${encodeURIComponent(sess.id)}/archive`, { method: "POST" });
+      await fetchSessions();
+      renderBoard();
+    };
+    actions.append(archive);
+  } else {
+    const stop = el("button", "sess-stop", "Stop working");
+    stop.title = "Stop AI and project processes, close the AI session, and clear the manual mark";
+    stop.onclick = async (e) => {
+      e.stopPropagation();
+      stop.disabled = true;
+      if (!(await stopWorking(sess.name))) stop.disabled = false;
+    };
+    actions.append(stop);
+  }
   top.append(name, actions);
 
   const snippetText =
@@ -535,6 +569,22 @@ function sessionCard(sess, proj) {
   if (sess.messages) meta.append(el("span", null, `${sess.messages} message${sess.messages === 1 ? "" : "s"}`));
   if (sess.queueDepth) meta.append(el("span", null, `${sess.queueDepth} queued`));
 
+  if (room) {
+    const members = el("div", "sess-members");
+    for (const project of sess.projects || []) {
+      const chip = el("span", "sess-member", project);
+      if (!projectByName(project)) chip.classList.add("missing");
+      members.append(chip);
+    }
+    c.append(top, members, snippet, reasonRow, meta);
+    c.title = sess.ready
+      ? "Open this workroom"
+      : "A project in this workroom is missing — it cannot run until it is back";
+    if (!sess.ready) c.classList.add("orphan");
+    c.onclick = () => openWorkroom(sess.id);
+    return c;
+  }
+
   c.append(top, snippet, reasonRow, meta);
   c.title = proj ? "Open session" : "Project no longer in the workspace";
   if (proj) c.onclick = () => openWorkspace(proj, "session");
@@ -547,7 +597,9 @@ function renderWorkLane(board) {
   board.append(el("div", "group-title", `Working on (${STATE.sessions.length})`));
   const grid = el("div", "sess-grid");
   for (const sess of STATE.sessions) {
-    grid.append(sessionCard(sess, STATE.projects.find((p) => p.name === sess.name)));
+    grid.append(
+      sessionCard(sess, sess.kind === "work" ? null : STATE.projects.find((p) => p.name === sess.name)),
+    );
   }
   board.append(grid);
 }

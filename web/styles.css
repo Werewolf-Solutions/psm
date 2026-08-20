@@ -1519,3 +1519,19 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
   display: flex; flex-wrap: wrap; gap: 6px 12px; max-height: 200px; overflow-y: auto;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card);
 }
+
+/* A workroom in the Working on lane. Same card as a project session, marked so
+   the two are not told apart only by a title someone chose. */
+.sess-card.sess-room { border-left: 3px solid var(--st-library); }
+.sess-kind {
+  margin-left: 8px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em;
+  background: var(--st-library); color: var(--accent-ink); border-radius: 999px; padding: 1px 7px;
+  font-weight: 700;
+}
+.sess-members { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 4px; }
+.sess-member {
+  font-size: 11.5px; font-weight: 600; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+}
+.sess-member.missing { text-decoration: line-through; color: var(--st-paused); border-color: var(--st-paused); }
+.quick-pill.quick-room { border-color: var(--st-library); }

@@ -1074,6 +1074,10 @@ function upsertWorkingItem(items: Map<string, any>, name: string) {
   if (!item) {
     item = {
       name,
+      kind: "project" as "project" | "work",
+      id: null as string | null,
+      projects: [] as string[],
+      ready: true,
       reasons: [],
       busy: false,
       waiting: false,
@@ -1093,6 +1097,15 @@ function upsertWorkingItem(items: Map<string, any>, name: string) {
     items.set(name, item);
   }
   return item;
+}
+
+/** Open workrooms, or none if the database cannot be read — the lane still renders. */
+function openWorkrooms(): WorkSession[] {
+  try {
+    return workSessions.list();
+  } catch {
+    return [];
+  }
 }
 
 function workingItems() {
@@ -1135,6 +1148,40 @@ function workingItems() {
     item.manual = true;
     item.lastActive = Math.max(item.lastActive, o.workingOnAt || 0);
     item.reasons.push("marked");
+  }
+
+  // Every open workroom, whether or not its AI is mid-turn. A room is not a
+  // project and has no card on the board, so this lane is the only place it
+  // appears — leaving it out until it was busy meant closing one lost it behind
+  // a dialog, which is exactly what a room is not for.
+  for (const room of openWorkrooms()) {
+    const key = workSessionKey(room.id);
+    const ai = aiState(key, parseEngine(room.engine, "claude"), room.model, room.effort);
+    const item = upsertWorkingItem(items, `work:${room.id}`);
+    const missing = room.projects.filter((project) => !findProject(project));
+    Object.assign(item, {
+      kind: "work",
+      id: room.id,
+      name: room.title,
+      projects: room.projects,
+      ready: !missing.length,
+      busy: ai.busy,
+      waiting: !!ai.question,
+      question: ai.question,
+      queueDepth: ai.queueDepth,
+      messages: ai.messages,
+      lastActive: Math.max(ai.lastActive || 0, room.updatedAt),
+      snippet: ai.lastUser || room.objective || room.projects.join(" · "),
+      engine: ai.engine,
+      model: ai.model,
+      effort: ai.effort,
+      actualModel: ai.actualModel,
+    });
+    if (missing.length) item.reasons.push(`missing ${missing.join(", ")}`);
+    if (ai.question) item.reasons.push("Needs answer");
+    if (ai.busy) item.reasons.push("AI working");
+    else if (ai.queueDepth) item.reasons.push("AI queued");
+    else item.reasons.push(`${room.projects.length} projects`);
   }
 
   return [...items.values()]
