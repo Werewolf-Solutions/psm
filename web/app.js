@@ -785,6 +785,10 @@ async function saveDrawer() {
     if (WS.name === name) {
       WS.workingOn = body.workingOn;
       renderWorkingButton();
+      // The scope chip is a promise about the open conversation, so it has to
+      // follow the save rather than wait for the cockpit to be reopened.
+      WS.extraProjects = projectByName(name)?.aiExtraProjects || [];
+      renderScopeChip();
     }
     toast("Saved");
   } else {

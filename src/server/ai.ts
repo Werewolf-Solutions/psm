@@ -935,8 +935,26 @@ export function permittedFullAccess(saved: boolean, requested: unknown): boolean
   return saved && requested !== false;
 }
 
-function buildCommand(
-  s: AiSession,
+/**
+ * Everything one turn's command line depends on.
+ *
+ * A plain description rather than the live session, so that what psm is about to
+ * spawn can be inspected — and tested — without a session, a subscriber or a
+ * child process. `buildCommand` reads nothing else off the session, which is the
+ * property worth keeping: the argv is a function of this and nothing more.
+ */
+export interface TurnSpec {
+  name: string; // the session key — decides planner/reviewer vs agent
+  cwd: string;
+  engine: AiEngine;
+  model: AiModel;
+  effort: AiEffort;
+  sessionId: string | null;
+  extraDirs: readonly string[];
+}
+
+export function buildCommand(
+  s: TurnSpec,
   message: string,
   fullAccess: boolean,
   extraContext = "",

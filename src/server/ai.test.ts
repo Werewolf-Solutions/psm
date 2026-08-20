@@ -15,8 +15,29 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "psm-ai-"));
 const sessionsFile = path.join(sandbox, "sessions.json");
 process.env.PSM_SESSIONS_FILE = sessionsFile;
 
-const { permittedFullAccess, resolveExtraDirs, restoreCachedRecap, writableRootArgs } =
-  await import("./ai.ts");
+const {
+  buildCommand,
+  permittedFullAccess,
+  planningSessionKey,
+  resolveExtraDirs,
+  restoreCachedRecap,
+  writableRootArgs,
+} = await import("./ai.ts");
+type TurnSpec = Parameters<typeof buildCommand>[0];
+
+/** A turn as psm would describe it, with only what a case cares about spelled out. */
+function spec(over: Partial<TurnSpec> = {}): TurnSpec {
+  return {
+    name: "consumer",
+    cwd: path.join(sandbox, "consumer"),
+    engine: "claude",
+    model: null,
+    effort: null,
+    sessionId: null,
+    extraDirs: [],
+    ...over,
+  };
+}
 
 /** A directory that exists, since resolution is done against the real filesystem. */
 function repo(name: string): string {
@@ -186,4 +207,82 @@ test("each directory becomes its own --add-dir", () => {
 
 test("no extra directories means no extra flags", () => {
   assert.deepEqual(writableRootArgs([]), []);
+});
+
+/* ---------- the command line psm actually spawns ---------- */
+
+test("claude is given each extra repository, and told to edit rather than ask", () => {
+  const { cmd, args } = buildCommand(
+    spec({ extraDirs: ["/w/provider"] }),
+    "do the thing",
+    false,
+  );
+  assert.equal(cmd, "claude");
+  assert.deepEqual(
+    args.slice(args.indexOf("--add-dir"), args.indexOf("--add-dir") + 2),
+    ["--add-dir", "/w/provider"],
+  );
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.equal(args.at(-1), "do the thing", "the prompt is an argument, never a shell string");
+});
+
+test("codex is given the same directories, with its own sandbox flag", () => {
+  const { cmd, args } = buildCommand(
+    spec({ engine: "codex", extraDirs: ["/w/provider"] }),
+    "do the thing",
+    false,
+  );
+  assert.equal(cmd, "codex");
+  assert.deepEqual(args.slice(0, 2), ["exec", "--json"]);
+  assert.equal(args[args.indexOf("-s") + 1], "workspace-write");
+  assert.ok(args.includes("--add-dir") && args.includes("/w/provider"));
+});
+
+test("a planner may read the other repository but not write anywhere", () => {
+  const { args } = buildCommand(
+    spec({ name: planningSessionKey("consumer", "planner"), extraDirs: ["/w/provider"] }),
+    "plan it",
+    true, // even asking for full access
+  );
+  assert.equal(
+    args[args.indexOf("--permission-mode") + 1],
+    "plan",
+    "a planner stays a planner whatever the project's full-access setting says",
+  );
+  assert.ok(args.includes("--add-dir"), "it still has to be able to read the other side");
+});
+
+test("full access and a wider scope do not appear together by accident", () => {
+  const { args } = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", true);
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  // Nothing stops this today; the guard is that a Workroom will not offer full
+  // access at all. Asserted so that changing it is a decision, not a drift.
+  assert.ok(args.includes("--add-dir"));
+});
+
+test("the scope the AI is told matches the scope it is given", () => {
+  const { args } = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", false);
+  const prompt = args[args.indexOf("--append-system-prompt") + 1];
+  assert.match(prompt, /\/w\/provider/, "the directory in the argv has to be the one named in the prompt");
+  assert.match(prompt, /Nothing outside them is writable/);
+});
+
+test("one project on its own gets no scope section and no extra flags", () => {
+  const { args } = buildCommand(spec(), "go", false);
+  assert.ok(!args.includes("--add-dir"), "the common case must stay exactly as it was");
+  const prompt = args[args.indexOf("--append-system-prompt") + 1] ?? "";
+  assert.ok(!prompt.includes("## Scope"), "nothing to say when there is nothing else in scope");
+});
+
+test("resuming carries the scope flags too, not just the session id", () => {
+  const { args } = buildCommand(
+    spec({ sessionId: "abc-123", extraDirs: ["/w/provider"] }),
+    "carry on",
+    false,
+  );
+  assert.equal(args[args.indexOf("--resume") + 1], "abc-123");
+  assert.ok(
+    args.includes("--add-dir"),
+    "a resumed turn is still a turn — the directories have to be passed again",
+  );
 });
