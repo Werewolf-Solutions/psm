@@ -31,6 +31,8 @@ export const WORKSPACE_NAME = "__workspace__";
 
 export type AiSessionRole = "agent" | "planner" | "reviewer";
 const PLANNING_PREFIX = "__psm_planning__";
+/** Workroom conversations, keyed by room id (see `work-sessions.ts`). */
+const WORK_PREFIX = "__psm_work__:";
 
 export function planningSessionKey(project: string, role: Exclude<AiSessionRole, "agent">): string {
   return `${PLANNING_PREFIX}:${role}:${encodeURIComponent(project)}`;
@@ -38,6 +40,10 @@ export function planningSessionKey(project: string, role: Exclude<AiSessionRole,
 
 function sessionIdentity(name: string): { project: string | null; role: AiSessionRole } {
   if (name === WORKSPACE_NAME) return { project: null, role: "agent" };
+  // A workroom writes, so it is an agent — but it belongs to no single project,
+  // which is what keeps per-project machinery (plans, the planning loop) from
+  // trying to file its output under a project named after the room.
+  if (name.startsWith(WORK_PREFIX)) return { project: null, role: "agent" };
   const prefix = `${PLANNING_PREFIX}:`;
   if (!name.startsWith(prefix)) return { project: name, role: "agent" };
   const rest = name.slice(prefix.length);
@@ -882,7 +888,7 @@ export function activeSessions() {
   const out = [];
   for (const [name, s] of sessions) {
     const identity = sessionIdentity(name);
-    if (name === WORKSPACE_NAME || identity.role !== "agent") continue;
+    if (name === WORKSPACE_NAME || name.startsWith(WORK_PREFIX) || identity.role !== "agent") continue;
     const open = s.subscribers.size > 0;
     const queueDepth = s.queue.length;
     const waiting = !!s.question;

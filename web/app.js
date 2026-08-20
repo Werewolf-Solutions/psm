@@ -803,7 +803,7 @@ const LOG_WINDOW = 100; // lines rendered at once
 const LOG_BUFFER = 20000; // lines held in memory, well past the server's own cap
 
 let WS = {
-  name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
+  name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
   engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
 };
@@ -1095,6 +1095,8 @@ function openWorkspace(p, pane = "logs", opts = {}) {
     };
   }
   WS.chatOnly = chat;
+  WS.kind = opts.kind || "project";
+  WS.id = opts.id || null;
   WS.name = p.name;
   WS.workingOn = !!p.workingOn;
   WS.port = p.port ?? null;
@@ -1119,12 +1121,16 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   $("#ws-ai-limit").hidden = true;
   $("#ws-ai-limit").innerHTML = "";
   $("#ws-name").textContent = opts.title || p.name;
+  renderMembers(opts.room || null);
   renderWorkingButton();
   // hide the run/web/deploy cockpit when this is the workspace-wide chat
   $("#ws-runbar").hidden = chat;
   $("#ws-status").hidden = chat;
   for (const t of document.querySelectorAll(".ws-tab"))
     t.hidden = chat && t.dataset.pane !== "ai" && t.dataset.pane !== "session";
+  // A workroom has no working button of its own: it is not a project, and
+  // "working on" is a mark psm keeps per project.
+  $("#ws-working").hidden = WS.kind === "work";
   $("#ws-cmd").value = p.runCommand || "";
   clearConsole();
   clearConsole($("#ws-depconsole"));
@@ -1146,6 +1152,190 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   renderQuickSwitch();
   if (!chat) loadPlan();
   if (!chat) connectLogs(p.name);
+}
+
+/* ---------- workrooms: several projects, one conversation ---------- */
+
+let WORKROOMS = [];
+
+/**
+ * The member projects, named across the top of the room.
+ *
+ * This is the answer to "which projects am I working on here", and it is also
+ * the scope: every name shown is a repository the AI may edit, and nothing else
+ * is. A member psm can no longer find is shown struck through — the room will
+ * refuse to send rather than quietly work on the half of it that is left.
+ */
+function renderMembers(room) {
+  const strip = $("#ws-members");
+  if (!room) {
+    strip.hidden = true;
+    strip.innerHTML = "";
+    return;
+  }
+  strip.hidden = false;
+  strip.innerHTML = "";
+  const label = el("span", "ws-members-label", "Working on");
+  strip.append(label);
+  for (const member of room.members) {
+    const chip = el("button", `ws-member${member.present ? "" : " missing"}`);
+    chip.textContent = member.name;
+    if (member.name === room.primaryProject) chip.append(el("span", "ws-member-primary", "start"));
+    chip.title = member.present
+      ? `${member.path}${member.gitBranch ? ` · ${member.gitBranch}` : ""} — open this project`
+      : "psm can no longer find this project — the workroom cannot run until it is back";
+    chip.onclick = () => {
+      const project = projectByName(member.name);
+      if (project) window.open(projectHash(routeKey(project), "plan"), "_blank");
+    };
+    strip.append(chip);
+  }
+  const note = el("span", "ws-members-note");
+  note.textContent = room.ready
+    ? "Only these projects are writable."
+    : "A project is missing — sending is blocked.";
+  strip.append(note);
+}
+
+async function loadWorkrooms() {
+  try {
+    const r = await agentApi("/api/work-sessions");
+    WORKROOMS = (await r.json()).workSessions || [];
+  } catch {
+    WORKROOMS = [];
+  }
+  return WORKROOMS;
+}
+
+function openWorkModal() {
+  $("#work-backdrop").hidden = false;
+  $("#work-modal").hidden = false;
+  $("#work-title").value = "";
+  $("#work-objective").value = "";
+  renderWorkPicker();
+  loadWorkrooms().then(renderWorkroomList);
+}
+
+function closeWorkModal() {
+  $("#work-backdrop").hidden = true;
+  $("#work-modal").hidden = true;
+}
+
+/** Rooms already open, so the button is a way back in and not only a way to start. */
+function renderWorkroomList(rooms) {
+  const list = $("#work-open-list");
+  list.innerHTML = "";
+  if (!rooms.length) {
+    list.append(el("p", "hint", "No workrooms yet. Pick two projects below to start one."));
+    return;
+  }
+  list.append(el("h3", null, "Open workrooms"));
+  for (const room of rooms) {
+    const row = el("div", "work-row");
+    const main = el("div", "work-row-main");
+    main.append(el("strong", null, room.title));
+    main.append(el("span", "work-row-projects", room.projects.join(" · ")));
+    if (!room.ready) main.append(el("span", "work-row-warn", "a project is missing"));
+    const open = el("button", "btn btn-primary", "Open");
+    open.onclick = () => {
+      closeWorkModal();
+      openWorkroom(room.id);
+    };
+    const archive = el("button", "btn", "Archive");
+    archive.onclick = async () => {
+      await agentApi(`/api/work-sessions/${encodeURIComponent(room.id)}/archive`, { method: "POST" });
+      renderWorkroomList(await loadWorkrooms());
+    };
+    row.append(main, open, archive);
+    list.append(row);
+  }
+}
+
+function renderWorkPicker() {
+  const picker = $("#work-picker");
+  picker.innerHTML = STATE.projects
+    .filter((p) => !p.archived)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((p) => `<label class="scope-item"><input type="checkbox" value="${esc(p.name)}" /> ${esc(p.name)}</label>`)
+    .join("");
+  picker.onchange = renderWorkSummary;
+  renderWorkSummary();
+}
+
+function chosenWorkProjects() {
+  return [...$("#work-picker").querySelectorAll("input:checked")].map((box) => box.value);
+}
+
+/** Say the scope back before it is created, in the words the AI will be given. */
+function renderWorkSummary() {
+  const chosen = chosenWorkProjects();
+  const summary = $("#work-summary");
+  if (chosen.length < 2) {
+    summary.textContent = "Pick at least two projects.";
+    return;
+  }
+  summary.textContent =
+    `This AI may edit ${chosen.join(" and ")}. It starts in ${chosen[0]}. No other project is writable.`;
+}
+
+async function createWorkroom(event) {
+  event.preventDefault();
+  const projects = chosenWorkProjects();
+  if (projects.length < 2) return toast("Pick at least two projects");
+  const button = $("#work-create");
+  button.disabled = true;
+  try {
+    const r = await agentApi("/api/work-sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projects,
+        title: $("#work-title").value.trim(),
+        objective: $("#work-objective").value.trim(),
+        engine: $("#work-engine").value,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return toast(data.error || "Could not open the workroom");
+    closeWorkModal();
+    openWorkroom(data.workSession.id);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/**
+ * Open a workroom.
+ *
+ * The same cockpit shell as a project — deliberately, because it is the same
+ * work — with the project-only panes hidden and the members named across the
+ * top. `chatOnly` is what the workspace-wide chat already uses for this.
+ */
+async function openWorkroom(id, fromRoute = false) {
+  if (!fromRoute) {
+    location.hash = `#/w/${encodeURIComponent(id)}/ai`;
+    return;
+  }
+  let room;
+  try {
+    const r = await agentApi(`/api/work-sessions/${encodeURIComponent(id)}`);
+    if (!r.ok) throw new Error("gone");
+    room = (await r.json()).workSession;
+  } catch {
+    toast("Workroom not found");
+    history.replaceState(null, "", "#/");
+    closeWorkspace(true);
+    return;
+  }
+  openWorkspace(
+    {
+      name: room.id, port: null, runCommand: null, deployStaging: null, deployProduction: null,
+      aiExtraProjects: [], aiEngine: room.engine, aiModel: room.model, aiEffort: room.effort,
+      aiFullAccess: false, // a workroom is never handed the sandbox-off flag
+    },
+    "ai",
+    { chatOnly: true, title: room.title, fromRoute: true, kind: "work", id: room.id, room },
+  );
 }
 
 async function openWorkspaceChat(fromRoute = false) {
@@ -1580,7 +1770,7 @@ function closeWorkspace(fromRoute = false) {
   disconnectPlanner();
   if (WS.depEs) WS.depEs.close();
   WS = {
-    name: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
+    name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
     engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
   };
@@ -1600,6 +1790,11 @@ function closeWorkspace(fromRoute = false) {
 }
 
 function routeFromHash() {
+  const room = location.hash.match(/^#\/w\/([^/]+)(?:\/([^/]+))?$/);
+  if (room) {
+    openWorkroom(decodeURIComponent(room[1]), true);
+    return;
+  }
   const match = location.hash.match(/^#\/p\/([^/]+)(?:\/([^/]+))?$/);
   if (!match) {
     if (WS.name) closeWorkspace(true);
@@ -3008,7 +3203,7 @@ function renderSessionPane(data) {
 async function fetchSessionState() {
   if (!WS.name) return;
   try {
-    const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/state`);
+    const r = await agentApi(`${aiBase()}/ai/state`);
     if (!r.ok) return;
     renderSessionPane(await r.json());
   } catch {}
@@ -3200,7 +3395,12 @@ async function answerQuestion(event) {
     const project = STATE.projects.find((p) => p.name === active.project);
     const fullAccess = WS.name === active.project ? WS.fullAccess : !!project?.aiFullAccess;
     const planner = active.scope === "planner";
-    const r = await agentApi(`/api/projects/${encodeURIComponent(active.project)}/${planner ? "planner" : "ai"}/question`, {
+    // A workroom's question comes back under its session key, which is not a
+    // project name — answer it on the room's own endpoint.
+    const base = active.project.startsWith("__psm_work__:")
+      ? `/api/work-sessions/${encodeURIComponent(active.project.slice("__psm_work__:".length))}`
+      : `/api/projects/${encodeURIComponent(active.project)}`;
+    const r = await agentApi(`${base}/${planner ? "planner" : "ai"}/question`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -3374,12 +3574,26 @@ function setAiBusy(busy) {
   renderWorkingButton();
 }
 
+/**
+ * Where this conversation's AI endpoints live.
+ *
+ * A project chat and a workroom chat are the same UI over different URLs, so the
+ * base is looked up once here rather than spelled out at each call. Everything
+ * below `${base}/ai` — stream, send, question, state, recap, cancel — is served
+ * identically for both by the server.
+ */
+function aiBase(name = WS.name) {
+  return WS.kind === "work"
+    ? `/api/work-sessions/${encodeURIComponent(WS.id)}`
+    : `/api/projects/${encodeURIComponent(name)}`;
+}
+
 function connectAi(name) {
   if (WS.aiEs) WS.aiEs.close();
   const params = new URLSearchParams({ engine: WS.engine });
   if (WS.model) params.set("model", WS.model);
   if (WS.effort) params.set("effort", WS.effort);
-  const es = agentStream(`/api/projects/${encodeURIComponent(name)}/ai/stream?${params}`);
+  const es = agentStream(`${aiBase(name)}/ai/stream?${params}`);
   WS.aiEs = es;
   // on every (re)connection the server replays the whole transcript, so wipe
   // first — this makes a dropped/reconnected stream rebuild cleanly instead of
@@ -3498,7 +3712,7 @@ async function fetchRecap() {
     banner.textContent = "Recalling where we left off…";
   }
   try {
-    const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/recap`);
+    const r = await agentApi(`${aiBase()}/ai/recap`);
     setRecap((await r.json()).summary);
   } catch {
     banner.classList.remove("loading");
@@ -3549,7 +3763,7 @@ async function fetchLimit() {
 
 /** One place that hands a message to the project's AI with the current selection. */
 async function postAiMessage(name, message) {
-  const r = await agentApi(`/api/projects/${encodeURIComponent(name)}/ai`, {
+  const r = await agentApi(`${aiBase(name)}/ai`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort, fullAccess: WS.fullAccess }),
@@ -3597,7 +3811,7 @@ async function sendAi() {
 
 async function cancelAi() {
   if (!WS.name) return;
-  await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/ai/cancel`, { method: "POST" });
+  await agentApi(`${aiBase()}/ai/cancel`, { method: "POST" });
 }
 
 /* ---- Deploy pane ---- */
@@ -5107,6 +5321,10 @@ $("#skills-close").onclick = closeModals;
 $("#skills-refresh").onclick = () => loadSkills();
 $("#skills-scope").onchange = () => loadSkills();
 $("#ws-chat-open").onclick = () => openWorkspaceChat();
+$("#work-open").onclick = () => openWorkModal();
+$("#work-close").onclick = () => closeWorkModal();
+$("#work-backdrop").onclick = () => closeWorkModal();
+$("#work-form").onsubmit = createWorkroom;
 $("#usage-open").onclick = openUsage;
 $("#usage-refresh").onclick = () => fetchUsage(true);
 $("#usage-close").onclick = closeModals;

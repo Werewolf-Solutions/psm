@@ -56,6 +56,29 @@ const MIGRATIONS: readonly string[] = [
      updated_at INTEGER NOT NULL
    );
    CREATE INDEX notes_by_project ON notes (project, created_at DESC);`,
+
+  // 2 — workrooms: a place to work on several projects at once. The membership
+  // is its own table rather than a JSON column, because "which rooms is this
+  // project in" is a question the cockpit asks and a blob cannot answer.
+  `CREATE TABLE work_sessions (
+     id              TEXT PRIMARY KEY,
+     title           TEXT NOT NULL,
+     objective       TEXT NOT NULL DEFAULT '',
+     primary_project TEXT NOT NULL,
+     engine          TEXT NOT NULL DEFAULT 'claude',
+     model           TEXT,
+     effort          TEXT,
+     created_at      INTEGER NOT NULL,
+     updated_at      INTEGER NOT NULL,
+     archived_at     INTEGER
+   );
+   CREATE TABLE work_session_projects (
+     session_id TEXT NOT NULL REFERENCES work_sessions (id) ON DELETE CASCADE,
+     project    TEXT NOT NULL,
+     position   INTEGER NOT NULL,
+     PRIMARY KEY (session_id, project)
+   );
+   CREATE INDEX work_session_projects_by_project ON work_session_projects (project);`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

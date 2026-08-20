@@ -134,3 +134,27 @@ test("the console renders a window rather than every line it has ever seen", () 
   assert.ok(read("index.html").includes('id="ws-download"'), "the log needs a download button");
   assert.match(app, /logs\/download\?kind=/, "download should ask the agent for the whole transcript");
 });
+
+test("every id app.js reaches for exists in the page", () => {
+  // `$("#thing")` on a missing id returns null, and the failure surfaces later
+  // and elsewhere — as "cannot set property of null" in a handler nobody ran
+  // during review. There is no build step to catch it, so read the two files.
+  const html = read("index.html");
+  const app = read("app.js");
+  const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
+  const missing = [...app.matchAll(/\$\("#([a-z0-9-]+)"\)/gi)]
+    .map((m) => m[1])
+    .filter((id) => !ids.has(id));
+  assert.deepEqual([...new Set(missing)], [], "app.js reaches for ids the page does not have");
+});
+
+test("a workroom is addressable, and never mistaken for a project", () => {
+  const app = read("app.js");
+  // Rooms route under #/w/, projects under #/p/. One regex reading the other's
+  // URLs would open a project page onto a room id.
+  assert.match(app, /#\\\/w\\\/\(\[\^\/\]\+\)/, "the router has to recognise a workroom URL");
+  // Their AI endpoints differ too; the chat UI picks the base rather than
+  // assuming every conversation belongs to a project.
+  assert.match(app, /function aiBase\(/);
+  assert.match(app, /\/api\/work-sessions\//);
+});

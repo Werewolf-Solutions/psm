@@ -1479,3 +1479,43 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
   color: var(--text); cursor: pointer; font-weight: 500;
 }
 #d-scope-summary { margin: 0; }
+
+/* ---------- workrooms ---------- */
+
+/* The members, named across the top of a workroom. Every name here is a
+   repository the AI may edit — which is why the strip is part of the header
+   rather than tucked into a pane you have to go and find. */
+.ws-members {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg-soft);
+}
+.ws-members-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--faint); font-weight: 700; }
+.ws-member {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); border-radius: 999px;
+  padding: 3px 11px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.ws-member:hover { border-color: var(--accent); color: var(--accent); }
+.ws-member.missing { text-decoration: line-through; color: var(--st-paused); border-color: var(--st-paused); }
+.ws-member-primary {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .06em;
+  background: var(--accent); color: var(--accent-ink); border-radius: 999px; padding: 1px 6px;
+}
+.ws-members-note { font-size: 11.5px; color: var(--faint); margin-left: auto; }
+
+.work-modal { width: min(680px, 94vw); height: min(720px, 90vh); }
+.work-open-list { display: flex; flex-direction: column; gap: 8px; }
+.work-open-list h3, .work-form h3 { margin: 0; font-size: 13px; color: var(--muted); }
+.work-row {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--card);
+}
+.work-row-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.work-row-projects { font-size: 12px; color: var(--muted); }
+.work-row-warn { font-size: 11.5px; color: var(--st-paused); font-weight: 600; }
+.work-form { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line); padding-top: 14px; }
+.work-label { font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.work-picker {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; max-height: 200px; overflow-y: auto;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+}

@@ -1,4 +1,5 @@
 import express from "express";
+import type { Request, Response } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -39,6 +40,13 @@ import {
   type AiEngine,
 } from "./ai.ts";
 import { attachmentManager, WiringConflictError, WiringValidationError } from "./attach.ts";
+import {
+  WorkSessionNotFoundError,
+  WorkSessionValidationError,
+  workSessionKey,
+  workSessions,
+  type WorkSession,
+} from "./work-sessions.ts";
 import {
   buildCatalog,
   CatalogValidationError,
@@ -1607,74 +1615,292 @@ local.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
   }
 });
 
-// transcript stream (replays history, then live)
-local.get("/api/projects/:name/ai/stream", (req, res) => {
-  const t = aiTarget(req.params.name);
-  if (!t) return res.status(404).end();
-  const engine = parseEngine(req.query.engine, t.aiEngine);
-  const model = parseModel(req.query.model, t.aiModel);
-  const effort = parseEffort(req.query.effort, t.aiEffort);
-  subscribeAi(res, t.name, t.path, engine, model, effort, extraDirsFor(t));
-});
+/**
+ * One AI conversation, described in the terms the AI module needs.
+ *
+ * A project and a workroom differ in what they resolve to — one directory or
+ * several, a saved full-access setting or none at all — and in nothing else.
+ * Describing both as this lets the six AI endpoints be written once instead of
+ * twice, which matters more than it sounds: they are where authority is decided,
+ * and a second copy is a second place for the two to drift apart.
+ */
+interface AiConversation {
+  name: string; // session key
+  path: string; // where the CLI starts
+  engine: AiEngine;
+  model: string | null;
+  effort: string | null;
+  fullAccess: boolean; // the ceiling, before the request is allowed to lower it
+  extraDirs: string[];
+  extraContext: string;
+  onTurn?: () => void;
+}
 
-// send one message to the project's (or workspace's) AI
-local.post("/api/projects/:name/ai", (req, res) => {
-  const t = aiTarget(req.params.name);
-  if (!t) return res.status(404).json({ error: "unknown project" });
-  const engine = parseEngine(req.body?.engine, t.aiEngine);
-  const model = parseModel(req.body?.model, t.aiModel);
-  const effort = parseEffort(req.body?.effort, t.aiEffort);
-  const fullAccess = permittedFullAccess(!!t.aiFullAccess, req.body?.fullAccess);
-  const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
-  const r = aiSend(
-    t.name,
-    t.path,
-    engine,
-    model,
-    effort,
-    String(req.body?.message ?? ""),
-    fullAccess,
-    extra,
-    extraDirsFor(t),
+class AiTargetError extends Error {
+  constructor(message: string, readonly status = 404) {
+    super(message);
+  }
+}
+
+function projectConversation(name: string): AiConversation {
+  const t = aiTarget(name);
+  if (!t) throw new AiTargetError("unknown project");
+  return {
+    name: t.name,
+    path: t.path,
+    engine: t.aiEngine,
+    model: t.aiModel,
+    effort: t.aiEffort,
+    fullAccess: !!t.aiFullAccess,
+    extraDirs: extraDirsFor(t),
+    extraContext: t.name === WORKSPACE_NAME ? workspaceRundown() : "",
+  };
+}
+
+/**
+ * A workroom's conversation.
+ *
+ * Every member is resolved from the current scan on every turn. A member that
+ * has gone — renamed, unlinked, deleted — stops the room rather than quietly
+ * shrinking its scope, because the whole point of the room is that the change
+ * lands on both sides: half of it is worse than none.
+ *
+ * Full access is not offered. A workroom's promise is that these repositories
+ * and no others are writable, and the flag that turns the sandbox off would make
+ * that promise false.
+ */
+function workroomConversation(id: string): AiConversation {
+  const room = workSessions.get(id);
+  const missing = room.projects.filter((project) => !findProject(project));
+  if (missing.length) {
+    throw new AiTargetError(
+      `${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} no longer in the workspace — ` +
+        "this workroom cannot run until it is back",
+      409,
+    );
+  }
+  const paths = room.projects.map((project) => findProject(project)!.path);
+  return {
+    name: workSessionKey(room.id),
+    path: paths[0],
+    engine: parseEngine(room.engine, "claude"),
+    model: room.model,
+    effort: room.effort,
+    fullAccess: false,
+    extraDirs: resolveExtraDirs(paths[0], paths.slice(1)),
+    extraContext: workroomContext(room),
+    onTurn: () => workSessions.touch(room.id),
+  };
+}
+
+/** What the room is for, and who is in it — said once, at the top of the thread. */
+function workroomContext(room: WorkSession): string {
+  const lines = [
+    `You are working in a psm workroom: "${room.title}".`,
+    "",
+    "It spans these projects, and the first is where you start:",
+    ...room.projects.map((project, index) => {
+      const found = findProject(project);
+      const role = index === 0 ? "primary" : "member";
+      return `- ${project} (${role}) — ${found?.path ?? "path unresolved"}${
+        found?.description ? `\n  ${found.description}` : ""
+      }`;
+    }),
+  ];
+  if (room.objective) lines.push("", `The objective: ${room.objective}`);
+  lines.push(
+    "",
+    "Treat them as one piece of work. A change to an interface on one side needs the other " +
+      "side changed in the same turn, and each repository's own checks run inside that " +
+      "repository. Do not report the work as done while one side is left inconsistent.",
   );
-  res.status(r.ok ? 200 : 409).json(r);
-});
+  return lines.join("\n");
+}
 
-// answer a structured question and resume the same provider session
-local.post("/api/projects/:name/ai/question", (req, res) => {
-  const t = aiTarget(req.params.name);
-  if (!t) return res.status(404).json({ error: "unknown project" });
-  const answers = req.body?.answers && typeof req.body.answers === "object" ? req.body.answers : {};
-  const fullAccess = permittedFullAccess(!!t.aiFullAccess, req.body?.fullAccess);
-  const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
-  const r = aiAnswerQuestion(
-    t.name,
-    t.path,
-    String(req.body?.requestId ?? ""),
-    answers,
-    fullAccess,
-    extra,
-  );
-  res.status(r.ok ? 200 : 409).json(r);
-});
+/**
+ * The AI endpoints, mounted once per kind of conversation.
+ *
+ * `resolve` is given the request and returns the conversation it is about, or
+ * throws an `AiTargetError` explaining why there is not one.
+ */
+function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation): void {
+  const guard = (res: Response, err: unknown): void => {
+    if (err instanceof AiTargetError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    if (err instanceof WorkSessionNotFoundError) {
+      res.status(404).json({ error: err.message });
+      return;
+    }
+    res.status(400).json({ error: (err as Error).message || "could not resolve that AI target" });
+  };
 
-// cancel the in-flight turn
-local.post("/api/projects/:name/ai/cancel", (req, res) => {
-  res.json({ ok: true, cancelled: aiCancel(req.params.name) });
-});
+  // transcript stream (replays history, then live)
+  local.get(`${base}/ai/stream`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch {
+      return res.status(404).end();
+    }
+    const engine = parseEngine(req.query.engine, t.engine);
+    const model = parseModel(req.query.model, t.model);
+    const effort = parseEffort(req.query.effort, t.effort);
+    subscribeAi(res, t.name, t.path, engine, model, effort, t.extraDirs);
+  });
 
-local.get("/api/projects/:name/ai/state", (req, res) => {
-  const t = aiTarget(req.params.name);
-  if (!t) return res.status(404).json({ error: "unknown project" });
-  res.json(aiState(t.name, t.aiEngine, t.aiModel, t.aiEffort));
-});
+  // send one message
+  local.post(`${base}/ai`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch (err) {
+      return guard(res, err);
+    }
+    const engine = parseEngine(req.body?.engine, t.engine);
+    const model = parseModel(req.body?.model, t.model);
+    const effort = parseEffort(req.body?.effort, t.effort);
+    const fullAccess = permittedFullAccess(t.fullAccess, req.body?.fullAccess);
+    const r = aiSend(
+      t.name,
+      t.path,
+      engine,
+      model,
+      effort,
+      String(req.body?.message ?? ""),
+      fullAccess,
+      t.extraContext,
+      t.extraDirs,
+    );
+    if (r.ok) t.onTurn?.();
+    res.status(r.ok ? 200 : 409).json(r);
+  });
 
-// "where we left off" recap — regenerated only when the transcript has grown
-local.get("/api/projects/:name/ai/recap", async (req, res) => {
+  // answer a structured question and resume the same provider session
+  local.post(`${base}/ai/question`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch (err) {
+      return guard(res, err);
+    }
+    const answers = req.body?.answers && typeof req.body.answers === "object" ? req.body.answers : {};
+    const fullAccess = permittedFullAccess(t.fullAccess, req.body?.fullAccess);
+    const r = aiAnswerQuestion(
+      t.name,
+      t.path,
+      String(req.body?.requestId ?? ""),
+      answers,
+      fullAccess,
+      t.extraContext,
+    );
+    res.status(r.ok ? 200 : 409).json(r);
+  });
+
+  // cancel the in-flight turn
+  local.post(`${base}/ai/cancel`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch (err) {
+      return guard(res, err);
+    }
+    res.json({ ok: true, cancelled: aiCancel(t.name) });
+  });
+
+  local.get(`${base}/ai/state`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch (err) {
+      return guard(res, err);
+    }
+    res.json(aiState(t.name, t.engine, t.model, t.effort));
+  });
+
+  // "where we left off" recap — regenerated only when the transcript has grown
+  local.get(`${base}/ai/recap`, async (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+    } catch (err) {
+      return guard(res, err);
+    }
+    try {
+      res.json({ summary: await aiRecap(t.name) });
+    } catch {
+      res.json({ summary: null });
+    }
+  });
+}
+
+mountAiRoutes("/api/projects/:name", (req) => projectConversation(req.params.name));
+mountAiRoutes("/api/work-sessions/:id", (req) => workroomConversation(req.params.id));
+
+/* ---------- workrooms: several projects, one conversation ---------- */
+
+function workroomError(res: Response, err: unknown): void {
+  if (err instanceof WorkSessionNotFoundError) {
+    res.status(404).json({ error: err.message });
+    return;
+  }
+  if (err instanceof WorkSessionValidationError) {
+    res.status(400).json({ error: err.message });
+    return;
+  }
+  res.status(500).json({ error: (err as Error).message || "could not read workrooms" });
+}
+
+/** A room, plus what the cockpit needs to draw it without a second round trip. */
+function workroomView(room: WorkSession) {
+  const members = room.projects.map((name) => {
+    const project = findProject(name);
+    return {
+      name,
+      present: !!project,
+      path: project?.path ?? null,
+      description: project?.description ?? null,
+      status: project?.status ?? null,
+      gitBranch: project?.gitBranch ?? null,
+      runCommand: project?.runCommand ?? null,
+    };
+  });
+  return { ...room, members, ready: members.every((member) => member.present) };
+}
+
+local.get("/api/work-sessions", (_req, res) => {
   try {
-    res.json({ summary: await aiRecap(req.params.name) });
-  } catch {
-    res.json({ summary: null });
+    res.json({ workSessions: workSessions.list().map(workroomView) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
+local.post("/api/work-sessions", (req, res) => {
+  try {
+    const known = new Set(getProjects().map((project) => project.name));
+    res.json({ ok: true, workSession: workroomView(workSessions.create(req.body, known)) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
+local.get("/api/work-sessions/:id", (req, res) => {
+  try {
+    res.json({ workSession: workroomView(workSessions.get(req.params.id)) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
+local.post("/api/work-sessions/:id/archive", (req, res) => {
+  try {
+    const room = workSessions.archive(req.params.id);
+    stopAiSession(workSessionKey(room.id));
+    res.json({ ok: true, workSession: workroomView(room) });
+  } catch (err) {
+    workroomError(res, err);
   }
 });
 

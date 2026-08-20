@@ -91,6 +91,7 @@
         <button id="account-chip" class="btn account-chip" title="Your Werewolf account">Sign&nbsp;in</button>
         <button id="cloud-open" class="btn" title="PSM Pro account, sync, and encrypted backups">☁&nbsp;Cloud</button>
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
+        <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
         <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
         <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
         <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
@@ -196,6 +197,40 @@
       </div>
     </aside>
 
+    <!-- Workrooms: several projects, one conversation. Opening one is the same
+         cockpit shell as a project, with the members named across the top. -->
+    <div class="modal-backdrop" id="work-backdrop" hidden></div>
+    <section class="modal work-modal" id="work-modal" hidden>
+      <header class="modal-head">
+        <h2>Work on projects together</h2>
+        <button class="btn" id="work-close">Close</button>
+      </header>
+      <div class="modal-body">
+        <div class="work-open-list" id="work-open-list"></div>
+        <form class="work-form" id="work-form">
+          <h3>New workroom</h3>
+          <label>Name
+            <input id="work-title" type="text" placeholder="e.g. Todo ↔ Werewolf API" />
+          </label>
+          <label>What are you doing?
+            <textarea id="work-objective" rows="2" placeholder="The change you want made across these projects…"></textarea>
+          </label>
+          <span class="work-label">Projects (pick two or more — the first ticked is where the AI starts)</span>
+          <div class="work-picker" id="work-picker"></div>
+          <label>AI engine
+            <select id="work-engine">
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
+          <p class="hint" id="work-summary"></p>
+          <div class="modal-foot">
+            <button class="btn btn-primary" type="submit" id="work-create">Open workroom</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
     <!-- workspace / cockpit -->
     <div class="ws-backdrop" id="ws-backdrop" hidden></div>
     <section class="workspace" id="workspace" hidden>
@@ -216,6 +251,8 @@
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
         <button class="btn" id="ws-download" title="Download the whole log since this run started">⤓ Log</button>
       </div>
+      <!-- Which projects this workroom spans. Hidden for an ordinary project. -->
+      <div class="ws-members" id="ws-members" hidden></div>
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab" data-pane="plan">Plan</button>
         <button class="ws-tab" data-pane="notes">Notes</button>
