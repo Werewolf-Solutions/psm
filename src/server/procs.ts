@@ -76,7 +76,7 @@ const URL_RE = /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})/;
 const keyOf = (name: string, kind: ProcKind) => `${name}::${kind}`;
 
 /**
- * The environment a project's own command should run in.
+ * The environment anything psm spawns should run in.
  *
  * Emphatically **not** psm's. psm's server has `PORT` set — that is the port psm
  * itself is listening on — and a child inheriting it is a genuine trap: dotenv
@@ -87,8 +87,18 @@ const keyOf = (name: string, kind: ProcKind) => `${name}::${kind}`;
  *
  * `PSM_*` goes too: psm's mode, data directory and session secret are psm's
  * business, and one of them is a credential.
+ *
+ * Exported because a project's dev server is no longer the only child psm
+ * starts. The AI pane shells out to a coding CLI (see `ai.ts`) which reads its
+ * environment, prints it when asked, and starts dev servers of its own — every
+ * reason above applies to it at least as strongly.
+ *
+ * A denylist rather than an allowlist, deliberately: the CLI needs `PATH`,
+ * `HOME`, the provider's own credentials and whatever else the user's shell
+ * carries, and psm cannot enumerate that. What psm *can* enumerate is its own
+ * variables, which are exactly the ones that should not travel.
  */
-function projectEnv(): NodeJS.ProcessEnv {
+export function childEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.PORT;
   for (const key of Object.keys(env)) {
@@ -205,7 +215,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     cwd,
     shell: true,
     detached: true,
-    env: { ...projectEnv(), FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: { ...childEnv(), FORCE_COLOR: "0", NO_COLOR: "1" },
   });
   p.child = child;
 

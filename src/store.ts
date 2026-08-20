@@ -13,6 +13,7 @@
  * a second session of its own.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +51,45 @@ export function sharedStateDir(name: string): string {
   const dir = path.join(PSM_ROOT, `.psm-${name}`);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * Replace a state file in one step.
+ *
+ * Everything psm keeps is written whole and read whole, which makes a plain
+ * `writeFileSync` a real hazard: the file is truncated first, so a crash — or
+ * two writes racing — leaves a reader half a document, and JSON half a document
+ * is JSON that does not parse. Write a sibling temp file and rename it instead;
+ * rename is atomic within a filesystem, so a reader sees the old file or the new
+ * one and never the gap between them.
+ *
+ * `mode` defaults to whatever the file already carries, falling back to `0600`
+ * for one that does not exist yet. Pass it explicitly for a file that must be
+ * private no matter what mode it picked up along the way.
+ */
+export function writeFileAtomic(file: string, contents: string, mode?: number): void {
+  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  let fileMode = mode ?? 0o600;
+  if (mode === undefined) {
+    try {
+      fileMode = fs.statSync(file).mode & 0o777;
+    } catch {
+      /* no file yet — 0600 it is */
+    }
+  }
+  try {
+    fs.writeFileSync(temp, contents, { mode: fileMode });
+    fs.renameSync(temp, file);
+  } catch (err) {
+    // A failed write must not leave its scratch file behind for the next one to
+    // trip over; the caller still hears about the failure.
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      /* never existed */
+    }
+    throw err;
+  }
 }
 
 /**

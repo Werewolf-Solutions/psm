@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 import type { ImplementationPlan } from "../types.ts";
 import { planStore } from "./plans.ts";
+import { childEnv } from "./procs.ts";
 import { composeSystemRules } from "./rules.ts";
+import { writeFileAtomic } from "../store.ts";
 
 /**
  * The AI pane: shells out to a coding CLI (`claude` by default, `codex`
@@ -16,7 +18,9 @@ import { composeSystemRules } from "./rules.ts";
  */
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SESSIONS_FILE = path.resolve(__dirname, "..", "..", ".psm-sessions.json");
+/** Where transcripts and provider session ids are kept. Tests point it away. */
+const SESSIONS_FILE =
+  process.env.PSM_SESSIONS_FILE || path.resolve(__dirname, "..", "..", ".psm-sessions.json");
 
 export type AiEngine = "claude" | "codex";
 export type AiModel = string | null;
@@ -225,7 +229,12 @@ function saveSessions(): void {
     };
   }
   try {
-    fs.writeFileSync(SESSIONS_FILE, JSON.stringify({ sessions: map, limits }));
+    // 0600, and replaced rather than truncated. This file holds every
+    // transcript psm has kept and the provider session ids that resume them:
+    // readable by anyone with an account on the machine is wrong, and a crash
+    // partway through a write used to cost the lot, since a half-written JSON
+    // document does not parse and the loader drops what it cannot read.
+    writeFileAtomic(SESSIONS_FILE, JSON.stringify({ sessions: map, limits }), 0o600);
   } catch {
     /* best effort */
   }
@@ -782,6 +791,24 @@ export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
     : ["--effort", value];
 }
 
+/**
+ * Whether one turn may run with the sandbox off.
+ *
+ * The project's saved setting is a **ceiling**, not a default. A request may ask
+ * for less than it — the AI pane's toggle takes effect on the next send, before
+ * the PATCH that persists it has landed — and may never ask for more.
+ *
+ * It used to read `req.body.fullAccess ?? saved`, which let the request name its
+ * own authority: a POST carrying `fullAccess: true` earned
+ * `--dangerously-bypass-approvals-and-sandbox` on a project whose full access
+ * was switched off. Everything that reaches the loopback port could do it,
+ * including a page psm did not serve. Sandboxing is only a boundary if crossing
+ * it requires something the caller does not control.
+ */
+export function permittedFullAccess(saved: boolean, requested: unknown): boolean {
+  return saved && requested !== false;
+}
+
 function buildCommand(
   s: AiSession,
   message: string,
@@ -1280,7 +1307,11 @@ function startTurn(
   let child: ChildProcess;
   try {
     // stdin 'ignore' so the CLI doesn't wait on stdin (prompt is an arg)
-    child = spawn(cmd, args, { cwd: s.cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, FORCE_COLOR: "0" } });
+    child = spawn(cmd, args, {
+      cwd: s.cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...childEnv(), FORCE_COLOR: "0" },
+    });
   } catch (err) {
     pushEvent(s, sys(`[psm] could not launch ${s.engine}: ${(err as Error).message}`));
     finishTurn(s);

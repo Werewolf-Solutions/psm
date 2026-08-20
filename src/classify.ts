@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { statePath } from "./store.ts";
+import { statePath, writeFileAtomic } from "./store.ts";
 import type { Config, Override, Project, Signals, Status } from "./types.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -27,14 +26,7 @@ export function loadOverrides(): Record<string, Override> {
 }
 
 export function saveOverrides(all: Record<string, Override>): void {
-  const file = overridesFile();
-  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  let mode = 0o600;
-  try {
-    mode = fs.statSync(file).mode & 0o777;
-  } catch {}
-  fs.writeFileSync(temp, JSON.stringify(all, null, 2) + "\n", { mode });
-  fs.renameSync(temp, file);
+  writeFileAtomic(overridesFile(), JSON.stringify(all, null, 2) + "\n");
 }
 
 function daysSince(iso: string | null): number {

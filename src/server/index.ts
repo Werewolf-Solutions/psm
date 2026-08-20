@@ -21,6 +21,7 @@ import {
   answerQuestion as aiAnswerQuestion,
   cancel as aiCancel,
   cancelPlanning,
+  permittedFullAccess,
   planningOverview,
   planningSessionKey,
   queuePlanReview,
@@ -1584,9 +1585,9 @@ local.post("/api/projects/:name/ai", (req, res) => {
   const engine = parseEngine(req.body?.engine, t.aiEngine);
   const model = parseModel(req.body?.model, t.aiModel);
   const effort = parseEffort(req.body?.effort, t.aiEffort);
-  const fullAccess = req.body?.fullAccess ?? t.aiFullAccess;
+  const fullAccess = permittedFullAccess(!!t.aiFullAccess, req.body?.fullAccess);
   const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
-  const r = aiSend(t.name, t.path, engine, model, effort, String(req.body?.message ?? ""), !!fullAccess, extra);
+  const r = aiSend(t.name, t.path, engine, model, effort, String(req.body?.message ?? ""), fullAccess, extra);
   res.status(r.ok ? 200 : 409).json(r);
 });
 
@@ -1595,14 +1596,14 @@ local.post("/api/projects/:name/ai/question", (req, res) => {
   const t = aiTarget(req.params.name);
   if (!t) return res.status(404).json({ error: "unknown project" });
   const answers = req.body?.answers && typeof req.body.answers === "object" ? req.body.answers : {};
-  const fullAccess = req.body?.fullAccess ?? t.aiFullAccess;
+  const fullAccess = permittedFullAccess(!!t.aiFullAccess, req.body?.fullAccess);
   const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
   const r = aiAnswerQuestion(
     t.name,
     t.path,
     String(req.body?.requestId ?? ""),
     answers,
-    !!fullAccess,
+    fullAccess,
     extra,
   );
   res.status(r.ok ? 200 : 409).json(r);
