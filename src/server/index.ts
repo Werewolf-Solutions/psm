@@ -22,6 +22,7 @@ import {
   cancel as aiCancel,
   cancelPlanning,
   permittedFullAccess,
+  resolveExtraDirs,
   planningOverview,
   planningSessionKey,
   queuePlanReview,
@@ -262,7 +263,11 @@ const OVERRIDE_KEYS: (keyof Override)[] = [
   "aiModel",
   "aiEffort",
   "aiFullAccess",
+  "aiExtraProjects",
 ];
+
+/** How many other projects one AI may be pointed at. A guard, not a design. */
+const MAX_EXTRA_PROJECTS = 8;
 
 app.get("/api/projects", (_req, res) => {
   // version rides along on the dashboard's bootstrap payload — psm has no build
@@ -845,6 +850,19 @@ local.patch("/api/projects/:name", (req, res) => {
       }
       continue;
     }
+    if (key === "aiExtraProjects") {
+      // Names of other projects, never paths: psm resolves them itself before
+      // every turn. An unknown name is dropped here rather than saved and
+      // silently ignored later, so what the drawer shows back is what is real.
+      const known = new Set(getProjects().map((project) => project.name));
+      const chosen = (Array.isArray(val) ? val : [])
+        .map((entry: unknown) => String(entry ?? "").trim())
+        .filter((entry: string) => entry && entry !== name && known.has(entry));
+      const unique = [...new Set(chosen)].slice(0, MAX_EXTRA_PROJECTS);
+      if (unique.length) current.aiExtraProjects = unique;
+      else delete current.aiExtraProjects;
+      continue;
+    }
     // empty string / null clears the override for that field
     if (val === "" || val === null) delete (current as any)[key];
     else (current as any)[key] = val;
@@ -1272,9 +1290,29 @@ function aiTarget(name: string) {
       aiModel: parseModel(o.aiModel),
       aiEffort: parseEffort(o.aiEffort),
       aiFullAccess: !!o.aiFullAccess,
+      aiExtraProjects: [] as string[], // the workspace chat already sees everything
     };
   }
   return findProject(name);
+}
+
+/**
+ * The other directories this target's AI may work in.
+ *
+ * The browser chooses projects by name; the paths are looked up here, on every
+ * turn, from the current scan. A project that has been renamed, unlinked or
+ * deleted since the choice was made simply is not found, so the scope narrows
+ * on its own rather than pointing the CLI at whatever now sits at a
+ * remembered path. `resolveExtraDirs` then has the last word on symlinks,
+ * nesting and duplicates.
+ */
+function extraDirsFor(target: { name: string; path: string; aiExtraProjects?: string[] }): string[] {
+  const names = target.aiExtraProjects ?? [];
+  if (!names.length) return [];
+  const paths = names
+    .map((projectName) => findProject(projectName)?.path)
+    .filter((dir): dir is string => !!dir);
+  return resolveExtraDirs(target.path, paths);
 }
 
 // a compact rundown of every project, so the workspace chat knows what exists
@@ -1555,6 +1593,7 @@ local.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
       project.aiEffort,
       kickoffPrompt(plan),
       project.aiFullAccess,
+      extraDirsFor(project),
     );
     if (ai.ok) plan = planStore.markStarted(project.name, plan.id);
     res.status(ai.ok ? 200 : 409).json({
@@ -1575,7 +1614,7 @@ local.get("/api/projects/:name/ai/stream", (req, res) => {
   const engine = parseEngine(req.query.engine, t.aiEngine);
   const model = parseModel(req.query.model, t.aiModel);
   const effort = parseEffort(req.query.effort, t.aiEffort);
-  subscribeAi(res, t.name, t.path, engine, model, effort);
+  subscribeAi(res, t.name, t.path, engine, model, effort, extraDirsFor(t));
 });
 
 // send one message to the project's (or workspace's) AI
@@ -1587,7 +1626,17 @@ local.post("/api/projects/:name/ai", (req, res) => {
   const effort = parseEffort(req.body?.effort, t.aiEffort);
   const fullAccess = permittedFullAccess(!!t.aiFullAccess, req.body?.fullAccess);
   const extra = t.name === WORKSPACE_NAME ? workspaceRundown() : "";
-  const r = aiSend(t.name, t.path, engine, model, effort, String(req.body?.message ?? ""), fullAccess, extra);
+  const r = aiSend(
+    t.name,
+    t.path,
+    engine,
+    model,
+    effort,
+    String(req.body?.message ?? ""),
+    fullAccess,
+    extra,
+    extraDirsFor(t),
+  );
   res.status(r.ok ? 200 : 409).json(r);
 });
 

@@ -15,7 +15,15 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "psm-ai-"));
 const sessionsFile = path.join(sandbox, "sessions.json");
 process.env.PSM_SESSIONS_FILE = sessionsFile;
 
-const { permittedFullAccess, restoreCachedRecap } = await import("./ai.ts");
+const { permittedFullAccess, resolveExtraDirs, restoreCachedRecap, writableRootArgs } =
+  await import("./ai.ts");
+
+/** A directory that exists, since resolution is done against the real filesystem. */
+function repo(name: string): string {
+  const dir = path.join(sandbox, name);
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.realpathSync(dir);
+}
 
 /* ---------- how much authority one turn runs with ---------- */
 
@@ -106,4 +114,76 @@ test("the session store is written private, and whole", async () => {
     [],
     "a temp file left beside the store means the rename did not happen",
   );
+});
+
+/* ---------- which directories are in scope ---------- */
+
+test("a missing checkout drops out of scope rather than being passed on", () => {
+  const primary = repo("primary");
+  const gone = path.join(sandbox, "deleted-since");
+  assert.deepEqual(
+    resolveExtraDirs(primary, [gone]),
+    [],
+    "a path that no longer resolves must not reach the CLI",
+  );
+});
+
+test("a symlink is resolved to what it actually points at", () => {
+  const primary = repo("sym-primary");
+  const real = repo("sym-target");
+  const link = path.join(sandbox, "sym-link");
+  fs.symlinkSync(real, link);
+  assert.deepEqual(
+    resolveExtraDirs(primary, [link]),
+    [real],
+    "scope is decided on the real path, or a link out of the workspace would widen it silently",
+  );
+});
+
+test("a directory already inside the project is not listed again", () => {
+  const primary = repo("nest-primary");
+  const inside = repo(path.join("nest-primary", "packages"));
+  assert.deepEqual(
+    resolveExtraDirs(primary, [inside]),
+    [],
+    "the scope shown to the user must match what is actually widened",
+  );
+});
+
+test("one extra root swallows another nested inside it", () => {
+  const primary = repo("outer-primary");
+  const outer = repo("outer");
+  const inner = repo(path.join("outer", "inner"));
+  assert.deepEqual(resolveExtraDirs(primary, [inner, outer]), [outer]);
+});
+
+test("the same set in a different order is the same scope", () => {
+  const primary = repo("order-primary");
+  const a = repo("order-a");
+  const b = repo("order-b");
+  assert.deepEqual(
+    resolveExtraDirs(primary, [b, a]),
+    resolveExtraDirs(primary, [a, b]),
+    "order must not decide whether a conversation is forked",
+  );
+});
+
+test("duplicates collapse", () => {
+  const primary = repo("dup-primary");
+  const other = repo("dup-other");
+  assert.deepEqual(resolveExtraDirs(primary, [other, other]), [other]);
+});
+
+/* ---------- what each CLI is actually told ---------- */
+
+test("each directory becomes its own --add-dir", () => {
+  assert.deepEqual(
+    writableRootArgs(["/w/a", "/w/b"]),
+    ["--add-dir", "/w/a", "--add-dir", "/w/b"],
+    "both CLIs take the flag repeated, not a joined list",
+  );
+});
+
+test("no extra directories means no extra flags", () => {
+  assert.deepEqual(writableRootArgs([]), []);
 });

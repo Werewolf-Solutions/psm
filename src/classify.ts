@@ -112,6 +112,7 @@ export function merge(
       aiModel: o.aiModel?.trim() || null,
       aiEffort: o.aiEffort?.trim() || null,
       aiFullAccess: o.aiFullAccess ?? false,
+      aiExtraProjects: o.aiExtraProjects ?? [],
       attachments: o.attachments ?? [],
       overridden,
     };
