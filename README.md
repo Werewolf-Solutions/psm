@@ -252,6 +252,21 @@ Click **▶** on a card to open its cockpit:
   engine/model/effort/access memory, and the shared house rules as its system prompt.
   - **Persistent sessions** — the conversation survives closing/reopening and server
     restarts; it resumes the real session, so you never re-explain where you were.
+  - **Figures, not ASCII art** — psm's interaction protocol asks the AI to answer a
+    "show me how this fits together" question with a ` ```psm-figure ` block instead of
+    box art in a text fence, and the transcript renders each one as a real HTML surface
+    in place, between the paragraphs around it. A figure draws in an iframe sandboxed to
+    `allow-same-origin` and nothing else — scripts, forms, popups, and navigation off,
+    plus a CSP that cuts off the network — with psm's own colour tokens handed in so it
+    matches the cockpit in either theme. Each figure carries **fullscreen**, **copy
+    source**, and **download .html** controls; the transcript stores the block, not the
+    rendering, so figures survive a reload and the source is always recoverable. A plain
+    ` ```html ` block still means "here is some markup" and is shown as text.
+- **Workroom dependencies** — a room spanning several projects names, above the conversation,
+  every managed dependency between its members that is not passing, and links to the project
+  that owns each one. These are recorded observations, so opening a room never probes anybody's
+  endpoints, and an edge nobody has planned yet says *not observed* rather than claiming a
+  failure. An owner is only ever the project a manifest names — psm does not infer one from a URL.
 - **Session** — a read-only tab with the provider session id, model, effort, queue depth,
   current activity, and recent AI events for the project.
 - **Questions** — when an AI tool needs input, psm opens a structured answer popup.
@@ -265,8 +280,25 @@ Click **▶** on a card to open its cockpit:
   Hard provider limits also pause sending in the AI pane.
 - **Capabilities** — attach reusable workspace pieces (MCP servers, skills, docs, and
   API surfaces) to a project with a preview of the files psm will write.
-- **Deploy** — per-project **Staging** and **Production** commands, with a two-click
-  confirm on production and a "Guide me with AI" hand-off that walks you through it.
+- **Deploy** — per-project **Staging** and **Production** commands with a two-click
+  production confirm and a "Guide me with AI" hand-off. These are explicitly unmanaged
+  shell commands, and they remain the only way to actually deploy something today.
+
+  Alongside them, the **managed** desired-state engine specified in
+  [`docs/deploy/DEPLOYMENT-SYSTEM.md`](docs/deploy/DEPLOYMENT-SYSTEM.md) is built and wired in.
+  A project with a `.psm/deployments.json` manifest gets a Deploy pane that observes the
+  environment, builds a plan, blocks it when anything has drifted, takes an exact-digest
+  approval bound to what was reviewed, then runs it with live events, target locks, crash
+  recovery and rollback. Every one of the fifteen action kinds has an installed executor,
+  across a root-owned [host helper](host-helper/), DigitalOcean DNS, a GitHub release
+  controller and an external monitor.
+
+  **No executor has run against a real target yet.** The repository, droplet helper install
+  and monitor those adapters talk to do not exist, so a managed plan stops at the point it
+  would call a provider and says which connection is missing. Deploying anything today still
+  means the unmanaged commands above or
+  [`PUBLISHING-A-NEW-APP.md`](docs/deploy/PUBLISHING-A-NEW-APP.md). See
+  ["What is not proven yet"](docs/deploy/DEPLOYMENT-SYSTEM.md#0-what-is-built-today).
 
 ## CLI
 
@@ -311,8 +343,13 @@ house-rules.md       workspace-baseline AI rules, applied to every project (edit
 src/server/rules.ts  layered rules (baseline + per-project .psm/ overlay) + opt-in practices
 src/server/skills.ts "skills used by the agents" — mines Claude Code transcripts
 src/identity.ts      stable per-project ids, minted on demand into <project>/.psm/identity.json
+src/server/deploy/   the managed deployment engine — manifest, graph, connections/secrets,
+                     observation, planner, approval, durable store, runner and executors
+host-helper/         the root-owned Go service a target runs so psm can reconcile nginx,
+                     certificates and immutable release directories without a shell
+schemas/             the published JSON Schema for `.psm/deployments.json`
 <project>/.psm/      committed per-project psm config: rules.md overlay, profile.json (practices),
-                     identity.json (stable id)
+                     identity.json (stable id), deployments.json (managed deployment manifest)
 ```
 
 - **Auto** (never hand-edited): last activity, git branch/tag, detected stack, README/pkg

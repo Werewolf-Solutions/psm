@@ -1,0 +1,462 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://psm.werewolf.solutions/schemas/deployment-manifest.v1.schema.json",
+  "title": "PSM deployment manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "projectId", "environments"],
+  "properties": {
+    "apiVersion": { "const": "psm.werewolf.solutions/deployments/v1" },
+    "kind": { "const": "DeploymentManifest" },
+    "projectId": { "$ref": "#/$defs/projectId" },
+    "environments": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 30,
+      "items": { "$ref": "#/$defs/environment" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^prj_[a-f0-9]{20}$"
+    },
+    "resourceRef": {
+      "type": "string",
+      "pattern": "^resource:[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:#[a-z][a-z0-9-]*)?$"
+    },
+    "probeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "method"],
+      "properties": {
+        "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+        "method": { "enum": ["GET", "HEAD"] },
+        "timeoutMs": { "type": "integer", "minimum": 100, "maximum": 30000 },
+        "maxResponseBytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "followSameOriginRedirects": { "type": "boolean" }
+      }
+    },
+    "httpStatusProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "request", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "http-status@1" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "connection": { "$ref": "#/$defs/id" },
+        "request": { "$ref": "#/$defs/probeRequest" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "type": "integer", "minimum": 100, "maximum": 599 } }
+        }
+      }
+    },
+    "httpJsonProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "request", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "http-json@1" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "connection": { "$ref": "#/$defs/id" },
+        "request": { "$ref": "#/$defs/probeRequest" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "equals"],
+          "properties": {
+            "status": { "type": "integer", "minimum": 100, "maximum": 599 },
+            "equals": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path", "value"],
+                "properties": {
+                  "path": { "type": "string", "pattern": "^\\$(?:\\.[A-Za-z_][A-Za-z0-9_]*)+$" },
+                  "value": { "type": ["string", "number", "boolean", "null"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "githubChecksProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "repository", "commit", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "github-checks@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checks", "conclusion"],
+          "properties": {
+            "checks": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+            },
+            "conclusion": { "const": "success" }
+          }
+        }
+      }
+    },
+    "projectReleaseProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "projectId", "environment", "capability", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "project-release@1" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "environment": { "$ref": "#/$defs/id" },
+        "capability": { "$ref": "#/$defs/id" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": { "state": { "const": "active" } }
+        }
+      }
+    },
+    "backupPolicyProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "projectId", "environment", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "werewolf-backup-policy@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "projectId": { "$ref": "#/$defs/projectId" },
+        "environment": { "$ref": "#/$defs/id" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["scheduled", "lastSuccessMaxAgeHours"],
+          "properties": {
+            "scheduled": { "type": "boolean" },
+            "lastSuccessMaxAgeHours": { "type": "integer", "minimum": 1, "maximum": 720 }
+          }
+        }
+      }
+    },
+    "dependency": {
+      "oneOf": [
+        { "$ref": "#/$defs/httpStatusProbe" },
+        { "$ref": "#/$defs/httpJsonProbe" },
+        { "$ref": "#/$defs/githubChecksProbe" },
+        { "$ref": "#/$defs/projectReleaseProbe" },
+        { "$ref": "#/$defs/backupPolicyProbe" }
+      ]
+    },
+    "dnsResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "digitalocean-dns-record@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["zone", "type", "name", "valueFrom", "ttl"],
+          "properties": {
+            "zone": { "type": "string", "minLength": 3, "maxLength": 253 },
+            "type": { "const": "A" },
+            "name": { "$ref": "#/$defs/id" },
+            "valueFrom": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["connection", "field"],
+              "properties": {
+                "connection": { "$ref": "#/$defs/id" },
+                "field": { "const": "address" }
+              }
+            },
+            "ttl": { "type": "integer", "minimum": 30, "maximum": 86400 }
+          }
+        }
+      }
+    },
+    "directoryResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "host-release-directory@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["root", "retainReleases"],
+          "properties": {
+            "root": { "type": "string", "pattern": "^/" },
+            "retainReleases": { "type": "integer", "minimum": 2, "maximum": 100 }
+          }
+        }
+      }
+    },
+    "nginxResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "nginx-static-site@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hostname", "documentRoot", "spaFallback", "denyPrefixes", "cachePolicy", "securityHeaders"],
+          "properties": {
+            "hostname": { "type": "string", "minLength": 3, "maxLength": 253 },
+            "documentRoot": { "type": "string", "pattern": "^/" },
+            "spaFallback": { "type": "boolean" },
+            "denyPrefixes": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 30,
+              "items": { "type": "string", "pattern": "^/", "maxLength": 500 }
+            },
+            "cachePolicy": { "enum": ["vite-hashed", "no-cache"] },
+            "securityHeaders": { "const": "werewolf-static-spa@1" }
+          }
+        }
+      }
+    },
+    "tlsResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "letsencrypt-certificate@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hostname", "renewal"],
+          "properties": {
+            "hostname": { "type": "string", "minLength": 3, "maxLength": 253 },
+            "renewal": { "const": "automatic" }
+          }
+        }
+      }
+    },
+    "resource": {
+      "oneOf": [
+        { "$ref": "#/$defs/dnsResource" },
+        { "$ref": "#/$defs/directoryResource" },
+        { "$ref": "#/$defs/nginxResource" },
+        { "$ref": "#/$defs/tlsResource" }
+      ]
+    },
+    "releaseMetadataProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "request", "expect"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "release-metadata@1" },
+        "request": { "$ref": "#/$defs/probeRequest" },
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["commit", "psmArtifactId"],
+          "properties": {
+            "commit": { "const": "$release.commit" },
+            "psmArtifactId": { "const": "$release.psmArtifactId" },
+            "version": { "const": "$release.version" }
+          }
+        }
+      }
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "recipe", "resourceRefs", "artifact", "executor", "target", "verification"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "recipe": { "const": "static-ssh-nginx@1" },
+        "resourceRefs": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/resourceRef" }
+        },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "output", "buildProfile"],
+          "properties": {
+            "kind": { "const": "static-files@1" },
+            "output": { "type": "string", "minLength": 1, "maxLength": 500 },
+            "buildProfile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "publicInputs"],
+              "properties": {
+                "id": { "$ref": "#/$defs/id" },
+                "publicInputs": {
+                  "type": "object",
+                  "maxProperties": 100,
+                  "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
+                  "additionalProperties": { "type": "string", "maxLength": 2048 }
+                }
+              }
+            }
+          }
+        },
+        "executor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "connection", "sourceRepository", "prepareWorkflow", "releaseController"],
+          "properties": {
+            "kind": { "const": "github-actions@1" },
+            "connection": { "$ref": "#/$defs/id" },
+            "sourceRepository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+            "prepareWorkflow": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+\\.ya?ml$" },
+            "releaseController": { "const": "werewolf-static@1" }
+          }
+        },
+        "target": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "targetId", "observerConnection", "root"],
+          "properties": {
+            "kind": { "const": "ssh-release-directory@1" },
+            "targetId": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,199}$" },
+            "observerConnection": { "$ref": "#/$defs/id" },
+            "root": { "type": "string", "pattern": "^/" }
+          }
+        },
+        "verification": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/httpStatusProbe" },
+              { "$ref": "#/$defs/httpJsonProbe" },
+              { "$ref": "#/$defs/releaseMetadataProbe" }
+            ]
+          }
+        }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "unit", "monitorKey", "hostname", "maxObservationAgeSeconds"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "external-http-monitor@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "unit": { "$ref": "#/$defs/id" },
+        "monitorKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "hostname": { "type": "string", "minLength": 3, "maxLength": 253 },
+        "maxObservationAgeSeconds": { "type": "integer", "minimum": 30, "maximum": 86400 }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "risk", "releasePolicy", "connections", "dependencies", "resources", "units", "watch", "policy"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "risk": { "enum": ["development", "staging", "production"] },
+        "releasePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowedBranch", "requireReachableFromBranch", "requireChecks", "approval"],
+          "properties": {
+            "allowedBranch": { "type": "string", "minLength": 1, "maxLength": 250 },
+            "requireReachableFromBranch": { "type": "boolean" },
+            "requireChecks": { "type": "boolean" },
+            "approval": { "enum": ["authenticated-local-operator", "none"] }
+          }
+        },
+        "connections": {
+          "type": "object",
+          "maxProperties": 30,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind"],
+            "properties": {
+              "kind": {
+                "enum": [
+                  "github-actions@1",
+                  "digitalocean-api@1",
+                  "ssh-host-helper@1",
+                  "werewolf-api@1",
+                  "external-monitor@1"
+                ]
+              }
+            }
+          }
+        },
+        "dependencies": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/dependency" }
+        },
+        "resources": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/resource" }
+        },
+        "units": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 30,
+          "items": { "$ref": "#/$defs/unit" }
+        },
+        "watch": {
+          "type": "array",
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/watch" }
+        },
+        "policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["planTtlSeconds", "rollbackOnVerificationFailure", "allowDelete", "requireFreshWatchBeforeRelease"],
+          "properties": {
+            "planTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 3600 },
+            "rollbackOnVerificationFailure": { "type": "boolean" },
+            "allowDelete": { "type": "boolean" },
+            "requireFreshWatchBeforeRelease": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}

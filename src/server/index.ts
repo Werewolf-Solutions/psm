@@ -18,6 +18,7 @@ import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, start, stop, 
 import {
   activeSessions,
   aiLimit,
+  clearLimit,
   aiState,
   answerQuestion as aiAnswerQuestion,
   cancel as aiCancel,
@@ -112,6 +113,16 @@ import {
   setBackupEnabled,
   snapshots,
 } from "./backups.ts";
+import { createDeploymentRouter } from "./deploy/api.ts";
+import { GitHubArtifactPreparer } from "./deploy/artifact-preparer.ts";
+import { SecretBroker } from "./deploy/connections.ts";
+import { createDeploymentEngine } from "./deploy/engine.ts";
+import { defaultDeploymentAdapters } from "./deploy/executors.ts";
+import { defaultDeploymentSecretBackend } from "./deploy/keyring.ts";
+import { DeploymentRuntimeAdapters } from "./deploy/runtime-adapters.ts";
+import { deploymentFingerprintKey, DeploymentSecretGenerationStore } from "./deploy/secrets.ts";
+import { deploymentStore } from "./deploy/store.ts";
+import { DeploymentStreamTicketRegistry } from "./deploy/stream-tickets.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
@@ -119,6 +130,7 @@ const PORT = Number(process.env.PORT || 4317);
 
 const app = express();
 app.disable("x-powered-by");
+const deploymentStreamTickets = new DeploymentStreamTicketRegistry();
 
 /**
  * The whole API. psm always has a machine under it now — the hosted posture was
@@ -130,7 +142,10 @@ app.disable("x-powered-by");
  */
 const local = express.Router();
 
-app.use(agentGuard({ publicPaths: ["/api/agent"] }));
+app.use(agentGuard({
+  publicPaths: ["/api/agent"],
+  shortLivedQueryTicket: (request) => deploymentStreamTickets.validateRequest(request, agentSecret().createdAt),
+}));
 app.use(express.json({ limit: "2mb" }));
 
 // Resolve the signed-in session once per request and carry its Werewolf token,
@@ -1216,8 +1231,16 @@ local.post("/api/projects/:name/working/stop", (req, res) => {
 });
 
 // current provider usage limit for an engine (so the AI pane can warn upfront)
+// let the user dismiss a limit psm recorded — see clearLimit()
+local.delete("/api/ai/limit", (req, res) => {
+  const engine = parseEngine(req.query.engine, "claude");
+  res.json({ ok: true, cleared: clearLimit(engine) });
+});
+
 local.get("/api/ai/limit", (req, res) => {
-  res.json({ limit: aiLimit(parseEngine(req.query.engine, "claude")) });
+  // the model matters: a limit on a window that does not govern it is advisory
+  const engine = parseEngine(req.query.engine, "claude");
+  res.json({ limit: aiLimit(engine, parseModel(req.query.model)) });
 });
 
 local.get("/api/projects/:name/ai/usage", async (req, res) => {
@@ -1325,14 +1348,19 @@ function parseEngine(v: unknown, fallback: AiEngine): AiEngine {
   return v === "codex" || v === "claude" ? v : fallback;
 }
 
+// A supplied-but-empty model/effort means "use the provider's default", which is
+// a real choice and not the same as saying nothing. Only an absent field (not a
+// string at all) falls back to what the project last saved — otherwise clearing
+// the model when switching engines would silently re-inherit the old one.
 function parseModel(v: unknown, fallback: string | null = null): string | null {
-  const model = typeof v === "string" ? v.trim() : "";
-  return model || fallback || null;
+  if (typeof v !== "string") return fallback || null;
+  return v.trim() || null;
 }
 
 function parseEffort(v: unknown, fallback: string | null = null): string | null {
-  const effort = typeof v === "string" ? v.trim().toLowerCase() : "";
-  return /^[a-z][a-z0-9_-]{0,31}$/.test(effort) ? effort : fallback || null;
+  if (typeof v !== "string") return fallback || null;
+  const effort = v.trim().toLowerCase();
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(effort) ? effort : null;
 }
 
 // The AI target: a real project, or the workspace-wide chat (cwd = workspace root).
@@ -1913,6 +1941,19 @@ local.get("/api/work-sessions/:id/git", async (req, res) => {
   }
 });
 
+// The managed dependency edges between this room's projects that are not passing.
+// A room is where a cross-project break is actually coordinated, so it is worth
+// seeing next to the conversation rather than one project's Deploy pane at a time.
+// Recorded observations only: opening a room must not probe anybody's endpoints.
+local.get("/api/work-sessions/:id/deployments", (req, res) => {
+  try {
+    const room = workSessions.get(req.params.id);
+    res.json({ edges: deploymentEngine.service.crossProjectDependencies(room.projects) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
 /* ---------- workrooms: several projects, one conversation ---------- */
 
 function workroomError(res: Response, err: unknown): void {
@@ -1992,6 +2033,43 @@ local.post("/api/work-sessions/:id/archive", (req, res) => {
   }
 });
 
+/* ---------- managed deployments ---------- */
+
+const deploymentSecretBroker = new SecretBroker({
+  backend: defaultDeploymentSecretBackend(),
+  generations: new DeploymentSecretGenerationStore(deploymentStore),
+  fingerprintKey: deploymentFingerprintKey(),
+});
+const deploymentRuntimeAdapters = new DeploymentRuntimeAdapters({
+  store: deploymentStore,
+  broker: deploymentSecretBroker,
+});
+const deploymentEngine = createDeploymentEngine({
+  store: deploymentStore,
+  secretBroker: deploymentSecretBroker,
+  projects: getProjects,
+  observations: deploymentRuntimeAdapters.observations,
+  adapters: [
+    ...defaultDeploymentAdapters(deploymentRuntimeAdapters.observations),
+    ...deploymentRuntimeAdapters.actionAdapters(),
+  ],
+  artifactPreparationAvailable: true,
+});
+const deploymentArtifactPreparer = new GitHubArtifactPreparer({
+  service: deploymentEngine.service,
+  store: deploymentStore,
+  broker: deploymentSecretBroker,
+});
+local.use(createDeploymentRouter({
+  service: deploymentEngine.service,
+  currentUser,
+  localRequest,
+  runner: deploymentEngine.controller,
+  preparer: deploymentArtifactPreparer,
+  streamTickets: deploymentStreamTickets,
+  agentGeneration: () => agentSecret().createdAt,
+}));
+
 // The one line that decides whether this process can touch the machine.
 app.use(local);
 
@@ -2026,14 +2104,40 @@ app.get(/^(?!\/api\/).*/, (req, res, next) => {
 // psm never leaves loopback. The public face is a static site; see src/mode.ts.
 const HOST = "127.0.0.1";
 
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`psm ${describeMode()}`);
   console.log(`  → http://${HOST}:${PORT}`);
   if (acceptsPairedOrigins()) {
     console.log(`  → pairing token: ${agentSecret().token}`);
     console.log(`  → paired origins: ${hostedOrigins().join(", ") || "none"}`);
   }
+  // Durable deployment work outlives the process that started it. Resuming is
+  // deliberately not automatic for every run: a run that died after submitting
+  // a side effect is held for a person, because only an operator can say what
+  // the target actually received.
+  for (const recovered of deploymentEngine.start()) {
+    if (recovered.disposition === "resumed") continue;
+    console.log(`  → deployment run ${recovered.runId} (${recovered.state}) needs attention: ${recovered.disposition}`);
+  }
 });
+
+/**
+ * Stop taking deployment work before the process goes away.
+ *
+ * Without this, Ctrl-C during a run leaves its target lock held until the lease
+ * expires and leaves the run's last durable state as whatever it happened to
+ * reach — the runner's own shutdown path records `interrupted` instead, which
+ * is the difference between "we do not know" and a plausible-looking lie.
+ */
+let stopping = false;
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    if (stopping) return;
+    stopping = true;
+    server.close();
+    deploymentEngine.shutdown().finally(() => process.exit(0));
+  });
+}
 
 startRuntimeDiscovery();
 setTimeout(() => runDueBackups(getProjects()), 30_000).unref();

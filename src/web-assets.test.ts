@@ -190,3 +190,97 @@ test("a workroom's questions and URLs never pretend to be a project's", () => {
   assert.match(app, /function workroomHash\(/);
   assert.match(app, /WS\.kind === "work" && WS\.id\s*\)\s*\{\s*history\.replaceState\(null, "", workroomHash/);
 });
+
+test("AI figures render sandboxed, with scripts off", () => {
+  // A ```html block from the model is untrusted markup. It renders in an iframe
+  // whose sandbox grants same-origin (only so the height can be measured) and
+  // nothing else — allow-scripts here would hand the model the cockpit's origin.
+  const js = read("app.js");
+  const sandbox = js.match(/frame\.setAttribute\("sandbox", "([^"]*)"\);\n\s*frame\.addEventListener\("load"/);
+  assert.ok(sandbox, "the figure iframe should set an explicit sandbox");
+  assert.equal(sandbox[1], "allow-same-origin");
+  assert.match(js, /default-src 'none'/, "the figure document's CSP should cut off the network");
+});
+
+test("the transcript renders the same fence the AI is told to write", () => {
+  // The rule (src/server/ai.ts) and the renderer are two halves of one feature:
+  // if they ever disagree on the tag, figures silently arrive as code again.
+  const rules = fs.readFileSync(path.join(WEB, "..", "src", "server", "ai.ts"), "utf8");
+  // the rule lives in a template literal, so its fences are backslash-escaped
+  assert.match(rules, /(?:\\`){3}psm-figure/, "the protocol should ask for a psm-figure block");
+  assert.match(read("app.js"), /const FIGURE_FENCE = \/```\(\?:psm-figure\|/);
+});
+
+test("assistant text never reaches the transcript as markup", () => {
+  // el(tag, cls, html) assigns innerHTML. Assistant text goes through textContent
+  // instead; only the fenced figure is allowed to be markup, and only in the frame.
+  const js = read("app.js");
+  assert.match(js, /part\.textContent = trimmed;/, "text parts of an answer stay text");
+  assert.ok(
+    !/el\("div", "ai-text", /.test(js),
+    "ai-text must not be built through el()'s innerHTML argument",
+  );
+});
+
+test("the AI stream always states the model and effort, even when empty", () => {
+  // The server reads an absent model/effort as "unspecified" and falls back to
+  // the project's saved values. Omitting them when the user clears them — which
+  // is exactly what switching engines does — made the old model and effort come
+  // straight back on the reconnect, overwriting the new selection.
+  const js = read("app.js");
+  const params = js.match(/const params = new URLSearchParams\(\{\s*engine: WS\.engine,([\s\S]*?)\}\);/);
+  assert.ok(params, "connectAi should build the stream query in one object");
+  assert.match(params[1], /model: WS\.model \|\| ""/, "model is always sent");
+  assert.match(params[1], /effort: WS\.effort \|\| ""/, "effort is always sent");
+});
+
+test("a late model catalog cannot undo a newer choice", () => {
+  // Discovery is a live CLI round-trip. Rendering the model/effort captured when
+  // it started would silently reset whatever the user picked while it ran, so
+  // the selection is read back at render time instead.
+  const js = read("app.js");
+  assert.match(
+    js,
+    /async function refreshModelCatalog\(project, engine, selection, effortSelect\)/,
+    "refreshModelCatalog should take a selection getter, not fixed values",
+  );
+  assert.match(js, /const \{ model, effort \} = selection\(\);/);
+  assert.ok(
+    !/refreshModelCatalog\([^)]*,\s*""\s*,\s*""\s*,/.test(js),
+    "no caller should still pass frozen model/effort strings",
+  );
+});
+
+test("a workroom's dependency rows are text, and its owner links are real routes", () => {
+  // The detail and the dependency id come from another repository's committed
+  // manifest, so they are exactly the strings that must not be able to become
+  // markup. el(tag, cls, html) assigns innerHTML; these go through textContent.
+  const js = read("app.js");
+  const render = js.match(/async function renderRoomDependencies\([\s\S]*?\n}\n/);
+  assert.ok(render, "renderRoomDependencies should exist");
+  const body = render[0];
+  for (const field of ["edge.detail", "edge.dependencyId"]) {
+    assert.ok(
+      new RegExp(`textContent = ${field.replace(".", "\\.")}`).test(body),
+      `${field} must be written as text, never markup`,
+    );
+  }
+  // The owner label is a ternary, so check the assignment rather than the operand.
+  assert.match(body, /link\.textContent = edge\.ownerProjectName\s*\?/, "the owner label is text");
+  assert.ok(
+    !/el\("(span|button)", "ws-room-dep[^"]*", [^)]/.test(body),
+    "no row field may go through el()'s html argument",
+  );
+  // A row is only useful if it reaches the project that owns the edge.
+  assert.match(body, /projectHash\(routeKey\(owner\), "deploy"\)/, "the owner link opens that project's Deploy pane");
+  assert.match(body, /link\.disabled = true/, "an owner psm cannot find is shown, but not linked");
+});
+
+test("opening a workroom reads recorded dependency state, never probes", () => {
+  // A view that fetches must not be able to trigger network calls to somebody
+  // else's endpoints. The room asks the server for what was already recorded.
+  const js = read("app.js");
+  assert.match(js, /\/api\/work-sessions\/\$\{encodeURIComponent\(roomId\)\}\/deployments/);
+  const server = fs.readFileSync(path.join(WEB, "..", "src", "server", "index.ts"), "utf8");
+  assert.match(server, /crossProjectDependencies\(room\.projects\)/, "the room endpoint reads stored edges");
+});

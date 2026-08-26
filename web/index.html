@@ -253,6 +253,8 @@
       </div>
       <!-- Which projects this workroom spans. Hidden for an ordinary project. -->
       <div class="ws-members" id="ws-members" hidden></div>
+      <!-- Managed dependency edges between this room's projects that are not passing. -->
+      <div class="ws-room-deps" id="ws-room-deps" hidden></div>
       <div class="ws-tabs" id="ws-tabs">
         <button class="ws-tab" data-pane="plan">Plan</button>
         <button class="ws-tab" data-pane="notes">Notes</button>
@@ -456,7 +458,7 @@
           </div>
           <div class="ws-webmain">
             <div class="ws-webframe" id="ws-webframe"></div>
-            <aside class="ws-notes" id="ws-notes" hidden>
+            <aside class="dev-notes" id="web-notes" hidden>
               <div class="notes-head">
                 <h3>Change notes</h3>
                 <button class="btn" id="web-notes-clear" title="Remove every note">Clear</button>
@@ -467,19 +469,79 @@
           </div>
         </div>
         <div class="ws-deploy" data-pane="deploy" hidden>
-          <div class="ws-deploybar">
-            <div class="ws-targets" id="ws-targets">
-              <button class="ws-target on" data-target="staging">Staging</button>
-              <button class="ws-target" data-target="production">Production</button>
+          <div class="dep-managed" id="ws-deploy-managed" hidden>
+            <header class="dep-head">
+              <div>
+                <div class="dep-kicker">Managed deployment</div>
+                <h2 id="dep-managed-title">Deploy</h2>
+                <p id="dep-managed-subtitle">Loading desired and observed state…</p>
+              </div>
+              <span class="dep-risk" id="dep-risk"></span>
+            </header>
+            <div class="dep-envs" id="dep-envs"></div>
+            <div class="dep-toolbar">
+              <div class="dep-toolbar-copy" id="dep-plan-meta">Discover current state before approving any mutation.</div>
+              <label class="dep-artifact-picker" for="dep-artifact">
+                <span>Artifact</span>
+                <select id="dep-artifact" disabled>
+                  <option value="">No prepared artifacts</option>
+                </select>
+              </label>
+              <button class="btn" id="dep-prepare">Prepare artifact</button>
+              <button class="btn" id="dep-discover">Discover changes</button>
             </div>
-            <code class="ws-depcmd" id="ws-depcmd">—</code>
-            <span class="ws-dep-status" id="ws-dep-status"></span>
-            <button class="btn" id="ws-dep-ai" title="Ask the AI to walk you through deploying">Guide me with AI</button>
-            <button class="btn" id="ws-dep-download" title="Download the whole log for this deploy">⤓ Log</button>
-            <button class="btn" id="ws-dep-stop" hidden>■ Stop</button>
-            <button class="btn btn-primary" id="ws-dep-run">Deploy</button>
+            <div class="dep-content">
+              <section class="dep-summary" id="dep-summary"></section>
+              <section class="dep-section">
+                <div class="dep-section-head"><h3>Readiness</h3><span id="dep-readiness-count"></span></div>
+                <div class="dep-list" id="dep-readiness"></div>
+              </section>
+              <section class="dep-section" id="dep-connections-section">
+                <div class="dep-section-head"><h3>Connections</h3><span>values stay local</span></div>
+                <div class="dep-connections" id="dep-connections"></div>
+              </section>
+              <section class="dep-section" id="dep-plan-section" hidden>
+                <div class="dep-section-head"><h3>Exact plan</h3><span id="dep-plan-digest"></span></div>
+                <div class="dep-plan" id="dep-plan"></div>
+                <label class="dep-ack" id="dep-ack-wrap" hidden>
+                  <input id="dep-ack" type="checkbox" />
+                  <span id="dep-ack-copy">I reviewed this exact plan and its rollback behavior.</span>
+                </label>
+                <div class="dep-approve-row">
+                  <span id="dep-approval-note"></span>
+                  <button class="btn btn-primary" id="dep-approve" disabled>Approve and deploy</button>
+                </div>
+              </section>
+              <section class="dep-section" id="dep-run-section" hidden>
+                <div class="dep-section-head"><h3 id="dep-run-title">Deployment run</h3><span id="dep-run-state"></span></div>
+                <div class="dep-phases" id="dep-phases"></div>
+                <div class="dep-events" id="dep-events"></div>
+                <div class="dep-run-actions">
+                  <button class="btn" id="dep-cancel">Request cancellation</button>
+                </div>
+              </section>
+              <section class="dep-section">
+                <div class="dep-section-head"><h3>Retained releases</h3><span>rollback never rebuilds</span></div>
+                <div class="dep-releases" id="dep-releases"></div>
+              </section>
+            </div>
           </div>
-          <div class="ws-console" id="ws-depconsole"></div>
+          <div class="dep-legacy" id="ws-deploy-legacy">
+            <div class="dep-legacy-note"><strong>Unmanaged command</strong><span>PSM cannot prove its artifact, target state, verification or rollback.</span></div>
+            <div class="ws-deploybar">
+              <div class="ws-targets" id="ws-targets">
+                <button class="ws-target on" data-target="staging">Staging</button>
+                <button class="ws-target" data-target="production">Production</button>
+              </div>
+              <code class="ws-depcmd" id="ws-depcmd">—</code>
+              <span class="ws-dep-status" id="ws-dep-status"></span>
+              <button class="btn" id="ws-dep-ai" title="Ask the AI to walk you through deploying">Guide me with AI</button>
+              <button class="btn" id="ws-dep-download" title="Download the whole log for this deploy">⤓ Log</button>
+              <button class="btn" id="ws-dep-stop" hidden>■ Stop</button>
+              <button class="btn btn-primary" id="ws-dep-run">Run unmanaged deploy</button>
+            </div>
+            <div class="ws-console" id="ws-depconsole"></div>
+          </div>
         </div>
       </div>
     </section>

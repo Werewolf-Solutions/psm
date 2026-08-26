@@ -132,6 +132,8 @@ function presentedToken(req: express.Request): string {
 export interface GuardOptions {
   /** Paths a paired origin may call without the token (discovery only). */
   publicPaths?: string[];
+  /** A narrowly scoped, short-lived query credential for endpoints such as EventSource streams. */
+  shortLivedQueryTicket?: (request: express.Request) => boolean;
 }
 
 /**
@@ -194,7 +196,8 @@ export function agentGuard(options: GuardOptions = {}): express.RequestHandler {
 
     // The token is what actually authenticates, and only a non-loopback origin
     // has to present one: reaching loopback already means being on this machine.
-    if (!loopbackOrigin && !publicPaths.has(req.path) && !tokenMatches(presentedToken(req))) {
+    const shortTicket = options.shortLivedQueryTicket?.(req) === true;
+    if (!loopbackOrigin && !publicPaths.has(req.path) && !shortTicket && !tokenMatches(presentedToken(req))) {
       return res.status(401).json({
         error: "pair this browser with the agent first",
         code: "agent_unpaired",

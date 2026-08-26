@@ -1,0 +1,37 @@
+[Unit]
+Description=PSM least-privilege deployment host helper
+After=local-fs.target
+ConditionPathIsDirectory=/etc/psm-deploy/targets
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/psm-host-helper serve --socket-group psm-deploy
+User=root
+Group=root
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ReadWritePaths=/etc/nginx/sites-available /etc/nginx/sites-enabled /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /var/www /var/lib/psm-deploy /run/psm-deploy
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+LockPersonality=yes
+RuntimeDirectory=psm-deploy
+RuntimeDirectoryMode=0750
+StateDirectory=psm-deploy
+StateDirectoryMode=0750
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

@@ -148,7 +148,9 @@
   function agentStream(path) {
     if (!AGENT.base) return new EventSource(path);
     const url = new URL(AGENT.base + path);
-    if (AGENT.token) url.searchParams.set("agentToken", AGENT.token);
+    // Managed deployment streams use a short-lived, run-bound ticket. Do not also leak the
+    // long-lived pairing credential into browser history/server access logs.
+    if (AGENT.token && !url.searchParams.has("ticket")) url.searchParams.set("agentToken", AGENT.token);
     return new EventSource(url.toString());
   }
 

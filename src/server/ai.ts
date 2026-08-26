@@ -162,7 +162,13 @@ Use 1-3 questions. Options are optional. Do not wrap the marker in a code fence 
 Only in a dedicated psm planner session, emit one <psm-plan> JSON marker with id, title, phases, and notes. Each phase has id, title, summary, and steps; each step has id, text, done, and children. Normal project-agent sessions implement confirmed plans and must not create plan markers.
 Only in a dedicated psm reviewer session, emit one <psm-plan-review> marker with planId, revision, summary, and issues. Each issue has severity (info, warning, or blocking), message, and optional phaseId/stepId.
 While executing a confirmed plan, report durable progress with <psm-plan-progress>{"planId":"...","revision":1,"completedStepIds":[],"blockedStepIds":[]}</psm-plan-progress>.
-Never wrap psm markers in Markdown fences.`;
+Never wrap psm markers in Markdown fences.
+When something is better shown than described - an architecture, a data flow, a sequence, a timeline, a state machine, a comparison, a route table, a small dashboard of numbers - do not draw it as ASCII or box art, and do not settle for a bare Markdown table. Emit a psm figure block, which psm renders as a real, sandboxed HTML surface inline in the transcript, between the paragraphs around it:
+\`\`\`psm-figure Optional title
+<div style="...">a self-contained fragment</div>
+\`\`\`
+Rules for a figure: inline CSS and inline SVG only; no <script>, no forms, no external files, fonts, or images (the frame runs with scripts off and a CSP that blocks the network, so any of those simply will not appear). psm's own CSS variables are available inside it - --bg, --bg-soft, --card, --card-hover, --line, --text, --muted, --faint, --accent, and the --st-* status colours - so use them instead of hard-coded colours and the figure will match the cockpit in either theme. Keep it under about 200 lines, size it in relative units so it reflows, and keep the explanation in the text outside the block. Use several figures in one answer when there are several things to show.
+A fenced \`\`\`html block is not a figure - it still means "here is some markup" and is shown as code. \`\`\`psm-figure means "draw this". If the visual belongs in the product rather than the conversation, build it as a real component in the project instead and say so.`;
 
 const MAX_LOG = 2000;
 const MAX_PERSIST = 400; // transcript lines kept on disk per project
@@ -214,7 +220,15 @@ function loadSessions(): void {
       question: p.question ?? null,
     });
   }
-  if (data.limits) Object.assign(limits, data.limits);
+  // A limit is a cached provider verdict, not a fact about the account, and a
+  // wrong one locks the user out of an engine that works. Restore only the
+  // advisory ones: a hard limit that is still real is re-reported by the very
+  // next turn, so the worst a restart costs is one refused turn — far less than
+  // being stranded for a week on a verdict psm misread.
+  for (const [engine, limit] of Object.entries(data.limits || {})) {
+    const l = limit as Partial<LimitState>;
+    if (l && !l.hard) limits[engine as AiEngine] = l as LimitState;
+  }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -260,6 +274,7 @@ interface LimitState {
   until: number | null; // epoch ms the limit resets, if known
   at: number; // when we recorded it
   hard: boolean; // true = actually blocked; false = a "you're getting close" warning
+  scope: string | null; // which window it was reported for, e.g. "seven_day_opus"
 }
 const limits: Partial<Record<AiEngine, LimitState>> = {};
 
@@ -274,13 +289,81 @@ function parseResetAt(message: string): number | null {
   return null;
 }
 
-function setLimit(engine: AiEngine, message: string, until: number | null, hard: boolean): void {
-  limits[engine] = { message: message.slice(0, 300), until, at: Date.now(), hard };
+function setLimit(
+  engine: AiEngine,
+  message: string,
+  until: number | null,
+  hard: boolean,
+  scope: string | null = null,
+): void {
+  limits[engine] = { message: message.slice(0, 300), until, at: Date.now(), hard, scope };
   saveSessionsSoon();
 }
 
-/** The active limit for an engine, or null. Clears itself once the window passes. */
-export function aiLimit(engine: AiEngine): LimitState | null {
+const MODEL_SCOPE = "model:";
+
+/** A limit the provider raised about one model rather than a usage window. */
+function modelScope(model: AiModel): string | null {
+  const value = model?.trim().toLowerCase();
+  return value ? `${MODEL_SCOPE}${value}` : null;
+}
+
+/** Human name for one of the provider's usage windows. */
+export function limitWindowLabel(scope: string | null): string | null {
+  switch (scope) {
+    case "five_hour": return "5-hour";
+    case "seven_day": return "7-day";
+    case "seven_day_opus": return "7-day Opus";
+    case "seven_day_sonnet": return "7-day Sonnet";
+    case "seven_day_overage_included": return "7-day (included overage)";
+    case "overage": return "extra usage";
+    default: return null;
+  }
+}
+
+/**
+ * Does a limit recorded for one window actually block a turn on `model`?
+ *
+ * The provider reports which window it rejected. Some are model-specific: a
+ * spent weekly Opus allowance says nothing about a Sonnet turn, and treating it
+ * as a blanket "out of usage" pauses a chat that would have run fine. An
+ * unscoped limit — or one on a window that covers every model — always applies.
+ */
+export function limitAppliesTo(scope: string | null, model: AiModel): boolean {
+  if (scope === "seven_day_opus") return /opus/i.test(model || "");
+  if (scope === "seven_day_sonnet") return /sonnet/i.test(model || "");
+  // a rejection the provider raised about one model — "out of usage credits,
+  // switch to another model" — governs that model alone
+  if (scope?.startsWith(MODEL_SCOPE)) {
+    const blocked = scope.slice(MODEL_SCOPE.length);
+    return !!model && model.trim().toLowerCase() === blocked;
+  }
+  return true;
+}
+
+/**
+ * The active limit for an engine, or null. Clears itself once the window passes.
+ *
+ * `model` is the model the caller is about to use: a hard limit on a window that
+ * does not govern it is downgraded to an advisory rather than blocking the turn.
+ */
+/**
+ * Forget an engine's recorded limit.
+ *
+ * The provider is the authority, and psm's copy can be wrong. When it is, the
+ * user needs a way out that is not "wait a week" — so the banner offers one.
+ */
+export function clearLimit(engine: AiEngine): boolean {
+  if (!limits[engine]) return false;
+  delete limits[engine];
+  saveSessionsSoon();
+  for (const s of sessions.values()) {
+    if (s.engine === engine) broadcast(s, "limit", null);
+  }
+  return true;
+}
+
+export function aiLimit(engine: AiEngine, model: AiModel = null): LimitState | null {
   const l = limits[engine];
   if (!l) return null;
   const expired = l.until ? Date.now() >= l.until : Date.now() - l.at > 15 * 60_000;
@@ -289,6 +372,7 @@ export function aiLimit(engine: AiEngine): LimitState | null {
     saveSessionsSoon();
     return null;
   }
+  if (l.hard && !limitAppliesTo(l.scope, model)) return { ...l, hard: false };
   return l;
 }
 
@@ -1034,10 +1118,31 @@ function handleClaudeLine(s: AiSession, line: string) {
   if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status) {
     const info = ev.rate_limit_info;
     const until = info.resetsAt ? info.resetsAt * 1000 : null;
-    if (info.status === "rejected") {
-      noteLimit(s, "claude", "Claude usage limit reached.", until, true);
+    // `rateLimitType` says which window this verdict is about. Keep it: some
+    // windows only govern one model family, and a blanket pause on those is how
+    // a spent weekly Opus allowance used to block a Sonnet chat for a week.
+    const scope = typeof info.rateLimitType === "string" ? info.rateLimitType : null;
+    const which = limitWindowLabel(scope);
+    const window = which ? `${which} ` : "";
+    // "out of usage credits" is not a spent subscription window: the plan will
+    // not fund *this model*, and the provider's own advice is to switch models.
+    // Blocking the whole engine strands the user on a model that works fine.
+    const model = s.actualModel || s.model;
+    const credits = info.errorCode === "credits_required"
+      || info.overageDisabledReason === "out_of_credits";
+    if (info.status === "rejected" && credits && modelScope(model)) {
+      noteLimit(
+        s,
+        "claude",
+        `Claude has no usage credits for ${model}. Switch models, or add credits at claude.ai/settings/usage.`,
+        until,
+        true,
+        modelScope(model),
+      );
+    } else if (info.status === "rejected") {
+      noteLimit(s, "claude", `Claude ${window}usage limit reached.`, until, true, scope);
     } else if (info.status === "allowed_warning") {
-      noteLimit(s, "claude", "Approaching Claude usage limit.", until, false);
+      noteLimit(s, "claude", `Approaching Claude ${window}usage limit.`, until, false, scope);
     }
   }
   if (ev.type === "system" && ev.subtype === "init") {
@@ -1066,7 +1171,13 @@ function handleClaudeLine(s: AiSession, line: string) {
   if (ev.type === "result") {
     const text = String(ev.result || "");
     if (ev.is_error) pushEvent(s, sys(`[error] ${text || ev.subtype || "failed"}`));
-    if (isLimitText(text)) noteLimit(s, "claude", text || "Claude usage limit reached.", parseResetAt(text), true);
+    if (isCreditsText(text) && ev.is_error) {
+      // the CLI sometimes reports the credits refusal only as the turn's error
+      const model = s.actualModel || s.model;
+      noteLimit(s, "claude", text, parseResetAt(text), true, modelScope(model));
+    } else if (resultIsLimit(ev)) {
+      noteLimit(s, "claude", text || "Claude usage limit reached.", parseResetAt(text), true);
+    }
     if (Array.isArray(ev.permission_denials) && ev.permission_denials.length)
       pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked — turn on Full access to let the AI run commands`));
   }
@@ -1074,13 +1185,43 @@ function handleClaudeLine(s: AiSession, line: string) {
 
 const isLimitText = (t: string) => /usage limit|rate limit|quota|too many requests|429/i.test(t);
 
+/**
+ * A refusal to fund *one model*, not a spent usage window.
+ *
+ * "You're out of usage credits. Switch to another model" is advice, not a wall:
+ * the other models on the plan still work, so this must never pause the engine.
+ */
+const isCreditsText = (t: string) =>
+  /out of usage credits|usage credits|credits_required|switch to another model/i.test(t);
+
+/**
+ * Does a Claude `result` event mean the provider actually blocked the turn?
+ *
+ * Only a failed turn's text is evidence. On a good turn `result` holds the
+ * assistant's own reply, and a reply that merely discusses usage limits must not
+ * pause the chat for the whole engine. The stream's `rate_limit_event` is the
+ * real signal; this is the fallback for turns that fail without one.
+ */
+export function resultIsLimit(ev: { is_error?: unknown; result?: unknown }): boolean {
+  return !!ev?.is_error && isLimitText(String(ev?.result ?? ""));
+}
+
 /** Record a limit hit during a turn, tell the open pane, and remember it. */
-function noteLimit(s: AiSession, engine: AiEngine, message: string, until: number | null, hard: boolean): void {
-  // only a hard limit corrupts the turn — a warning rides along a good reply,
-  // so flagging turnLimited would wrongly make finishTurn() drop the session id.
-  if (hard) s.turnLimited = true;
-  setLimit(engine, message, until, hard);
-  broadcast(s, "limit", aiLimit(engine));
+function noteLimit(
+  s: AiSession,
+  engine: AiEngine,
+  message: string,
+  until: number | null,
+  hard: boolean,
+  scope: string | null = null,
+): void {
+  setLimit(engine, message, until, hard, scope);
+  const effective = aiLimit(engine, s.actualModel || s.model);
+  // only a limit that actually blocks *this* session corrupts the turn — a
+  // warning rides along a good reply, so flagging turnLimited would wrongly make
+  // finishTurn() drop the session id.
+  if (effective?.hard) s.turnLimited = true;
+  broadcast(s, "limit", effective);
 }
 
 function extractModel(ev: any): AiModel {
@@ -1170,7 +1311,7 @@ export function send(
   if (s.question) return { ok: false, question: true, error: "AI is waiting for your answer" };
   // refuse to accept a turn into a known usage limit — it would just fail and
   // risk advancing the session id for nothing
-  const limit = aiLimit(engine);
+  const limit = aiLimit(engine, model);
   if (limit?.hard) return { ok: false, limited: true, error: limit.message };
 
   // show the user's message in the transcript now, in the order it was sent
@@ -1378,7 +1519,7 @@ export function startFreshAgentSession(
   fullAccess: boolean,
   extraDirs: string[] = [],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
-  const limit = aiLimit(engine);
+  const limit = aiLimit(engine, model);
   if (limit?.hard) return { ok: false, error: limit.message, limited: true };
   try {
     resetConversation(project, cwd, engine, model, effort, extraDirs);
@@ -1519,7 +1660,7 @@ function finishTurn(s: AiSession) {
 
   // a hard limit just tripped — don't fire queued messages into it; drop them
   // with a notice rather than burning the queue on turns that would only fail
-  if (s.queue.length && aiLimit(s.engine)?.hard) {
+  if (s.queue.length && aiLimit(s.engine, s.actualModel || s.model)?.hard) {
     const n = s.queue.length;
     s.queue = [];
     pushEvent(s, sys(`[psm] usage limit — ${n} queued message${n > 1 ? "s" : ""} not sent`));
@@ -1713,7 +1854,7 @@ export function subscribeAi(
   }
   if (s.summary) // show the last recap instantly; the client refreshes it if stale
     res.write(`event: recap\ndata: ${JSON.stringify({ summary: s.summary })}\n\n`);
-  const limit = aiLimit(engine); // surface a usage limit before the user types anything
+  const limit = aiLimit(engine, model); // surface a usage limit before the user types anything
   if (limit) res.write(`event: limit\ndata: ${JSON.stringify(limit)}\n\n`);
 
   s.subscribers.add(res);

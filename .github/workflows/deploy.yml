@@ -17,12 +17,12 @@ on:
 # One workflow, two targets. Which one is decided by the environment: a push to
 # master goes to production, and the Actions "Run workflow" button offers either.
 #
-# Credentials are *not* configured here. DEPLOY_HOST / DEPLOY_USER /
-# DEPLOY_SSH_KEY come from organization secrets, so every Werewolf app repo
-# inherits one set and rotating the key is a single edit. An environment may
-# define a secret of the same name, and GitHub prefers the environment's — that
-# is the whole mechanism by which staging reaches a different machine without a
-# second workflow.
+# Credentials are *not* configured here. Prefer DEPLOY_HOST / DEPLOY_USER /
+# DEPLOY_SSH_KEY on each GitHub deployment environment, with a dedicated key per
+# project/environment. GitHub prefers an environment secret over a repository or
+# organization secret of the same name; that is also how staging reaches a
+# different machine without a second workflow. Organization secrets remain a
+# legacy fallback while targets migrate away from the shared key.
 #
 # Per-environment *non*-secrets are environment variables, because a hostname is
 # not a secret and being able to read it in the UI is worth more than hiding it:
@@ -96,8 +96,8 @@ jobs:
           [ -n "$DEPLOY_SSH_KEY" ] || missing="$missing DEPLOY_SSH_KEY"
           if [ -n "$missing" ]; then
             echo "::error::environment '$ENVIRONMENT' is missing:$missing"
-            echo "Set them as organization secrets (Werewolf-Solutions → Settings →"
-            echo "Secrets → Actions), or per environment to override the org value."
+            echo "Set them on the repository's GitHub deployment environment."
+            echo "Organization secrets are a legacy fallback, not the preferred scope."
             exit 1
           fi
           case "$DEPLOY_SSH_KEY" in

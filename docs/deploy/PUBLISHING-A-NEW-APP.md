@@ -1,5 +1,9 @@
 # Publishing a new app to `*.werewolf.solutions`
 
+> **Current/manual runbook.** This describes the operations available today. The target
+> PSM-managed model—reconciliation, exact-plan approval, immutable releases, rollback and
+> external monitoring—is specified in [`DEPLOYMENT-SYSTEM.md`](DEPLOYMENT-SYSTEM.md).
+
 The steps to put a new app on its own subdomain, in the order they have to happen,
 with each one marked by how much of it is already automated. Written from todo-app's
 `docs/DEPLOY.md` and psm's own deploy; both are static apps talking to werewolf-dapp's
@@ -22,9 +26,10 @@ browser ──── https://<app>.werewolf.solutions   static files, nginx, no 
 ```
 
 **No new process on the droplet.** It has 1 GB of RAM shared by dapp prod (5000),
-staging (5100), redis and nginx, and `werewolf-dapp/docs/11-operations.md` says it
-cannot run `npm ci` without being OOM-killed. Everything is built in CI and rsynced.
-`pm2 list` looking identical after a deploy is part of acceptance, not an aside.
+staging (5100), Mongo, Redis and nginx, and `werewolf-dapp/docs/11-operations.md` says
+it cannot run `npm ci` without being OOM-killed. All npm and build work, when any is
+needed, runs in CI; only static or otherwise produced files reach the droplet. `pm2
+list` looking identical after a deploy is part of acceptance, not an aside.
 
 ---
 
@@ -48,10 +53,12 @@ cd werewolf-dapp
 DNS_NAME=<subdomain> node .dogfood/dns.mjs
 ```
 
-Idempotent — it checks for an existing A record first. Reads `DOP_TOKEN` and
+Create-if-absent, not a full reconciler: it stops when any matching A record exists and
+does not compare its address, TTL, duplicates or ownership. It reads `DOP_TOKEN` and
 `DO_SSH_HOST` from `werewolf-dapp/.env` and never prints them. TTL 300.
 
-Verify: `getent hosts <subdomain>.werewolf.solutions` returns the droplet's IP.
+Verify both sides: `getent hosts <subdomain>.werewolf.solutions` must return the intended
+droplet IP, not merely any address.
 
 ## 2. Register the app with werewolf-dapp 🔶
 
@@ -77,10 +84,11 @@ too — that is the whole reason `server/utils/appSessionCookie.js` exists. The 
 works across `<app>.werewolf.solutions` → `werewolf.solutions` because they are
 different *origins* but the same *site*.
 
-An app with both a page and a local agent needs **two rows** — psm does: `psm`
-(`native`, for the cockpit and agents, loopback PKCE) and `psm-web` (`web`, for the
-hosted page). One row cannot be both, and flipping the shared one to `web` breaks every
-local install.
+A `CloudApplication` row has one client type. An app that genuinely needs both native and
+web token transports needs separate rows. PSM does not use that split: its current design is
+one `psm` web application with exact pinned loopback callbacks. Its local server redeems the
+authorization code server-side and retains dapp's httpOnly refresh cookie. See
+[`../werewolf-psm-registration.md`](../werewolf-psm-registration.md).
 
 Running it against production, in preference order:
 
@@ -125,8 +133,11 @@ so `nginx -t` fails on the TLS block the first time. Either drop the `listen 443
 for the first run and let certbot add it, or issue the certificate first with
 `certbot certonly --webroot -w /var/www/certbot -d <app>.werewolf.solutions`.
 
-Copy `todo-app/docs/deploy/todo.werewolf.solutions.nginx.conf` as the base. Three things
-to get right:
+Use this repository's `psm.werewolf.solutions.nginx.conf` as a hardening and `/api/`
+sealing reference, not as a drop-in base. Its CSP deliberately grants loopback access needed
+by PSM, and its cache policy assumes unhashed source assets. Generate an app-specific CSP and
+cache policy. Todo's checked-in vhost predates the `/api/` seal below, so do not copy it
+unchanged. Three things to get right:
 
 - **SPA fallback** `try_files $uri $uri/ /index.html` — required if `/auth/callback` is
   a real path, which it is for any app using the redirect flow.
@@ -139,18 +150,17 @@ to get right:
   ETag revalidation — otherwise a returning visitor runs last week's JavaScript against
   this week's HTML.
 
-## 4. GitHub secrets ⚙️ once for the org, 👤 per environment
+## 4. GitHub deployment environment 👤 per environment
 
-`DEPLOY_SSH_KEY`, `DEPLOY_HOST`, `DEPLOY_USER` — set these **once as organization
-secrets** (Werewolf-Solutions → Settings → Secrets and variables → Actions →
-*New organization secret*), scoped to the repos that deploy. Every app repo then
-inherits them, and rotating the droplet key is one edit rather than one per repo.
-Setting them requires org-admin rights; a repo-scoped `gh` token gets 403 and the
-web UI is the reliable path.
+Set `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_USER` on the repository's GitHub
+deployment environment. Prefer a dedicated key per project/environment, restricted to that
+release directory and without sudo. A shared organization key is legacy convenience with an
+organization-wide blast radius: if it still exists during migration, scope it to the minimum
+repository set and replace it as each target adopts the managed release helper.
 
-Repository secrets of the same name shadow the org's, and **environment** secrets
-shadow both. That precedence is the mechanism for staging: same workflow, same
-secret names, different machine.
+Repository secrets of the same name shadow the organization's, and **environment** secrets
+shadow both. That precedence is the mechanism for staging: same workflow, same secret names,
+different target and key.
 
 Two things the names do not tell you, and both have cost a red deploy:
 
@@ -217,19 +227,10 @@ Static apps have no migration to reverse: re-run the workflow from an earlier co
 
 ## What to automate next
 
-Roughly in order of how much time each would save:
-
-1. **`bootstrap-<app>.js` as a generic script** taking a JSON app descriptor, instead of
-   one hand-copied file per app. The three existing ones differ only in the row and
-   whether Stripe is involved.
-2. **A `new-app` scaffold** that emits the vhost, the workflow and the bootstrap
-   descriptor from `{ key, subdomain, clientType, build }` — steps 2, 3 and 5 are almost
-   entirely mechanical once step 0 is decided.
-3. **The vhost install** (step 3) as an idempotent script alongside `dns.mjs`; the only
-   genuinely manual part is the first certbot run.
-4. ~~**A deploy preflight**~~ — done in psm's `deploy.yml` for steps 3 and 4 (secrets
-   present, private key, target directory writable). Still unchecked: DNS (step 1) and
-   whether the app is registered (step 2), both of which fail later and less clearly.
+This list is superseded by the managed deployment architecture and delivery sequence in
+[`DEPLOYMENT-SYSTEM.md`](DEPLOYMENT-SYSTEM.md#20-delivery-sequence). This runbook remains the
+manual path until those pieces ship; do not grow it into a second collection of one-off
+deployment scripts.
 
 ## Things that have actually gone wrong
 

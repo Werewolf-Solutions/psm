@@ -1,0 +1,194 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { buildDeploymentPlan } from "./planner.ts";
+import type { BuildDeploymentPlanInput } from "./planner.ts";
+
+function input(): BuildDeploymentPlanInput {
+  const environment = {
+    id: "production",
+    risk: "production",
+    releasePolicy: { allowedBranch: "master", requireReachableFromBranch: true, requireChecks: true, approval: "authenticated-local-operator" },
+    connections: { host: { kind: "ssh-host-helper@1" } },
+    dependencies: [],
+    resources: [],
+    units: [],
+    watch: [],
+    policy: { planTtlSeconds: 600, rollbackOnVerificationFailure: true, allowDelete: false, requireFreshWatchBeforeRelease: false },
+  } as BuildDeploymentPlanInput["environment"];
+  return {
+    now: 1_000,
+    planId: "dpl_fixed",
+    operation: "reconcile",
+    manifest: { apiVersion: "psm.werewolf.solutions/deployments/v1", kind: "DeploymentManifest", projectId: "prj_11111111111111111111", environments: [environment] },
+    environment,
+    graph: { projectId: "prj_11111111111111111111", environmentId: "production", nodes: [], order: [] },
+    source: {
+      checkoutId: "chk_test", checkoutPath: "/work", commit: "1".repeat(40), branch: "master",
+      manifestText: "{}", manifestDigest: "sha256:m", identityText: "{}", identityDigest: "sha256:i",
+      packageText: "{}", packageDigest: "sha256:p", projectId: "prj_11111111111111111111", version: "0.1.0", subject: "release",
+    },
+    sourceInputsDirty: false,
+    sourceReachable: true,
+    connections: [{ slot: "host", kind: "ssh-host-helper@1", connectionId: "con_host", profile: "host", ready: true, detail: "ready", metadataRevision: 1, bindingRevision: 1, secretGeneration: 1, principal: "key:test", scopeFingerprint: "sha256:c" }],
+    observations: { dependencies: [], resources: [], watch: [], observedAt: 1_000 },
+    policy: {
+      risk: "production", planTtlSeconds: 600, maxWatchAgeSeconds: 180, requiredChecks: [], allowedSourceRefs: ["master"],
+      approval: "authenticated-local-operator", requireFreshWatchBeforeRelease: false,
+      authority: { delete: false, automaticRollback: false, breakGlass: false, pairedApproval: false }, inputRevisions: [],
+    },
+  };
+}
+
+test("the same exact inputs produce the same plan digest", () => {
+  const first = buildDeploymentPlan(input());
+  const second = buildDeploymentPlan(input());
+  assert.equal(first.digest, second.digest);
+  assert.equal(first.blocked, false);
+  assert.deepEqual(first.document.acknowledgements.map((item) => item.id), ["production-target"]);
+});
+
+test("dirty deployment inputs block approval", () => {
+  const changed = input();
+  changed.sourceInputsDirty = true;
+  const plan = buildDeploymentPlan(changed);
+  assert.equal(plan.blocked, true);
+  assert.ok(plan.document.blockers.some((item) => item.code === "source-dirty"));
+});
+
+test("production does not silently proceed with an unbound connection", () => {
+  const changed = input();
+  changed.connections[0].ready = false;
+  changed.connections[0].detail = "No profile is bound";
+  const plan = buildDeploymentPlan(changed);
+  assert.equal(plan.blocked, true);
+  assert.ok(plan.document.blockers.some((item) => item.code === "connection-missing"));
+});
+
+/** A graph with one real node, so `installedActionKinds` has something to judge. */
+function inputWithAction(kind: string): BuildDeploymentPlanInput {
+  const changed = input();
+  const node = {
+    id: "dependency:api#asserted",
+    kind,
+    phase: "dependencies",
+    ownerRef: "dependency:api",
+    dependsOn: [],
+  } as BuildDeploymentPlanInput["graph"]["nodes"][number];
+  changed.graph = { ...changed.graph, nodes: [node], order: [node.id] };
+  changed.operation = "deploy";
+  changed.observations = {
+    dependencies: [{
+      id: "api",
+      kind: "http-status@1",
+      state: "ready",
+      title: "api",
+      detail: "HTTP 401 in 12ms",
+      observedAt: 1_000,
+      fingerprint: "sha256:dep",
+    }],
+    resources: [],
+    watch: [],
+    observedAt: 1_000,
+  };
+  changed.artifact = {
+    artifactId: "art_todo_web_0001",
+    producingRunId: null,
+    provenance: "managed",
+    projectId: "prj_11111111111111111111",
+    kind: "static-files",
+    sourceRepository: "Werewolf-Solutions/todo-app",
+    githubArtifactId: "778899",
+    producerRunId: "112233",
+    commitSha: "1".repeat(40),
+    version: "0.1.0",
+    buildProfileDigest: "sha256:b",
+    payloadAlgorithm: "psm-static-tree-sha256@1",
+    payloadDigest: "sha256:pd",
+    archiveDigest: "sha256:ad",
+    providerLocator: {},
+    provenanceUrl: null,
+    createdAt: 900,
+    retainedUntil: 10_000,
+    tombstonedAt: null,
+  };
+  return changed;
+}
+
+test("an action kind no installed executor performs blocks the plan before approval", () => {
+  // Without this the same refusal happens inside the runner, after an operator
+  // has already approved a production release.
+  const plan = buildDeploymentPlan({
+    ...inputWithAction("reconcile-dns@1"),
+    installedActionKinds: ["assert-dependency@1", "verify-release@1", "verify-resource@1"],
+  });
+  assert.equal(plan.blocked, true);
+  const blocker = plan.document.blockers.find((item) => item.code === "executor-missing");
+  assert.ok(blocker, JSON.stringify(plan.document.blockers));
+  assert.match(blocker.message, /No installed executor performs reconcile-dns@1/);
+  assert.equal(blocker.ownerRef, "action-kind:reconcile-dns@1");
+});
+
+test("a plan whose every action kind is installed is not blocked by that check", () => {
+  const plan = buildDeploymentPlan({
+    ...inputWithAction("assert-dependency@1"),
+    installedActionKinds: ["assert-dependency@1", "verify-release@1", "verify-resource@1"],
+  });
+  assert.ok(!plan.document.blockers.some((item) => item.code === "executor-missing"), JSON.stringify(plan.document.blockers));
+});
+
+test("omitting the installed set does not invent an executor blocker", () => {
+  // The runner still refuses; the planner simply has nothing to assert on.
+  const plan = buildDeploymentPlan(inputWithAction("reconcile-dns@1"));
+  assert.ok(!plan.document.blockers.some((item) => item.code === "executor-missing"));
+});
+
+/** An adoption plan: one unowned provider resource, named as the thing to adopt. */
+function adoptInput(observedState: string, adoptionResourceId: string | null = "public-dns"): BuildDeploymentPlanInput {
+  const changed = input();
+  changed.operation = "adopt";
+  changed.adoptionResourceId = adoptionResourceId;
+  changed.environment.resources = [{
+    id: "public-dns",
+    kind: "digitalocean-dns-record@1",
+    connection: "dns",
+    desired: { zone: "werewolf.solutions", type: "A", name: "todo", valueFrom: { connection: "host", field: "address" }, ttl: 300 },
+  }] as BuildDeploymentPlanInput["environment"]["resources"];
+  changed.observations = {
+    ...changed.observations,
+    resources: [{
+      id: "public-dns",
+      kind: "digitalocean-dns-record@1",
+      state: observedState,
+      title: "todo.werewolf.solutions",
+      detail: observedState === "adopt" ? "A matching unowned DNS record requires explicit adoption" : "No provider record matches",
+      observedAt: 1_000,
+      fingerprint: "sha256:res",
+    }] as BuildDeploymentPlanInput["observations"]["resources"],
+  };
+  return changed;
+}
+
+test("adopting a resource the provider never confirmed is blocked, not planned", () => {
+  // "Adopt" binds PSM's ownership to an object it has actually seen. Without a live
+  // `adopt` observation there is nothing to bind to, and claiming otherwise would
+  // record ownership of a resource nobody looked at.
+  const plan = buildDeploymentPlan(adoptInput("missing"));
+  assert.equal(plan.blocked, true);
+  const stale = plan.document.blockers.find((item) => item.code === "resource-adoption-stale");
+  assert.ok(stale, JSON.stringify(plan.document.blockers));
+  assert.equal(stale.ownerRef, "resource:public-dns");
+});
+
+test("an adoption naming no resource of its own is invalid", () => {
+  const plan = buildDeploymentPlan(adoptInput("adopt", null));
+  assert.equal(plan.blocked, true);
+  assert.ok(plan.document.blockers.some((item) => item.code === "resource-adoption-invalid"), JSON.stringify(plan.document.blockers));
+});
+
+test("an observed unowned record is adoptable without an adoption blocker", () => {
+  const plan = buildDeploymentPlan(adoptInput("adopt"));
+  assert.ok(
+    !plan.document.blockers.some((item) => item.code.startsWith("resource-adoption")),
+    JSON.stringify(plan.document.blockers),
+  );
+});

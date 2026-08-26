@@ -14,7 +14,7 @@ const HARD_DIRS = new Set([
   ".git", ".hg", ".svn", "node_modules", "bower_components", "dist", "build",
   ".cache", ".next", ".nuxt", "coverage", "target", "__pycache__", ".venv",
   "venv", "logs", ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker",
-  ".direnv", ".terraform",
+  ".direnv", ".terraform", ".psm-data", ".psm-credentials", ".psm-deploy-logs",
 ]);
 const HARD_FILES = new Set([
   ".npmrc", ".pypirc", ".netrc", ".psm-sessions.json", ".psm-cloud-device.json",

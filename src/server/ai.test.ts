@@ -21,6 +21,9 @@ const {
   planningSessionKey,
   resolveExtraDirs,
   restoreCachedRecap,
+  resultIsLimit,
+  limitAppliesTo,
+  limitWindowLabel,
   writableRootArgs,
 } = await import("./ai.ts");
 type TurnSpec = Parameters<typeof buildCommand>[0];
@@ -285,4 +288,99 @@ test("resuming carries the scope flags too, not just the session id", () => {
     args.includes("--add-dir"),
     "a resumed turn is still a turn — the directories have to be passed again",
   );
+});
+
+test("every turn asks for diagrams as rendered figures, not ASCII art", () => {
+  // The transcript renders a ```html block inline (web/app.js renderAiText); box
+  // art drawn in a text fence is unreadable in a proportional bubble, so the ask
+  // has to reach the model on every turn, resumed turns included.
+  const { args } = buildCommand(spec({ sessionId: "abc-123" }), "explain the architecture", false);
+  const prompt = args[args.indexOf("--append-system-prompt") + 1];
+  assert.match(prompt, /```psm-figure/, "the fence psm renders is the one the model is told to write");
+  assert.match(prompt, /do not draw it as ASCII or box art/);
+  assert.match(prompt, /```html block is not a figure/, "showing markup must stay showing markup");
+});
+
+test("codex hears the same figure rule when it resumes", () => {
+  // codex has no system-prompt flag: on resume only INTERACTION_RULES rides
+  // along, which is exactly why the rule lives there and not in the house rules.
+  const { args } = buildCommand(
+    spec({ engine: "codex", sessionId: "abc-123" }),
+    "explain the architecture",
+    false,
+  );
+  assert.match(String(args.at(-1)), /```psm-figure/);
+});
+
+/* ---------- reading a limit out of what came back ---------- */
+
+test("a turn that merely talks about usage limits is not a usage limit", () => {
+  // `result` on a successful turn is the assistant's own reply. Treating its
+  // words as a provider verdict paused the whole engine for fifteen minutes
+  // whenever the AI was asked about usage — including while building this pane.
+  for (const reply of [
+    "The usage limit banner now clears itself after the window passes.",
+    "Retry on 429 with backoff.",
+    "I checked your quota and it looks fine.",
+  ]) {
+    assert.equal(resultIsLimit({ is_error: false, result: reply }), false, reply);
+  }
+});
+
+test("a failed turn that says it was limited is a usage limit", () => {
+  assert.equal(
+    resultIsLimit({ is_error: true, result: "Claude usage limit reached; try again at 5pm" }),
+    true,
+  );
+});
+
+test("a failure for some other reason is not a usage limit", () => {
+  assert.equal(resultIsLimit({ is_error: true, result: "the command exited with code 1" }), false);
+  assert.equal(resultIsLimit({ is_error: true }), false);
+});
+
+/* ---------- which model a usage limit actually governs ---------- */
+
+test("a spent weekly Opus window does not block a Sonnet turn", () => {
+  // The provider says which window it rejected. Ignoring that turned one
+  // model's exhausted weekly allowance into "you are out of Claude" for a week.
+  assert.equal(limitAppliesTo("seven_day_opus", "claude-sonnet-4-5"), false);
+  assert.equal(limitAppliesTo("seven_day_sonnet", "claude-opus-4-5"), false);
+});
+
+test("a window that governs the model in use does block it", () => {
+  assert.equal(limitAppliesTo("seven_day_opus", "opus"), true);
+  assert.equal(limitAppliesTo("seven_day_sonnet", "claude-sonnet-4-5"), true);
+});
+
+test("windows that cover every model always apply", () => {
+  for (const scope of ["five_hour", "seven_day", "overage", null]) {
+    assert.equal(limitAppliesTo(scope, "claude-sonnet-4-5"), true, String(scope));
+  }
+});
+
+test("a model-specific window is not assumed to bind an unknown model", () => {
+  // Nothing is configured and the session has not reported one yet: blocking on
+  // a guess is worse than letting the turn run and hearing the real verdict.
+  assert.equal(limitAppliesTo("seven_day_opus", null), false);
+});
+
+test("a limit says which window it came from", () => {
+  assert.equal(limitWindowLabel("seven_day_opus"), "7-day Opus");
+  assert.equal(limitWindowLabel("five_hour"), "5-hour");
+  assert.equal(limitWindowLabel("something_new"), null);
+});
+
+test("running out of credits for one model does not block the others", () => {
+  // Observed: on model `opus` Claude returned "You're out of usage credits.
+  // Switch to another model" while the account sat at 24% of its 5-hour window.
+  // psm recorded that as an engine-wide limit and paused every Claude chat for a
+  // week — including the default model the provider was pointing the user at.
+  assert.equal(limitAppliesTo("model:opus", "opus"), true);
+  assert.equal(limitAppliesTo("model:opus", "claude-sonnet-4-5"), false);
+  assert.equal(limitAppliesTo("model:opus", null), false);
+});
+
+test("a model-scoped limit matches regardless of case or padding", () => {
+  assert.equal(limitAppliesTo("model:opus", "  Opus  "), true);
 });

@@ -47,11 +47,13 @@ function modelEntry(catalog, model) {
   return catalog?.models?.find((entry) => entry.id === value || entry.resolvedModel === value) || null;
 }
 
+// The datalist is shared by every model box, so it must always describe the
+// engine currently selected — a null catalog empties it rather than leaving the
+// other engine's models on offer while discovery runs.
 function showModelCatalog(catalog) {
-  if (!catalog) return;
   const list = $("#ai-models");
   list.innerHTML = "";
-  for (const model of catalog.models || []) {
+  for (const model of catalog?.models || []) {
     const option = document.createElement("option");
     option.value = model.id;
     option.label = model.label && model.label !== model.id
@@ -94,7 +96,12 @@ function renderEffortOptions(select, engine, model, selected = "") {
 
 // `effortSelect` may be one select or several: the AI tab and the Web tab's dev
 // bar show the same choice, and they must not each pay for their own discovery.
-async function refreshModelCatalog(project, engine, model, effort, effortSelect) {
+//
+// `selection` is a getter, not a value: discovery can take seconds, and by the
+// time it lands the user may have picked a different model or effort. Rendering
+// the arguments captured at call time would silently undo that choice, so the
+// current selection is read at render time instead.
+async function refreshModelCatalog(project, engine, selection, effortSelect) {
   if (!engine || !project) return;
   const selects = [].concat(effortSelect).filter(Boolean);
   if (!selects.length) return;
@@ -102,6 +109,7 @@ async function refreshModelCatalog(project, engine, model, effort, effortSelect)
   for (const select of selects) {
     MODEL_FETCH_TOKENS.set(select, token);
     select.dataset.loading = "true";
+    select.title = `Looking up ${engine} models…`;
   }
   const mine = (select) => MODEL_FETCH_TOKENS.get(select) === token;
   try {
@@ -114,6 +122,7 @@ async function refreshModelCatalog(project, engine, model, effort, effortSelect)
     MODEL_CATALOGS[engine] = catalog;
     if (!selects.some(mine)) return;
     showModelCatalog(catalog);
+    const { model, effort } = selection();
     for (const select of selects) if (mine(select)) renderEffortOptions(select, engine, model, effort);
   } catch (error) {
     for (const select of selects) if (mine(select)) select.title = error.message || "Model discovery failed";
@@ -731,7 +740,10 @@ function openDrawer(p) {
   const drawerEngine = $("#d-engine").value || p.aiEngine || "claude";
   const drawerEffort = p.overridden.includes("aiEffort") ? p.aiEffort || "" : "";
   renderEffortOptions($("#d-effort"), drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort);
-  refreshModelCatalog(p.name, drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort, $("#d-effort"));
+  refreshModelCatalog(p.name, drawerEngine, () => ({
+    model: $("#d-model").value || p.aiModel || "",
+    effort: $("#d-effort").value,
+  }), $("#d-effort"));
 
   $("#d-full").checked = !!p.aiFullAccess;
   renderScopePicker(p);
@@ -859,10 +871,25 @@ async function saveDrawer() {
 const LOG_WINDOW = 100; // lines rendered at once
 const LOG_BUFFER = 20000; // lines held in memory, well past the server's own cap
 
+function emptyManagedDeploymentState() {
+  return {
+    loading: false,
+    data: null,
+    artifacts: [],
+    artifactId: null,
+    environment: null,
+    plan: null,
+    planEnvironment: null,
+    run: null,
+    poll: null,
+  };
+}
+
 let WS = {
   name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
   engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
+  managedDeploy: emptyManagedDeploymentState(),
 };
 
 let PLAN = {
@@ -1166,6 +1193,8 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
   WS.depTarget = "staging";
   WS.depArmed = false;
+  clearDeploymentPoll();
+  WS.managedDeploy = emptyManagedDeploymentState();
   WS.pending = [];
   WS.sessionState = null;
   WS.question = null;
@@ -1179,6 +1208,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   $("#ws-ai-limit").innerHTML = "";
   $("#ws-name").textContent = opts.title || p.name;
   renderMembers(opts.room || null);
+  renderRoomDependencies(opts.room || null);
   renderWorkingButton();
   // hide the run/web/deploy cockpit when this is the workspace-wide chat
   $("#ws-runbar").hidden = chat;
@@ -1285,6 +1315,91 @@ function renderMembers(room) {
 }
 
 /**
+ * The managed dependency edges in this room that are not passing.
+ *
+ * A cross-project break is the reason a room exists: one repository is waiting on
+ * something another one owns, and both are in this conversation. Each row links to
+ * the owning project's Deploy pane, because that is where the edge is fixed — the
+ * room reports it, the deployment engine is what enforces it.
+ *
+ * These are recorded observations, from whatever each project last planned. Opening
+ * a room never probes anybody's endpoints, so a row can legitimately say "not
+ * observed yet"; that is a different statement from "failing" and is marked as such.
+ */
+async function renderRoomDependencies(room) {
+  const strip = $("#ws-room-deps");
+  if (!room) {
+    strip.hidden = true;
+    strip.textContent = "";
+    return;
+  }
+  const roomId = room.id;
+  let edges = [];
+  try {
+    const response = await agentApi(`/api/work-sessions/${encodeURIComponent(roomId)}/deployments`);
+    if (!response.ok) throw new Error("unavailable");
+    ({ edges = [] } = await response.json());
+  } catch {
+    // Nothing to say: a room whose dependency state cannot be read is not a room
+    // with a broken dependency, and a scary empty banner would imply otherwise.
+    edges = [];
+  }
+  // The room may have moved on while that was in flight.
+  if (WS.kind !== "work" || WS.id !== roomId) return;
+  strip.textContent = "";
+  if (!edges.length) {
+    strip.hidden = true;
+    return;
+  }
+  strip.hidden = false;
+  const label = el("span", "ws-room-deps-label");
+  label.textContent = edges.length === 1 ? "1 dependency not passing" : `${edges.length} dependencies not passing`;
+  strip.append(label);
+
+  for (const edge of edges) {
+    const row = el("div", "ws-room-dep");
+    const state = el("span", `ws-room-dep-state${edge.state === "unknown" ? " unknown" : ""}`);
+    state.textContent = edge.state === "unknown" ? "not observed" : edge.state;
+    row.append(state);
+
+    const dependent = el("span");
+    dependent.textContent = `${edge.dependentProjectName} · ${edge.dependentEnvironmentId}`;
+    row.append(dependent);
+
+    const arrow = el("span", "ws-room-dep-arrow");
+    arrow.textContent = "needs";
+    row.append(arrow);
+
+    // The owning project, which is where this gets fixed.
+    const owner = edge.ownerProjectName ? projectByName(edge.ownerProjectName) : null;
+    const link = el("button", "ws-room-dep-link");
+    link.textContent = edge.ownerProjectName
+      ? `${edge.ownerProjectName}${edge.ownerEnvironmentId ? ` · ${edge.ownerEnvironmentId}` : ""}`
+      : edge.ownerProjectId;
+    if (owner) {
+      link.title = edge.ownerInRoom
+        ? "Open this project's Deploy pane — it is also in this room"
+        : "Open this project's Deploy pane";
+      link.onclick = () => window.open(projectHash(routeKey(owner), "deploy"), "_blank");
+    } else {
+      link.disabled = true;
+      link.title = "psm can no longer find the project that owns this dependency";
+    }
+    row.append(link);
+
+    const id = el("span", "ws-room-dep-id");
+    id.textContent = edge.dependencyId;
+    row.append(id);
+
+    const detail = el("span", "ws-room-dep-detail");
+    detail.textContent = edge.detail;
+    row.append(detail);
+
+    strip.append(row);
+  }
+}
+
+/**
  * Change who is in the open room.
  *
  * The AI is not told directly. Reconnecting the transcript is what tells it: the
@@ -1303,6 +1418,7 @@ async function setRoomProjects(projects) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) return toast(data.error || "Could not change the workroom");
   renderMembers(data.workSession);
+  renderRoomDependencies(data.workSession);
   if (aiPaneOpen()) connectAi(WS.name);
   fetchSessions();
   toast(`Workroom now spans ${data.workSession.projects.join(", ")}`);
@@ -1488,6 +1604,13 @@ function switchPane(pane) {
     : new Set(["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy"]);
   if (!allowed.has(pane)) pane = WS.chatOnly ? "ai" : "plan";
   WS.pane = pane;
+  if (pane !== "deploy") {
+    clearDeploymentPoll();
+    if (WS.depEs) {
+      WS.depEs.close();
+      WS.depEs = null;
+    }
+  }
   for (const t of document.querySelectorAll(".ws-tab"))
     t.classList.toggle("on", t.dataset.pane === pane);
   for (const el of document.querySelectorAll(".ws-panes > [data-pane]"))
@@ -1666,7 +1789,7 @@ function renderDevMode() {
   $("#ws-dev").classList.toggle("on", DEV.on);
   $("#ws-dev").setAttribute("aria-pressed", String(DEV.on));
   $("#ws-devbar").hidden = !DEV.on;
-  $("#ws-notes").hidden = !DEV.on;
+  $("#web-notes").hidden = !DEV.on;
   $("#ws-web").classList.toggle("dev-on", DEV.on);
   const pick = $("#web-pick");
   pick.classList.toggle("on", DEV.picking);
@@ -1889,10 +2012,12 @@ function closeWorkspace(fromRoute = false) {
   if (WS.aiEs) WS.aiEs.close();
   disconnectPlanner();
   if (WS.depEs) WS.depEs.close();
+  clearDeploymentPoll();
   WS = {
     name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
     engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
+    managedDeploy: emptyManagedDeploymentState(),
   };
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = true;
@@ -3739,6 +3864,7 @@ function renderAiModel() {
 
 /** Push WS's engine/model/effort/full-access onto every mirror. */
 function syncAiControls() {
+  showModelCatalog(MODEL_CATALOGS[WS.engine]); // never offer the other engine's models
   for (const set of AI_CONTROLS) {
     $(set.engine).value = WS.engine;
     $(set.model).value = WS.model;
@@ -3750,7 +3876,12 @@ function syncAiControls() {
 }
 
 function refreshAiModels() {
-  refreshModelCatalog(WS.name, WS.engine, WS.model, WS.effort, aiControlNodes("effort"));
+  refreshModelCatalog(
+    WS.name,
+    WS.engine,
+    () => ({ model: WS.model, effort: WS.effort }),
+    aiControlNodes("effort"),
+  );
 }
 
 function applyEngine(engine) {
@@ -3808,11 +3939,226 @@ function activityFor(ev) {
   return null;
 }
 
+/* ---- Figures in the transcript ---------------------------------------------
+ * The transcript is plain text on purpose, but data drawn as ASCII art is
+ * unreadable in a proportional bubble — boxes and arrows land wherever the font
+ * puts them. The interaction protocol (src/server/ai.ts) asks for a figure block
+ * instead, and each one is rendered here, in place, between the paragraphs
+ * around it:
+ *
+ *     ```psm-figure Optional title
+ *     <div style="...">…</div>
+ *     ```
+ *
+ * The tag is psm's own, not `html`, because a coding agent shows real HTML
+ * source all day: a fenced `html` block means "here is some markup", and
+ * `psm-figure` means "draw this".
+ *
+ * A figure draws in an iframe sandboxed to allow-same-origin and nothing else —
+ * scripts, forms, popups, and navigation are all off, and the document's own CSP
+ * cuts it off from the network, so nothing in it can run, reach psm's DOM, phone
+ * home, or pull a font. allow-same-origin is there for one reason: so the height
+ * can be measured after layout.
+ *
+ * The transcript keeps the source, not the rendering: the fenced block stays in
+ * the AI log, so a figure survives a reload, and Copy/Download hand back exactly
+ * what the model wrote.
+ * -------------------------------------------------------------------------- */
+
+// title is optional and free text; `figure` and `psm-html` are accepted spellings
+const FIGURE_FENCE = /```(?:psm-figure|psm-html|figure)[^\S\n]*([^\n]*)\n([\s\S]*?)\n?```/gi;
+const FIGURE_MAX_H = 640;
+const FIGURE_ROOT = "psm-figure"; // the wrapper the height is measured on
+const FIGURE_SOURCES = new WeakMap(); // frame → the model's markup, for redraws
+
+const FIGURE_TOKENS = [
+  "--bg", "--bg-soft", "--card", "--card-hover", "--line", "--text", "--muted", "--faint",
+  "--accent", "--accent-ink",
+  "--st-active", "--st-paused", "--st-library", "--st-utility", "--st-experiment",
+  "--st-planning", "--st-archived",
+];
+
+function figureDoc(body) {
+  const root = getComputedStyle(document.documentElement);
+  const vars = FIGURE_TOKENS
+    .map((name) => [name, root.getPropertyValue(name).trim()])
+    .filter(([, value]) => value)
+    .map(([name, value]) => `${name}:${value};`)
+    .join("");
+  return [
+    '<!doctype html><meta charset="utf-8">',
+    // no network at all: a figure cannot beacon, pull a font, or load a tracker
+    '<meta http-equiv="Content-Security-Policy" ',
+    `content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'">`,
+    `<style>:root{${vars}}`,
+    "html,body{margin:0}*{box-sizing:border-box}",
+    "body{padding:12px;background:transparent;color:var(--text,#e6edf3);",
+    "font:13px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}",
+    "svg,img,table{max-width:100%}table{border-collapse:collapse}",
+    "pre,code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}",
+    "a{color:var(--accent);pointer-events:none}", // links cannot navigate anyway
+    // flow-root so the figure's own margins stay inside the box we measure
+    `#${FIGURE_ROOT}{display:flow-root}`,
+    "</style>",
+    `<div id="${FIGURE_ROOT}">`, body, "</div>",
+  ].join("");
+}
+
+/**
+ * Match the frame to the height its content actually took at this width.
+ *
+ * Measured on the figure's own wrapper, not on <body>: a document's scroll
+ * height never reports less than the viewport it is in, so measuring the body
+ * can grow a frame but can never shrink one back.
+ */
+function fitFigure(frame) {
+  if (document.fullscreenElement?.contains(frame)) return; // fullscreen sizes itself
+  let doc;
+  try {
+    doc = frame.contentDocument;
+  } catch {
+    return; // sandboxed away — leave the fallback height
+  }
+  const root = doc?.getElementById(FIGURE_ROOT);
+  if (!root) return;
+  const padding = 2 * parseFloat(doc.defaultView.getComputedStyle(doc.body).paddingTop || "0");
+  const height = Math.ceil(root.getBoundingClientRect().height + padding);
+  const next = Math.min(Math.max(height, 48), FIGURE_MAX_H) + "px";
+  if (next !== frame.style.height) frame.style.height = next; // idempotent: see figureSizer
+}
+
+// The pane resizes, and a frame that was measured while the tab was in the
+// background measured nothing at all — both are answered by re-fitting here.
+// fitFigure only writes a height that differs, so our own writes settle after
+// one extra pass instead of looping.
+const figureSizer = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => {
+      for (const entry of entries) fitFigure(entry.target);
+    })
+  : null;
+
+// The palette is baked into each frame, so a theme flip has to redraw them.
+matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
+  for (const frame of document.querySelectorAll(".ai-figure iframe")) {
+    const source = FIGURE_SOURCES.get(frame);
+    if (source != null) frame.srcdoc = figureDoc(source);
+  }
+});
+
+document.addEventListener("fullscreenchange", () => {
+  // leaving fullscreen restores the inline height, which was measured at the
+  // old width — remeasure the frame that just came back.
+  for (const frame of document.querySelectorAll(".ai-figure iframe")) fitFigure(frame);
+});
+
+function figureButton(glyph, title, onClick) {
+  const button = el("button", "icon-btn figure-btn");
+  button.type = "button";
+  button.textContent = glyph;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.onclick = onClick;
+  return button;
+}
+
+function figureFileName(title) {
+  const slug = String(title || "figure").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return `psm-${slug || "figure"}.html`;
+}
+
+async function copyFigureSource(source) {
+  try {
+    await navigator.clipboard.writeText(source);
+    toast("Figure source copied");
+  } catch {
+    toast("The browser refused clipboard access");
+  }
+}
+
+/** Hand back a standalone page — the frame's own document, tokens and all. */
+function downloadFigure(source, title) {
+  const url = URL.createObjectURL(new Blob([figureDoc(source)], { type: "text/html" }));
+  const link = el("a");
+  link.href = url;
+  link.download = figureFileName(title);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function toggleFigureFullscreen(wrap) {
+  if (document.fullscreenElement === wrap) {
+    document.exitFullscreen();
+    return;
+  }
+  wrap.requestFullscreen?.().catch(() => toast("The browser refused fullscreen"));
+}
+
+function aiFigure(source, title) {
+  const wrap = el("div", "ai-figure");
+  const bar = el("div", "figure-bar");
+  const label = el("span", "figure-title");
+  label.textContent = title || "Figure";
+  const actions = el("div", "figure-actions");
+  actions.append(
+    figureButton("⛶", "Fullscreen", () => toggleFigureFullscreen(wrap)),
+    figureButton("⧉", "Copy the figure's HTML source", () => copyFigureSource(source)),
+    figureButton("⭳", "Download the figure as an .html file", () => downloadFigure(source, title)),
+  );
+  bar.append(label, actions);
+
+  const frame = el("iframe");
+  frame.title = title || "Figure";
+  // allow-same-origin *only* — enough to measure the laid-out height. Without
+  // allow-scripts / allow-forms / allow-popups / allow-top-navigation, nothing
+  // in the document can act on anything.
+  frame.setAttribute("sandbox", "allow-same-origin");
+  frame.addEventListener("load", () => {
+    fitFigure(frame);
+    // a hidden tab lays nothing out; the frame runs on its first painted frame
+    requestAnimationFrame(() => fitFigure(frame));
+    figureSizer?.observe(frame);
+  });
+  FIGURE_SOURCES.set(frame, source);
+  frame.srcdoc = figureDoc(source);
+
+  wrap.append(bar, frame);
+  return wrap;
+}
+
+/** Assistant text with its figures drawn; every other part stays plain text. */
+function renderAiText(node, text) {
+  const source = String(text ?? "");
+  let at = 0;
+  for (const match of source.matchAll(FIGURE_FENCE)) {
+    addAiText(node, source.slice(at, match.index));
+    node.append(aiFigure(match[2], match[1].trim()));
+    at = match.index + match[0].length;
+  }
+  if (!at) {
+    node.textContent = source; // no figures — the ordinary case
+    return false;
+  }
+  addAiText(node, source.slice(at));
+  return true;
+}
+
+function addAiText(node, text) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const part = el("div", "ai-text");
+  part.textContent = trimmed;
+  node.append(part);
+}
+
 function renderAiBubble(ev) {
   const t = $("#ws-transcript");
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
   const b = el("div", "ai-msg ai-" + ev.role);
-  b.textContent = ev.text;
+  if (ev.role === "assistant") {
+    if (renderAiText(b, ev.text)) b.classList.add("has-figure"); // figures need the width
+  } else {
+    b.textContent = ev.text;
+  }
   t.append(b);
   if (nearBottom) t.scrollTop = t.scrollHeight;
   return b;
@@ -3868,9 +4214,14 @@ function aiBase(name = WS.name) {
 
 function connectAi(name) {
   if (WS.aiEs) WS.aiEs.close();
-  const params = new URLSearchParams({ engine: WS.engine });
-  if (WS.model) params.set("model", WS.model);
-  if (WS.effort) params.set("effort", WS.effort);
+  // send model/effort even when empty: empty means "the provider's default",
+  // and leaving them out lets the server fall back to the project's saved
+  // values — which is how switching engines used to drag the old model along
+  const params = new URLSearchParams({
+    engine: WS.engine,
+    model: WS.model || "",
+    effort: WS.effort || "",
+  });
   const es = agentStream(`${aiBase(name)}/ai/stream?${params}`);
   WS.aiEs = es;
   // on every (re)connection the server replays the whole transcript, so wipe
@@ -3894,6 +4245,7 @@ function connectAi(name) {
       WS.actualModel = status.actualModel || null;
       WS.question = status.question || null;
       syncAiControls();
+      usageSelectionChanged(); // the echoed model decides which windows apply
       if (WS.pane === "session") renderSessionPane({ ...(WS.sessionState || {}), ...status, recent: WS.sessionState?.recent || [] });
       if (WS.question) openQuestion(conversationKey(), WS.question, false, "ai", null, $("#ws-name").textContent);
       else clearQuestion(conversationKey());
@@ -4025,16 +4377,37 @@ function setAiLimit(limit) {
     const fallback = hard ? "Usage limit reached." : "You're approaching your usage limit.";
     body.textContent = (limit.message || fallback) + (until ? `  Resets ${until}.` : "");
     banner.classList.toggle("ai-limit-soft", !hard);
-    banner.append(el("div", "ai-limit-title", hard ? "⚠ Usage limit reached" : "⚠ Approaching usage limit"), body);
+    const title = el("div", "ai-limit-title", hard ? "⚠ Usage limit reached" : "⚠ Approaching usage limit");
+    banner.append(title, body);
+    if (hard) {
+      // psm's copy of the verdict can be wrong, and the provider is the
+      // authority. Never leave the only way out as "wait for the reset".
+      const dismiss = el("button", "btn ai-limit-dismiss");
+      dismiss.textContent = "Dismiss and try anyway";
+      dismiss.title = "Forget this limit and let the provider decide on the next message";
+      dismiss.onclick = () => clearAiLimit();
+      banner.append(dismiss);
+    }
     banner.hidden = false;
   }
   refreshComposer();
 }
 
+async function clearAiLimit() {
+  try {
+    await agentApi(`/api/ai/limit?engine=${encodeURIComponent(WS.engine)}`, { method: "DELETE" });
+  } catch {}
+  setAiLimit(null);
+  toast("Limit dismissed — the next message goes to the provider");
+}
+
 async function fetchLimit() {
   if (!WS.name) return;
   try {
-    const r = await agentApi(`/api/ai/limit?engine=${encodeURIComponent(WS.engine)}`);
+    const model = WS.model || WS.actualModel || "";
+    const r = await agentApi(
+      `/api/ai/limit?engine=${encodeURIComponent(WS.engine)}&model=${encodeURIComponent(model)}`,
+    );
     setAiLimit((await r.json()).limit);
   } catch {}
 }
@@ -4094,12 +4467,377 @@ async function cancelAi() {
 
 /* ---- Deploy pane ---- */
 const depKind = () => `deploy:${WS.depTarget}`;
+const deploymentKey = () => WS.id || WS.name;
+const deploymentBase = (key = deploymentKey()) => `/api/projects/${encodeURIComponent(key)}/deployments`;
+const DEPLOYMENT_TERMINAL_STATES = new Set(["succeeded", "failed", "cancelled", "interrupted", "stale-plan", "rolled-back"]);
+
+/**
+ * Managed requests can outlive the project or environment that launched them.
+ * Keep the state object itself in the scope: opening another project replaces
+ * that object, so a late response cannot paint or approve against the new one.
+ */
+function deploymentRequestScope({ environment = false, artifact = false, plan = false, run = false } = {}) {
+  const state = WS.managedDeploy;
+  return {
+    state,
+    projectKey: deploymentKey(),
+    ...(environment ? { environmentId: state?.environment } : {}),
+    ...(artifact ? { artifactId: state?.artifactId } : {}),
+    ...(plan ? { planId: state?.plan?.id, planDigest: state?.plan?.digest } : {}),
+    ...(run ? { runId: state?.run?.id } : {}),
+  };
+}
+
+function deploymentRequestIsCurrent(scope) {
+  const state = WS.managedDeploy;
+  if (!state || state !== scope.state || deploymentKey() !== scope.projectKey) return false;
+  if ("environmentId" in scope && state.environment !== scope.environmentId) return false;
+  if ("artifactId" in scope && state.artifactId !== scope.artifactId) return false;
+  if ("planId" in scope && (state.plan?.id !== scope.planId || state.plan?.digest !== scope.planDigest)) return false;
+  if ("runId" in scope && state.run?.id !== scope.runId) return false;
+  return true;
+}
+
+function clearDeploymentPoll(state = WS.managedDeploy) {
+  if (!state?.poll) return;
+  clearTimeout(state.poll);
+  state.poll = null;
+}
+
+function depText(tag, className, text) {
+  const node = el(tag, className);
+  node.textContent = text == null ? "" : String(text);
+  return node;
+}
+
+function deploymentEnvironment() {
+  const environments = WS.managedDeploy.data?.environments || [];
+  return environments.find((environment) => environment.id === WS.managedDeploy.environment)
+    || environments[0]
+    || null;
+}
+
+function usableDeploymentArtifacts() {
+  const now = Date.now();
+  return (WS.managedDeploy.artifacts || []).filter((artifact) =>
+    artifact?.artifactId && artifact.tombstonedAt == null && Number(artifact.retainedUntil) > now
+  );
+}
+
+function selectDeploymentArtifact(environment) {
+  const artifacts = usableDeploymentArtifacts();
+  if (!artifacts.some((artifact) => artifact.artifactId === WS.managedDeploy.artifactId)) {
+    const exactSource = artifacts.find((artifact) => artifact.commitSha === environment?.source?.commit);
+    WS.managedDeploy.artifactId = (exactSource || artifacts[0])?.artifactId || null;
+  }
+  return artifacts;
+}
+
+function renderDeploymentArtifacts(environment) {
+  const select = $("#dep-artifact");
+  const artifacts = selectDeploymentArtifact(environment);
+  select.replaceChildren();
+  if (!artifacts.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "No prepared artifacts";
+    select.append(option);
+  } else {
+    for (const artifact of artifacts) {
+      const option = document.createElement("option");
+      option.value = artifact.artifactId;
+      option.textContent = [artifact.version || "unknown", artifact.commitSha?.slice?.(0, 10), artifact.artifactId].filter(Boolean).join(" · ");
+      option.title = `${artifact.sourceRepository || "artifact"} · prepared ${relTime(artifact.createdAt) || "now"}`;
+      select.append(option);
+    }
+    select.value = WS.managedDeploy.artifactId || "";
+  }
+  select.disabled = WS.managedDeploy.loading || !artifacts.length;
+}
+
+function depStateIcon(state) {
+  if (["ready", "healthy", "in-sync", "succeeded", "completed", "active"].includes(state)) return "✓";
+  if (["blocked", "conflict", "failed", "error", "stale-plan"].includes(state)) return "×";
+  if (["update", "create", "warning", "degraded", "running", "queued"].includes(state)) return "~";
+  return "?";
+}
+
+function depRows(target, rows, emptyCopy) {
+  target.replaceChildren();
+  if (!rows?.length) {
+    target.append(depText("div", "dep-empty", emptyCopy));
+    return;
+  }
+  for (const item of rows) {
+    const row = depText("div", "dep-row", "");
+    row.dataset.state = item.state || "unknown";
+    row.append(depText("span", "dep-row-icon", depStateIcon(item.state)));
+    const copy = depText("div", "", "");
+    copy.append(depText("div", "dep-row-title", item.title || item.id || "Check"));
+    if (item.detail || item.message) copy.append(depText("div", "dep-row-detail", item.detail || item.message));
+    row.append(copy, depText("span", "dep-row-kind", item.kind || item.state || ""));
+    target.append(row);
+  }
+}
+
+function depCard(label, value, detail, accent = false) {
+  const card = depText("div", `dep-card${accent ? " accent" : ""}`, "");
+  card.append(
+    depText("div", "dep-card-label", label),
+    depText("div", "dep-card-value", value || "—"),
+    depText("div", "dep-card-detail", detail || ""),
+  );
+  return card;
+}
+
+function renderManagedSummary(environment) {
+  const summary = $("#dep-summary");
+  summary.replaceChildren();
+  const source = environment.source || {};
+  const active = environment.activeRelease || null;
+  const watch = environment.watch || {};
+  summary.append(
+    depCard("Source", source.version || "No artifact", [source.branch, source.commit?.slice?.(0, 10)].filter(Boolean).join(" · "), true),
+    depCard("Active release", active?.version || "Not observed", active?.commit ? active.commit.slice(0, 10) : "No managed receipt"),
+    depCard("Public Watch", watch.effectiveState || "not-monitored", watch.observedAt ? `Observed ${relTime(watch.observedAt)}` : "No fresh observation"),
+    depCard("Target", environment.target?.targetId || "Not resolved", environment.target?.hostname || environment.hostname || ""),
+  );
+}
+
+function renderManagedConnections(environment) {
+  depRows(
+    $("#dep-connections"),
+    (environment.connections || []).map((connection) => ({
+      state: connection.ready ? "ready" : "blocked",
+      title: connection.slot,
+      detail: connection.ready
+        ? `${connection.profile || "bound"}${connection.principal ? ` · ${connection.principal}` : ""}`
+        : connection.detail || "No local profile is bound",
+      kind: connection.kind,
+    })),
+    "This environment declares no connections.",
+  );
+}
+
+function renderManagedReleases(environment) {
+  const target = $("#dep-releases");
+  target.replaceChildren();
+  const releases = environment.releases || [];
+  if (!releases.length) {
+    target.append(depText("div", "dep-empty", "No managed releases have been observed."));
+    return;
+  }
+  for (const release of releases) {
+    const row = depText("div", "dep-row", "");
+    row.dataset.state = release.active ? "active" : "ready";
+    row.append(depText("span", "dep-row-icon", release.active ? "●" : "○"));
+    const copy = depText("div", "", "");
+    copy.append(depText("div", "dep-row-title", `${release.version || "unknown"}${release.active ? " · current" : ""}`));
+    copy.append(depText("div", "dep-row-detail", [release.releaseId, release.commit?.slice?.(0, 10), release.activatedAt ? relTime(release.activatedAt) : null].filter(Boolean).join(" · ")));
+    row.append(copy);
+    const actions = depText("div", "dep-release-actions", "");
+    if (!release.active && release.retained !== false) {
+      const rollback = depText("button", "dep-mini-btn", "Plan rollback");
+      rollback.type = "button";
+      rollback.dataset.rollbackRelease = release.releaseId;
+      actions.append(rollback);
+    }
+    row.append(actions);
+    target.append(row);
+  }
+}
+
+function renderDeploymentPlan(plan) {
+  WS.managedDeploy.plan = plan || null;
+  WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
+  const section = $("#dep-plan-section");
+  section.hidden = !plan;
+  if (!plan) return;
+  $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
+  $("#dep-plan-meta").textContent = plan.expiresAt
+    ? `Exact plan · expires ${new Date(plan.expiresAt).toLocaleTimeString()}`
+    : "Exact plan ready for review";
+  const target = $("#dep-plan");
+  target.replaceChildren();
+  const grouped = new Map();
+  for (const action of plan.actions || []) {
+    const phase = action.phase || "plan";
+    if (!grouped.has(phase)) grouped.set(phase, []);
+    grouped.get(phase).push(action);
+  }
+  for (const [phase, actions] of grouped) {
+    const group = depText("div", "dep-plan-group", "");
+    group.append(depText("h4", "", `${phase[0].toUpperCase()}${phase.slice(1)} · ${actions.length}`));
+    for (const action of actions) {
+      const line = depText("div", "dep-plan-action", "");
+      line.append(depText("span", "", depStateIcon(action.state || action.operation)), depText("strong", "", action.title || action.id || action.operation), depText("span", "", action.detail || ""));
+      group.append(line);
+    }
+    target.append(group);
+  }
+  if (!grouped.size) target.append(depText("div", "dep-empty", "No mutations are required."));
+  const acknowledgements = plan.acknowledgements || [];
+  $("#dep-ack-wrap").hidden = !acknowledgements.length;
+  $("#dep-ack-copy").textContent = acknowledgements.map((item) => item.label || item.message || item.id).join(" ") || "I reviewed this exact plan.";
+  $("#dep-ack").checked = false;
+  $("#dep-approval-note").textContent = plan.blocked
+    ? `${(plan.blockers || []).length || 1} blocker${(plan.blockers || []).length === 1 ? "" : "s"} must be resolved`
+    : plan.risk === "production" ? "Production requires the signed-in local operator" : "Approval is bound to this digest";
+  $("#dep-approve").disabled = !!plan.blocked || acknowledgements.length > 0;
+}
+
+const DEPLOY_PHASES = ["queued", "locks", "preflight", "reconcile", "dispatch", "executor", "verify"];
+
+function renderDeploymentRun(run) {
+  WS.managedDeploy.run = run || null;
+  const section = $("#dep-run-section");
+  section.hidden = !run;
+  if (!run) return;
+  $("#dep-run-title").textContent = run.kind === "prepare" ? "Artifact preparation" : "Deployment run";
+  $("#dep-run-state").textContent = run.state || "queued";
+  const current = String(run.phase || run.state || "queued");
+  const aliases = { "acquiring-locks": "locks", "checking-preconditions": "preflight", reconciling: "reconcile", dispatching: "dispatch", "waiting-executor": "executor", "observing-result": "executor", verifying: "verify", succeeded: "verify", "rolled-back": "verify" };
+  const currentPhase = aliases[current] || current;
+  const currentIndex = DEPLOY_PHASES.indexOf(currentPhase);
+  const phases = $("#dep-phases");
+  phases.replaceChildren();
+  DEPLOY_PHASES.forEach((phase, index) => {
+    const item = depText("div", "dep-phase", "");
+    item.dataset.state = index < currentIndex || ["succeeded", "rolled-back"].includes(run.state) ? "done" : index === currentIndex ? "active" : "pending";
+    item.append(depText("span", "dep-phase-dot", ""), depText("span", "dep-phase-copy", phase));
+    phases.append(item);
+    if (index < DEPLOY_PHASES.length - 1) phases.append(depText("span", "dep-phase-line", ""));
+  });
+  const events = $("#dep-events");
+  events.replaceChildren();
+  for (const event of run.events || []) {
+    const line = depText("div", "dep-event", "");
+    line.dataset.level = event.level || "info";
+    line.append(
+      depText("span", "dep-event-time", new Date(event.at).toLocaleTimeString()),
+      depText("span", "dep-event-phase", event.phase || "run"),
+      depText("span", "dep-event-message", event.message || event.type || "event"),
+    );
+    events.append(line);
+  }
+  if (!(run.events || []).length) events.append(depText("div", "dep-empty", "Waiting for the first durable event…"));
+  $("#dep-cancel").disabled = ["succeeded", "failed", "cancelled", "interrupted", "stale-plan", "rolled-back"].includes(run.state);
+}
+
+function renderManagedDeploy() {
+  const data = WS.managedDeploy.data;
+  const environment = deploymentEnvironment();
+  if (!data?.managed || !environment) return;
+  $("#ws-deploy-managed").hidden = false;
+  $("#ws-deploy-legacy").hidden = true;
+  $("#dep-managed-title").textContent = `${data.project?.name || WS.name} · ${environment.id}`;
+  $("#dep-managed-subtitle").textContent = environment.hostname || environment.target?.hostname || "Managed desired state";
+  $("#dep-risk").textContent = `${environment.risk || "unknown"} risk`;
+  $("#dep-risk").dataset.risk = environment.risk || "unknown";
+  const envs = $("#dep-envs");
+  envs.replaceChildren();
+  for (const item of data.environments || []) {
+    const button = depText("button", `dep-env${item.id === environment.id ? " on" : ""}`, item.id);
+    button.type = "button";
+    button.dataset.environment = item.id;
+    button.disabled = WS.managedDeploy.loading;
+    button.setAttribute("aria-pressed", String(item.id === environment.id));
+    envs.append(button);
+  }
+  renderDeploymentArtifacts(environment);
+  renderManagedSummary(environment);
+  const readiness = [
+    ...(environment.dependencies || []),
+    ...(environment.resources || []),
+    ...(environment.blockers || []).map((blocker) => ({ ...blocker, state: "blocked" })),
+  ];
+  depRows($("#dep-readiness"), readiness, "No discovery results yet. Choose Discover changes.");
+  const blocked = readiness.filter((item) => ["blocked", "conflict", "unknown", "missing"].includes(item.state)).length;
+  $("#dep-readiness-count").textContent = blocked ? `${blocked} blocking` : readiness.length ? "ready" : "not observed";
+  renderManagedConnections(environment);
+  renderManagedReleases(environment);
+  renderDeploymentPlan(WS.managedDeploy.plan);
+  renderDeploymentRun(WS.managedDeploy.run || environment.latestRun || null);
+  $("#dep-prepare").disabled = WS.managedDeploy.loading || !environment.canPrepare;
+  $("#dep-discover").disabled = WS.managedDeploy.loading || environment.canPlan === false;
+}
+
+async function loadManagedDeploy({ quiet = false } = {}) {
+  if (!WS.name || WS.kind !== "project") return;
+  const scope = deploymentRequestScope();
+  const state = scope.state;
+  const hadData = !!state.data;
+  if (!quiet) state.loading = true;
+  try {
+    const projectBase = deploymentBase(scope.projectKey);
+    const [response, artifactsResponse] = await Promise.all([
+      agentApi(projectBase),
+      agentApi(`${projectBase.slice(0, -"/deployments".length)}/deployment-artifacts`),
+    ]);
+    if (!response.ok) throw new Error("managed deployment is unavailable");
+    const data = await response.json();
+    if (!data.managed) throw new Error("no managed manifest");
+    const artifactBody = artifactsResponse.ok ? await artifactsResponse.json().catch(() => ({})) : {};
+    if (!deploymentRequestIsCurrent(scope)) return;
+    const previousEnvironment = state.environment;
+    state.data = data;
+    state.artifacts = Array.isArray(artifactBody.artifacts) ? artifactBody.artifacts : state.artifacts;
+    if (!state.environment || !data.environments.some((item) => item.id === state.environment)) {
+      state.environment = data.environments.find((item) => item.id === "production")?.id || data.environments[0]?.id || null;
+    }
+    const environment = deploymentEnvironment();
+    selectDeploymentArtifact(environment);
+    if (!hadData || previousEnvironment !== state.environment) {
+      state.plan = environment?.latestPlan || null;
+      state.planEnvironment = state.plan ? state.environment : null;
+      state.run = environment?.latestRun || null;
+    } else if (!state.run && environment?.latestRun) {
+      state.run = environment.latestRun;
+    }
+    state.loading = false;
+    if (WS.depEs) {
+      WS.depEs.close();
+      WS.depEs = null;
+    }
+    renderManagedDeploy();
+    const run = state.run;
+    if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
+  } catch {
+    if (!deploymentRequestIsCurrent(scope)) return;
+    state.loading = false;
+    $("#ws-deploy-managed").hidden = true;
+    $("#ws-deploy-legacy").hidden = false;
+    renderDeployControls();
+    connectDeployLogs();
+  }
+}
+
+function scheduleDeploymentPoll() {
+  const state = WS.managedDeploy;
+  clearDeploymentPoll(state);
+  if (!state || WS.pane !== "deploy") return;
+  const scope = deploymentRequestScope({ environment: true, run: true });
+  state.poll = setTimeout(async () => {
+    state.poll = null;
+    if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
+    const runId = scope.runId;
+    if (!runId) return loadManagedDeploy({ quiet: true });
+    try {
+      const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(runId)}`);
+      const body = response.ok ? await response.json() : null;
+      if (body && deploymentRequestIsCurrent(scope)) renderDeploymentRun(body.run);
+    } catch {}
+    if (!deploymentRequestIsCurrent({ ...scope, runId: state.run?.id }) || WS.pane !== "deploy") return;
+    const run = state.run;
+    if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
+    else loadManagedDeploy({ quiet: true });
+  }, 1500);
+}
 
 function openDeployPane() {
-  for (const b of document.querySelectorAll(".ws-target"))
-    b.classList.toggle("on", b.dataset.target === WS.depTarget);
-  renderDeployControls();
-  connectDeployLogs();
+  $("#ws-deploy-managed").hidden = true;
+  $("#ws-deploy-legacy").hidden = true;
+  loadManagedDeploy();
 }
 
 function renderDeployControls() {
@@ -4147,7 +4885,100 @@ function connectDeployLogs() {
 function selectDeployTarget(target) {
   if (target === WS.depTarget) return;
   WS.depTarget = target;
-  openDeployPane();
+  for (const b of document.querySelectorAll(".ws-target"))
+    b.classList.toggle("on", b.dataset.target === WS.depTarget);
+  renderDeployControls();
+  connectDeployLogs();
+}
+
+async function prepareDeploymentArtifact() {
+  const environment = deploymentEnvironment();
+  if (!environment) return;
+  WS.managedDeploy.loading = true;
+  renderManagedDeploy();
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(deploymentKey())}/deployment-artifacts/prepare`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ environment: environment.id, unitId: environment.units?.[0]?.id }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Artifact preparation could not start");
+    WS.managedDeploy.run = body.run;
+    renderDeploymentRun(body.run);
+    scheduleDeploymentPoll();
+  } catch (error) {
+    toast(error.message || "Artifact preparation failed");
+  } finally {
+    WS.managedDeploy.loading = false;
+    renderManagedDeploy();
+  }
+}
+
+async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
+  const environment = deploymentEnvironment();
+  if (!environment) return;
+  WS.managedDeploy.loading = true;
+  renderManagedDeploy();
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(deploymentKey())}/deployment-plans`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ environment: environment.id, operation, releaseId }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not discover deployment changes");
+    renderDeploymentPlan(body.plan);
+    if (body.environment) {
+      const index = WS.managedDeploy.data.environments.findIndex((item) => item.id === environment.id);
+      if (index >= 0) WS.managedDeploy.data.environments[index] = body.environment;
+      renderManagedDeploy();
+    }
+  } catch (error) {
+    toast(error.message || "Discovery failed");
+  } finally {
+    WS.managedDeploy.loading = false;
+    renderManagedDeploy();
+  }
+}
+
+async function approveDeploymentPlan() {
+  const plan = WS.managedDeploy.plan;
+  if (!plan || plan.blocked) return;
+  const acknowledgements = plan.acknowledgements || [];
+  if (acknowledgements.length && !$("#dep-ack").checked) return toast("Review and acknowledge the production plan first");
+  $("#dep-approve").disabled = true;
+  try {
+    const intentResponse = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approval-intents`, { method: "POST" });
+    const intentBody = await intentResponse.json().catch(() => ({}));
+    if (!intentResponse.ok) throw new Error(intentBody.error || "Could not create an approval intent");
+    const response = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        revision: plan.revision,
+        digest: plan.digest,
+        intent: intentBody.intent,
+        acknowledgementIds: acknowledgements.map((item) => item.id),
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "The plan could not be approved");
+    renderDeploymentRun(body.run);
+    scheduleDeploymentPoll();
+  } catch (error) {
+    toast(error.message || "Approval failed");
+    $("#dep-approve").disabled = false;
+  }
+}
+
+async function cancelDeploymentRun() {
+  const run = WS.managedDeploy.run;
+  if (!run) return;
+  const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST" });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) return toast(body.error || "Cancellation request failed");
+  renderDeploymentRun(body.run);
 }
 
 async function deployRun() {
@@ -4381,6 +5212,26 @@ $("#ws-msg").addEventListener("input", stashDraft);
 $("#ws-targets").onclick = (e) => {
   const b = e.target.closest(".ws-target");
   if (b) selectDeployTarget(b.dataset.target);
+};
+$("#dep-envs").onclick = (e) => {
+  const button = e.target.closest("[data-environment]");
+  if (!button || button.dataset.environment === WS.managedDeploy.environment) return;
+  WS.managedDeploy.environment = button.dataset.environment;
+  WS.managedDeploy.plan = null;
+  WS.managedDeploy.run = deploymentEnvironment()?.latestRun || null;
+  renderManagedDeploy();
+};
+$("#dep-releases").onclick = (e) => {
+  const button = e.target.closest("[data-rollback-release]");
+  if (button) discoverDeploymentPlan("rollback", button.dataset.rollbackRelease);
+};
+$("#dep-prepare").onclick = prepareDeploymentArtifact;
+$("#dep-discover").onclick = () => discoverDeploymentPlan();
+$("#dep-approve").onclick = approveDeploymentPlan;
+$("#dep-cancel").onclick = cancelDeploymentRun;
+$("#dep-ack").onchange = () => {
+  const plan = WS.managedDeploy.plan;
+  $("#dep-approve").disabled = !plan || !!plan.blocked || ((plan.acknowledgements || []).length > 0 && !$("#dep-ack").checked);
 };
 $("#ws-dep-run").onclick = deployRun;
 $("#ws-dep-stop").onclick = deployStop;
@@ -5078,17 +5929,24 @@ const USAGE_REFRESH_MS = 60_000;
 const USAGE_STATE = {
   cache: new Map(),
   inFlight: new Map(),
+  failedAt: new Map(), // scope key → when reading it last failed, so we back off
   activeKey: null,
   renderedKey: null,
 };
 
+// Which windows apply depends on the model actually in use, not just the one
+// typed into the box. With no model configured, Claude reports the one it chose
+// on the session's first status — scoping to it keeps a maxed-out weekly Opus
+// window from reading as "you are out of usage" while on Sonnet.
 function selectedUsageScope() {
   if (!WS.name || WS.chatOnly) return null;
-  const model = WS.model?.trim() || null;
+  const configured = WS.model?.trim() || null;
+  const model = configured || WS.actualModel?.trim() || null;
   return {
     project: WS.name,
     engine: WS.engine,
     model,
+    label: model ? (configured ? model : `${model} (default)`) : "default model",
     key: `${WS.engine}:${model || "default"}`,
   };
 }
@@ -5110,16 +5968,28 @@ function usageSelectionChanged() {
   }
   const changed = scope.key !== USAGE_STATE.activeKey;
   USAGE_STATE.activeKey = scope.key;
-  $("#usage-scope").textContent = `${scope.project} · ${scope.engine} · ${scope.model || "default model"}`;
+  $("#usage-scope").textContent = `${scope.project} · ${scope.engine} · ${scope.label}`;
   for (const button of aiControlNodes("usage"))
-    button.title = `View ${scope.engine} subscription usage for ${scope.model || "the default model"}`;
+    button.title = `View ${scope.engine} subscription usage for ${scope.label}`;
   const cached = USAGE_STATE.cache.get(scope.key);
   if (cached && (changed || USAGE_STATE.renderedKey !== scope.key)) {
     renderUsage(cached.snapshot, scope);
     if (Date.now() - cached.checkedAt >= USAGE_REFRESH_MS) fetchUsage(true, true);
   } else if (!cached) {
     resetUsageButton();
-    fetchUsage(false, true);
+    // a status event arrives several times a turn; a provider that cannot be
+    // read must not be re-spawned on each one
+    const failedAt = USAGE_STATE.failedAt.get(scope.key) || 0;
+    if (Date.now() - failedAt >= USAGE_REFRESH_MS) fetchUsage(false, true);
+    else markUsageUnreadable();
+  }
+}
+
+function markUsageUnreadable() {
+  for (const button of aiControlNodes("usage")) {
+    button.textContent = "Usage ?";
+    button.title = "Subscription usage could not be read for this provider";
+    button.classList.remove("usage-warning", "usage-critical");
   }
 }
 
@@ -5235,14 +6105,19 @@ function renderUsage(snapshot, scope = selectedUsageScope()) {
   $("#usage-updated").textContent = snapshot.updatedAt
     ? `Updated ${new Date(snapshot.updatedAt).toLocaleString()}`
     : "Not refreshed";
-  $("#usage-scope").textContent = `${scope.project} · ${scope.engine} · ${scope.model || "default model"}`;
+  $("#usage-scope").textContent = `${scope.project} · ${scope.engine} · ${scope.label}`;
 
-  const percentages = providers.flatMap((provider) =>
-    (provider.windows || []).map((window) => Number(window.usedPercent)).filter(Number.isFinite),
-  );
-  const highest = percentages.length ? Math.max(...percentages) : null;
+  // the button shows the window closest to its cap — say which one, so a number
+  // driven by one weekly window is never mistaken for "everything is spent"
+  const all = providers.flatMap((provider) => provider.windows || [])
+    .filter((window) => Number.isFinite(Number(window.usedPercent)));
+  const highest = all.length ? Math.max(...all.map((window) => Number(window.usedPercent))) : null;
+  const detail = all.map((window) => `${window.label} ${usagePercent(window.usedPercent)}`).join("\n");
   for (const button of aiControlNodes("usage")) {
     button.textContent = highest == null ? "Usage" : `Usage ${Math.round(highest)}%`;
+    button.title = detail
+      ? `${scope.engine} · ${scope.label}\n${detail}`
+      : `View ${scope.engine} subscription usage for ${scope.label}`;
     button.classList.toggle("usage-warning", highest != null && highest >= 80 && highest < 100);
     button.classList.toggle("usage-critical", highest != null && highest >= 100);
   }
@@ -5273,6 +6148,7 @@ async function fetchUsage(force = false, quiet = false) {
     const previous = USAGE_STATE.cache.get(scope.key);
     const changed = !previous || previous.signature !== signature;
     const stored = changed ? snapshot : previous.snapshot;
+    USAGE_STATE.failedAt.delete(scope.key);
     USAGE_STATE.cache.set(scope.key, {
       snapshot: stored,
       signature,
@@ -5284,9 +6160,11 @@ async function fetchUsage(force = false, quiet = false) {
     }
   })()
     .catch(() => {
+      USAGE_STATE.failedAt.set(scope.key, Date.now());
       if (selectedUsageScope()?.key !== scope.key) return;
       if (!USAGE_STATE.cache.has(scope.key)) {
         $("#usage-body").innerHTML = '<div class="usage-empty usage-empty-error">Usage could not be loaded.</div>';
+        markUsageUnreadable(); // the modal may be shut — the button has to carry it
       }
       if (!quiet) toast("Could not refresh subscription usage");
     })
@@ -5635,7 +6513,10 @@ $("#d-engine").onchange = () => {
   const engine = $("#d-engine").value || "claude";
   $("#d-model").value = "";
   renderEffortOptions($("#d-effort"), engine, "", "");
-  refreshModelCatalog(editing.name, engine, "", "", $("#d-effort"));
+  refreshModelCatalog(editing.name, engine, () => ({
+    model: $("#d-model").value.trim(),
+    effort: $("#d-effort").value,
+  }), $("#d-effort"));
 };
 $("#d-model").onchange = () => {
   const engine = $("#d-engine").value || "claude";
@@ -5644,7 +6525,10 @@ $("#d-model").onchange = () => {
 $("#d-model").onfocus = () => {
   if (!editing) return;
   const engine = $("#d-engine").value || editing.aiEngine || "claude";
-  refreshModelCatalog(editing.name, engine, $("#d-model").value.trim(), $("#d-effort").value, $("#d-effort"));
+  refreshModelCatalog(editing.name, engine, () => ({
+    model: $("#d-model").value.trim(),
+    effort: $("#d-effort").value,
+  }), $("#d-effort"));
 };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;

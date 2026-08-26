@@ -14,10 +14,11 @@
  * upstream, so psm runs with `--disable-warning=ExperimentalWarning` rather than
  * printing a warning about its own storage on every boot.
  *
- * Still files, not a database: plans, sessions, logs and backups. Those are
- * documents psm writes whole and reads whole, and a row would only wrap them.
- * The rule for what belongs here is small things that are edited one at a time
- * and looked at together.
+ * Still files, not a database: AI sessions, raw process/deployment logs and
+ * backups. Those are documents or byte streams psm writes whole. Deployment
+ * plans are different: approval, queueing, recovery and locking all depend on
+ * several related facts changing atomically, so their structured state lives
+ * here while their raw transcript remains a file.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -79,6 +80,303 @@ const MIGRATIONS: readonly string[] = [
      PRIMARY KEY (session_id, project)
    );
    CREATE INDEX work_session_projects_by_project ON work_session_projects (project);`,
+
+  // 3 — managed deployment state. Repository manifests and plans are inputs,
+  // but authority and execution are local state: connection bindings, policy,
+  // approvals, leases and observations must never be inferred from a checkout
+  // after the fact. JSON columns hold versioned documents and are guarded at
+  // the relational boundary; secrets and raw provider responses never belong
+  // in this database.
+  `CREATE TABLE deployment_manifests (
+     project_id     TEXT NOT NULL,
+     checkout_id    TEXT NOT NULL,
+     environment_id TEXT NOT NULL,
+     commit_sha     TEXT NOT NULL,
+     digest         TEXT NOT NULL,
+     schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+     document       TEXT NOT NULL CHECK (json_valid(document)),
+     created_at     INTEGER NOT NULL,
+     PRIMARY KEY (project_id, checkout_id, environment_id, commit_sha, digest)
+   );
+   CREATE INDEX deployment_manifests_by_digest
+     ON deployment_manifests (digest);
+   CREATE INDEX deployment_manifests_by_source
+     ON deployment_manifests (project_id, checkout_id, environment_id, created_at DESC);
+
+   CREATE TABLE deployment_connections (
+     connection_id       TEXT PRIMARY KEY,
+     kind                TEXT NOT NULL,
+     label               TEXT NOT NULL,
+     metadata_revision   INTEGER NOT NULL CHECK (metadata_revision > 0),
+     secret_generation   INTEGER NOT NULL DEFAULT 0 CHECK (secret_generation >= 0),
+     readiness           TEXT NOT NULL CHECK (readiness IN ('ready', 'missing-secret', 'invalid', 'unknown')),
+     metadata            TEXT NOT NULL CHECK (json_valid(metadata)),
+     constraints_document TEXT NOT NULL CHECK (json_valid(constraints_document)),
+     created_at          INTEGER NOT NULL,
+     updated_at          INTEGER NOT NULL CHECK (updated_at >= created_at)
+   );
+   CREATE INDEX deployment_connections_by_kind
+     ON deployment_connections (kind, label);
+
+   CREATE TABLE deployment_connection_bindings (
+     project_id       TEXT NOT NULL,
+     checkout_id      TEXT NOT NULL,
+     environment_id   TEXT NOT NULL,
+     slot             TEXT NOT NULL,
+     connection_id    TEXT NOT NULL REFERENCES deployment_connections (connection_id) ON DELETE RESTRICT,
+     binding_revision INTEGER NOT NULL CHECK (binding_revision > 0),
+     created_at       INTEGER NOT NULL,
+     updated_at       INTEGER NOT NULL CHECK (updated_at >= created_at),
+     PRIMARY KEY (checkout_id, environment_id, slot)
+   );
+   CREATE INDEX deployment_connection_bindings_by_project
+     ON deployment_connection_bindings (project_id, environment_id);
+   CREATE INDEX deployment_connection_bindings_by_connection
+     ON deployment_connection_bindings (connection_id);
+
+   CREATE TABLE deployment_policies (
+     scope_kind TEXT NOT NULL CHECK (scope_kind IN ('global', 'risk', 'project', 'environment', 'target')),
+     scope_id   TEXT NOT NULL,
+     revision   INTEGER NOT NULL CHECK (revision > 0),
+     document   TEXT NOT NULL CHECK (json_valid(document)),
+     created_at INTEGER NOT NULL,
+     PRIMARY KEY (scope_kind, scope_id, revision)
+   );
+   CREATE INDEX deployment_policies_latest
+     ON deployment_policies (scope_kind, scope_id, revision DESC);
+
+   CREATE TABLE deployment_resource_bindings (
+     project_id          TEXT NOT NULL,
+     environment_id      TEXT NOT NULL,
+     resource_id         TEXT NOT NULL,
+     connection_id       TEXT NOT NULL REFERENCES deployment_connections (connection_id) ON DELETE RESTRICT,
+     provider_account    TEXT NOT NULL,
+     provider_object_id  TEXT NOT NULL,
+     observed_fingerprint TEXT NOT NULL,
+     binding_revision    INTEGER NOT NULL CHECK (binding_revision > 0),
+     bound_at            INTEGER NOT NULL,
+     updated_at          INTEGER NOT NULL CHECK (updated_at >= bound_at),
+     PRIMARY KEY (project_id, environment_id, resource_id),
+     UNIQUE (provider_account, provider_object_id)
+   );
+   CREATE INDEX deployment_resource_bindings_by_connection
+     ON deployment_resource_bindings (connection_id);
+
+   CREATE TABLE deployment_artifacts (
+     psm_artifact_id     TEXT PRIMARY KEY,
+     producing_run_id    TEXT REFERENCES deployment_runs (run_id) ON DELETE RESTRICT,
+     provenance          TEXT NOT NULL CHECK (provenance IN ('managed', 'external')),
+     project_id          TEXT NOT NULL,
+     kind                TEXT NOT NULL,
+     source_repository   TEXT NOT NULL,
+     github_artifact_id  TEXT NOT NULL,
+     producer_run_id     TEXT NOT NULL,
+     commit_sha          TEXT NOT NULL,
+     version             TEXT NOT NULL,
+     build_profile_digest TEXT NOT NULL,
+     payload_algorithm   TEXT NOT NULL,
+     payload_digest      TEXT NOT NULL,
+     archive_digest      TEXT NOT NULL,
+     provider_locator    TEXT NOT NULL CHECK (json_valid(provider_locator)),
+     provenance_url      TEXT,
+     created_at          INTEGER NOT NULL,
+     retained_until      INTEGER NOT NULL CHECK (retained_until >= created_at),
+     tombstoned_at       INTEGER,
+     UNIQUE (source_repository, github_artifact_id),
+     CHECK ((provenance = 'managed' AND producing_run_id IS NOT NULL)
+       OR (provenance = 'external' AND producing_run_id IS NULL)),
+     CHECK (tombstoned_at IS NULL OR tombstoned_at >= created_at)
+   );
+   CREATE INDEX deployment_artifacts_by_source
+     ON deployment_artifacts (project_id, source_repository, commit_sha, created_at DESC);
+   CREATE INDEX deployment_artifacts_by_retention
+     ON deployment_artifacts (retained_until) WHERE tombstoned_at IS NULL;
+
+   CREATE TABLE deployment_plans (
+     plan_id                    TEXT NOT NULL,
+     revision                   INTEGER NOT NULL CHECK (revision > 0),
+     digest                     TEXT NOT NULL,
+     project_id                 TEXT NOT NULL,
+     checkout_id                TEXT NOT NULL,
+     environment_id             TEXT NOT NULL,
+     operation                  TEXT NOT NULL CHECK (operation IN ('reconcile', 'release', 'deploy', 'rollback', 'adopt')),
+     risk                       TEXT NOT NULL CHECK (risk IN ('development', 'staging', 'production')),
+     manifest_digest            TEXT NOT NULL,
+     psm_artifact_id            TEXT REFERENCES deployment_artifacts (psm_artifact_id) ON DELETE RESTRICT,
+     required_acknowledgements  TEXT NOT NULL CHECK (json_valid(required_acknowledgements)),
+     blocked                    INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1)),
+     immutable_document         TEXT NOT NULL CHECK (json_valid(immutable_document)),
+     created_at                 INTEGER NOT NULL,
+     expires_at                 INTEGER NOT NULL CHECK (expires_at > created_at),
+     superseded_at              INTEGER,
+     PRIMARY KEY (plan_id, revision),
+     UNIQUE (plan_id, revision, digest),
+     CHECK (superseded_at IS NULL OR superseded_at >= created_at)
+   );
+   CREATE INDEX deployment_plans_by_project
+     ON deployment_plans (project_id, environment_id, created_at DESC);
+   CREATE INDEX deployment_plans_runnable
+     ON deployment_plans (expires_at) WHERE blocked = 0 AND superseded_at IS NULL;
+
+   CREATE TABLE deployment_plan_actions (
+     plan_id             TEXT NOT NULL,
+     plan_revision       INTEGER NOT NULL,
+     ordinal             INTEGER NOT NULL CHECK (ordinal >= 0),
+     action_id           TEXT NOT NULL,
+     action_digest       TEXT NOT NULL,
+     kind                TEXT NOT NULL,
+     phase               TEXT NOT NULL,
+     side_effecting      INTEGER NOT NULL CHECK (side_effecting IN (0, 1)),
+     preconditions       TEXT NOT NULL CHECK (json_valid(preconditions)),
+     immutable_document  TEXT NOT NULL CHECK (json_valid(immutable_document)),
+     PRIMARY KEY (plan_id, plan_revision, ordinal),
+     UNIQUE (plan_id, plan_revision, action_id),
+     FOREIGN KEY (plan_id, plan_revision)
+       REFERENCES deployment_plans (plan_id, revision) ON DELETE CASCADE
+   );
+
+   CREATE TABLE deployment_approvals (
+     approval_id        TEXT PRIMARY KEY,
+     plan_id            TEXT NOT NULL,
+     plan_revision      INTEGER NOT NULL,
+     plan_digest        TEXT NOT NULL,
+     risk               TEXT NOT NULL CHECK (risk IN ('development', 'staging', 'production')),
+     actor_kind         TEXT NOT NULL CHECK (actor_kind IN ('local-operator', 'werewolf-user')),
+     actor_subject      TEXT,
+     agent_id           TEXT NOT NULL,
+     origin             TEXT NOT NULL CHECK (origin IN ('local', 'paired')),
+     acknowledgement_ids TEXT NOT NULL CHECK (json_valid(acknowledgement_ids)),
+     approved_at        INTEGER NOT NULL,
+     expires_at         INTEGER NOT NULL CHECK (expires_at > approved_at),
+     consumed_at        INTEGER NOT NULL CHECK (consumed_at >= approved_at),
+     UNIQUE (plan_id, plan_revision, plan_digest),
+     FOREIGN KEY (plan_id, plan_revision, plan_digest)
+       REFERENCES deployment_plans (plan_id, revision, digest) ON DELETE RESTRICT
+   );
+
+   CREATE TABLE deployment_runs (
+     run_id             TEXT PRIMARY KEY,
+     run_kind           TEXT NOT NULL CHECK (run_kind IN ('prepare', 'deployment')),
+     project_id         TEXT NOT NULL,
+     environment_id     TEXT,
+     operation          TEXT NOT NULL CHECK (operation IN ('prepare', 'reconcile', 'release', 'deploy', 'rollback', 'adopt')),
+     plan_id            TEXT,
+     plan_revision      INTEGER,
+     plan_digest        TEXT,
+     approval_id        TEXT UNIQUE REFERENCES deployment_approvals (approval_id) ON DELETE RESTRICT,
+     artifact_run_id    TEXT REFERENCES deployment_runs (run_id) ON DELETE RESTRICT,
+     state              TEXT NOT NULL CHECK (state IN ('queued', 'acquiring-locks', 'checking-preconditions', 'reconciling', 'dispatching', 'waiting-executor', 'observing-result', 'importing-artifact', 'verifying', 'interrupting', 'recovery-required', 'succeeded', 'failed', 'cancelled', 'interrupted', 'stale-plan', 'rolled-back')),
+     phase              TEXT NOT NULL,
+     audit_degraded     INTEGER NOT NULL DEFAULT 0 CHECK (audit_degraded IN (0, 1)),
+     cancellation_requested_at INTEGER,
+     recovery_reason    TEXT,
+     raw_log_path       TEXT,
+     created_at         INTEGER NOT NULL,
+     updated_at         INTEGER NOT NULL CHECK (updated_at >= created_at),
+     started_at         INTEGER,
+     finished_at        INTEGER,
+     FOREIGN KEY (plan_id, plan_revision, plan_digest)
+       REFERENCES deployment_plans (plan_id, revision, digest) ON DELETE RESTRICT,
+     CHECK ((run_kind = 'prepare' AND plan_id IS NULL AND plan_revision IS NULL AND plan_digest IS NULL AND approval_id IS NULL)
+       OR (run_kind = 'deployment' AND plan_id IS NOT NULL AND plan_revision IS NOT NULL AND plan_digest IS NOT NULL AND approval_id IS NOT NULL)),
+     CHECK (finished_at IS NULL OR finished_at >= created_at)
+   );
+   CREATE INDEX deployment_runs_by_project
+     ON deployment_runs (project_id, environment_id, created_at DESC);
+   CREATE INDEX deployment_runs_recovery
+     ON deployment_runs (state, updated_at);
+
+   CREATE TABLE deployment_run_steps (
+     run_id             TEXT NOT NULL REFERENCES deployment_runs (run_id) ON DELETE CASCADE,
+     ordinal            INTEGER NOT NULL CHECK (ordinal >= 0),
+     step_id            TEXT NOT NULL,
+     action_digest      TEXT NOT NULL,
+     adapter_kind       TEXT NOT NULL,
+     idempotency_key    TEXT NOT NULL UNIQUE,
+     state              TEXT NOT NULL CHECK (state IN ('prepared', 'submitted', 'observed', 'completed', 'failed', 'cancelled', 'recovery-required')),
+     external_id        TEXT,
+     preconditions      TEXT NOT NULL CHECK (json_valid(preconditions)),
+     intent             TEXT NOT NULL CHECK (json_valid(intent)),
+     result             TEXT CHECK (result IS NULL OR json_valid(result)),
+     prepared_at        INTEGER NOT NULL,
+     submitted_at       INTEGER,
+     observed_at        INTEGER,
+     completed_at       INTEGER,
+     updated_at         INTEGER NOT NULL CHECK (updated_at >= prepared_at),
+     PRIMARY KEY (run_id, ordinal),
+     UNIQUE (run_id, step_id),
+     UNIQUE (adapter_kind, external_id)
+   );
+   CREATE INDEX deployment_run_steps_by_state
+     ON deployment_run_steps (state, updated_at);
+
+   CREATE TABLE deployment_events (
+     run_id       TEXT NOT NULL REFERENCES deployment_runs (run_id) ON DELETE CASCADE,
+     sequence     INTEGER NOT NULL CHECK (sequence > 0),
+     occurred_at  INTEGER NOT NULL,
+     event_type   TEXT NOT NULL,
+     phase        TEXT NOT NULL,
+     level        TEXT NOT NULL CHECK (level IN ('info', 'warning', 'error')),
+     message      TEXT NOT NULL,
+     payload      TEXT NOT NULL CHECK (json_valid(payload)),
+     PRIMARY KEY (run_id, sequence)
+   );
+
+   CREATE TABLE deployment_target_locks (
+     lock_key         TEXT PRIMARY KEY,
+     owner_run_id     TEXT NOT NULL REFERENCES deployment_runs (run_id) ON DELETE RESTRICT,
+     owner_boot_id    TEXT NOT NULL,
+     acquired_at      INTEGER NOT NULL,
+     heartbeat_at     INTEGER NOT NULL CHECK (heartbeat_at >= acquired_at),
+     lease_expires_at INTEGER NOT NULL CHECK (lease_expires_at > heartbeat_at)
+   );
+   CREATE INDEX deployment_target_locks_by_owner
+     ON deployment_target_locks (owner_run_id);
+   CREATE INDEX deployment_target_locks_by_expiry
+     ON deployment_target_locks (lease_expires_at);
+
+   CREATE TABLE deployment_releases (
+     release_id          TEXT PRIMARY KEY,
+     psm_artifact_id     TEXT NOT NULL REFERENCES deployment_artifacts (psm_artifact_id) ON DELETE RESTRICT,
+     activation_run_id   TEXT REFERENCES deployment_runs (run_id) ON DELETE RESTRICT,
+     target_id           TEXT NOT NULL,
+     project_id          TEXT NOT NULL,
+     environment_id      TEXT NOT NULL,
+     unit_id             TEXT NOT NULL,
+     previous_release_id TEXT REFERENCES deployment_releases (release_id) ON DELETE RESTRICT,
+     provenance          TEXT NOT NULL CHECK (provenance IN ('managed', 'external')),
+     target_contract_digest TEXT NOT NULL,
+     receipt             TEXT NOT NULL CHECK (json_valid(receipt)),
+     activated_at        INTEGER NOT NULL,
+     deactivated_at      INTEGER,
+     tombstoned_at       INTEGER,
+     UNIQUE (target_id, release_id),
+     CHECK ((provenance = 'managed' AND activation_run_id IS NOT NULL)
+       OR (provenance = 'external' AND activation_run_id IS NULL)),
+     CHECK (deactivated_at IS NULL OR deactivated_at >= activated_at),
+     CHECK (tombstoned_at IS NULL OR tombstoned_at >= activated_at)
+   );
+   CREATE UNIQUE INDEX deployment_releases_one_active
+     ON deployment_releases (target_id)
+     WHERE deactivated_at IS NULL AND tombstoned_at IS NULL;
+   CREATE INDEX deployment_releases_by_unit
+     ON deployment_releases (project_id, environment_id, unit_id, activated_at DESC);
+
+   CREATE TABLE deployment_watch_snapshots (
+     monitor_id       TEXT NOT NULL,
+     project_id       TEXT NOT NULL,
+     environment_id   TEXT NOT NULL,
+     unit_id          TEXT NOT NULL,
+     provider_state   TEXT NOT NULL,
+     freshness        TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale', 'missing')),
+     effective_state  TEXT NOT NULL CHECK (effective_state IN ('healthy', 'down', 'degraded', 'unknown', 'stale', 'not-monitored')),
+     observed_at      INTEGER NOT NULL,
+     ingested_at      INTEGER NOT NULL CHECK (ingested_at >= observed_at),
+     normalized_state TEXT NOT NULL CHECK (json_valid(normalized_state)),
+     PRIMARY KEY (monitor_id, environment_id, unit_id)
+   );
+   CREATE INDEX deployment_watch_snapshots_by_project
+     ON deployment_watch_snapshots (project_id, environment_id, unit_id);`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

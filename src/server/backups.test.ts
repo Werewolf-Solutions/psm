@@ -32,6 +32,9 @@ test("backup exclusions always reject credentials, dependencies, and private key
   assert.equal(exclusionReason("logs/server.log"), "generated/dependency directory");
   assert.equal(exclusionReason(".aws/credentials"), "generated/dependency directory");
   assert.equal(exclusionReason("infra/prod.tfvars"), "private key or credential store");
+  assert.equal(exclusionReason(".psm-data/psm.db"), "generated/dependency directory");
+  assert.equal(exclusionReason(".psm-credentials/abc/private-key"), "generated/dependency directory");
+  assert.equal(exclusionReason(".psm-deploy-logs/run_1.log"), "generated/dependency directory");
   assert.equal(exclusionReason("src/index.ts"), null);
 });
 

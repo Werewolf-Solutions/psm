@@ -21,6 +21,11 @@ node_modules/
 .psm-agent.json
 .psm-links.json
 .psm-data/
+.psm-credentials/
+.psm-deploy-logs/
+
+# `go build` in host-helper/ drops the compiled binary beside its source.
+host-helper/host-helper
 .psm-prod.env
 
 # Stamped by the deploy workflow so the page can spot an out-of-date agent.
