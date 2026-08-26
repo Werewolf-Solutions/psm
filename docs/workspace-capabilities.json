@@ -26,8 +26,8 @@
       "kind": "mcp",
       "providerProject": "feedback-hub",
       "title": "Feedback Hub",
-      "summary": "Work with registered apps, feedback clusters, and roadmap items.",
-      "usage": "Use Feedback Hub to inspect and triage feedback. Never dismiss or promote feedback without the user's approval.",
+      "summary": "Work with registered apps, feedback, QA session timelines and evidence manifests, clusters, and roadmap items.",
+      "usage": "Use Feedback Hub to inspect and triage feedback and QA evidence metadata. Media bytes stay behind the admin HTTP API. Never register an app, dismiss feedback, or promote work without the user's approval.",
       "requiredEnv": [],
       "mcp": {
         "transport": "stdio",

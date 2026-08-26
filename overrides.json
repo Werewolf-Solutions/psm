@@ -63,8 +63,8 @@
     "category": "AI & automation",
     "status": "active",
     "stack": "Node/ESM, Express, SQLite, MCP",
-    "description": "Feedback Hub — register any app, collect user feedback through one ingestion API (drop-in widget or REST), cluster/triage it with Claude, promote to a roadmap, and semi-automatically draft implementation plans (always human-gated). Exposes an MCP server so AI agents can operate on the backlog.",
-    "next": "Wire 'promote to roadmap' into the todo repo; migrate the decision engine into control-room; add gh-based draft-PR creation behind confidence gates.",
+    "description": "Feedback Hub — reusable feedback and QA capture for web, desktop, and local software: record privacy-redacted interactions, screen/window video, screenshots and annotations, then review evidence, cluster/triage it, promote it to a roadmap, and operate the backlog through MCP.",
+    "next": "Exercise the web and universal recorders against real apps, then add a permissioned native companion for semantic macOS/Windows/Linux accessibility events where browser screen capture is insufficient.",
     "runCommand": "npm start",
     "port": 4400,
     "aiFullAccess": true
@@ -318,10 +318,9 @@
     "priority": "high",
     "pinned": true,
     "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
-    "next": "Turn the new-project brainstorm prompt into a structured reuse report that can preselect scaffold options and capability attachments.",
+    "next": "The managed deployment engine and its surfaces are complete and tested, but no executor has run against a real target. Next: stand up the Werewolf-Solutions/deployment-control workflow, install the host helper on the droplet, bind a Better Stack monitor, then commit todo-app's draft .psm/deployments.json and take one real managed release.",
     "aiFullAccess": true,
-    "aiEngine": "codex",
-    "aiModel": "gpt-5.5",
+    "aiEngine": "claude",
     "attachments": [
       {
         "capabilityRef": "workspace:werewolf",
@@ -332,7 +331,10 @@
         "attachedAt": 1784559897780
       }
     ],
-    "runCommand": "npm run dev"
+    "runCommand": "npm run dev",
+    "workingOn": true,
+    "workingOnAt": 1787653845117,
+    "aiModel": "opus"
   },
   "__workspace__": {
     "aiFullAccess": true,
