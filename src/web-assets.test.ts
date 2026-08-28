@@ -284,3 +284,17 @@ test("opening a workroom reads recorded dependency state, never probes", () => {
   const server = fs.readFileSync(path.join(WEB, "..", "src", "server", "index.ts"), "utf8");
   assert.match(server, /crossProjectDependencies\(room\.projects\)/, "the room endpoint reads stored edges");
 });
+
+test("the environment chooser names the domain each environment publishes to", () => {
+  // "Staging or production" is only a real choice if you can see where each one
+  // goes. The domain used to appear once, as the subtitle of whichever
+  // environment happened to be selected.
+  const js = read("app.js");
+  const chooser = js.match(/const envs = \$\("#dep-envs"\);[\s\S]*?\n  }\n(?:  \/\/[\s\S]*?\n)?  if \(declared\.length === 1\) \{[\s\S]*?\n  \}\n/);
+  assert.ok(chooser, "renderManagedDeploy should build #dep-envs from the declared environments");
+  assert.match(chooser[0], /item\.hostname \|\| item\.target\?\.hostname/, "each chip reads its own hostname");
+  assert.match(chooser[0], /dep-env-host/, "the hostname is rendered, not just read");
+  // One environment is not a choice; say so instead of showing a lone dead chip.
+  assert.match(chooser[0], /Only \$\{declared\[0\]\.id\} is declared/);
+  assert.ok(read("styles.css").includes(".dep-env-host"), "the hostname line needs a style");
+});

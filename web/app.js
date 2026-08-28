@@ -4736,13 +4736,32 @@ function renderManagedDeploy() {
   $("#dep-risk").dataset.risk = environment.risk || "unknown";
   const envs = $("#dep-envs");
   envs.replaceChildren();
-  for (const item of data.environments || []) {
-    const button = depText("button", `dep-env${item.id === environment.id ? " on" : ""}`, item.id);
+  const declared = data.environments || [];
+  for (const item of declared) {
+    const button = el("button", `dep-env${item.id === environment.id ? " on" : ""}`);
     button.type = "button";
     button.dataset.environment = item.id;
     button.disabled = WS.managedDeploy.loading;
     button.setAttribute("aria-pressed", String(item.id === environment.id));
+    button.append(depText("span", "dep-env-id", item.id));
+    // The domain each environment publishes to, so this is a choice between two
+    // places rather than between two words. An environment with no ingress and no
+    // monitor has no domain to name, and says so rather than showing blank.
+    const host = item.hostname || item.target?.hostname || "";
+    const hostLabel = depText("span", "dep-env-host", host || "no domain declared");
+    if (!host) hostLabel.classList.add("unset");
+    button.append(hostLabel);
+    button.title = host ? `${item.id} · ${host} · ${item.risk || "unknown"} risk` : `${item.id} · ${item.risk || "unknown"} risk`;
     envs.append(button);
+  }
+  // One environment is not a choice, and a single chip reads like a control that
+  // is broken rather than one the manifest never asked for.
+  if (declared.length === 1) {
+    envs.append(depText(
+      "span",
+      "dep-env-note",
+      `Only ${declared[0].id} is declared. Staging is another environment in .psm/deployments.json, not a switch here.`,
+    ));
   }
   renderDeploymentArtifacts(environment);
   renderManagedSummary(environment);

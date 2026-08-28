@@ -751,12 +751,23 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
   color: var(--muted); font-size: 10.5px; font-weight: 800; letter-spacing: .05em; text-transform: uppercase;
 }
 .dep-risk[data-risk="production"] { color: #f85149; border-color: color-mix(in srgb, #f85149 55%, var(--line)); }
-.dep-envs { display: flex; gap: 6px; padding: 10px 22px 0; overflow-x: auto; }
+.dep-envs { display: flex; align-items: center; gap: 6px; padding: 10px 22px 0; overflow-x: auto; }
 .dep-env {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
   border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; background: var(--card);
   color: var(--muted); font: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+  text-align: left; white-space: nowrap;
 }
 .dep-env.on { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--card)); }
+/* The domain sits under the environment's name: the same choice, said twice —
+   once in the words the manifest uses, once in the place it actually publishes. */
+.dep-env-host {
+  font-size: 10.5px; font-weight: 500; color: var(--faint); letter-spacing: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.dep-env.on .dep-env-host { color: color-mix(in srgb, var(--accent) 70%, var(--muted)); }
+.dep-env-host.unset { font-family: inherit; font-style: italic; }
+.dep-env-note { font-size: 11.5px; color: var(--faint); margin-left: 4px; white-space: normal; }
 .dep-toolbar {
   display: flex; align-items: center; gap: 8px; padding: 12px 22px; border-bottom: 1px solid var(--line);
   background: var(--bg-soft); position: sticky; top: 0; z-index: 2;
