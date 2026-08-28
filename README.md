@@ -286,7 +286,8 @@ Click **▶** on a card to open its cockpit:
 
   Alongside them, the **managed** desired-state engine specified in
   [`docs/deploy/DEPLOYMENT-SYSTEM.md`](docs/deploy/DEPLOYMENT-SYSTEM.md) is built and wired in.
-  A project with a `.psm/deployments.json` manifest gets a Deploy pane that observes the
+  psm carries its own manifest (`.psm/deployments.json`), so its Deploy pane is the managed
+  one. A project with such a manifest gets a Deploy pane that observes the
   environment, builds a plan, blocks it when anything has drifted, takes an exact-digest
   approval bound to what was reviewed, then runs it with live events, target locks, crash
   recovery and rollback. Every one of the fifteen action kinds has an installed executor,
@@ -345,6 +346,10 @@ src/server/skills.ts "skills used by the agents" — mines Claude Code transcrip
 src/identity.ts      stable per-project ids, minted on demand into <project>/.psm/identity.json
 src/server/deploy/   the managed deployment engine — manifest, graph, connections/secrets,
                      observation, planner, approval, durable store, runner and executors
+.psm/deployments.json  psm's own desired state: one production environment on
+                     psm.werewolf.solutions, planned by the engine above
+.psm/scripts/        the CI half of the artifact contract — builds web/ into an immutable,
+                     independently digested payload for .github/workflows/build-static.yml
 host-helper/         the root-owned Go service a target runs so psm can reconcile nginx,
                      certificates and immutable release directories without a shell
 schemas/             the published JSON Schema for `.psm/deployments.json`

@@ -354,3 +354,25 @@ test("validation errors expose bounded structured issues", () => {
     },
   );
 });
+
+test("psm's own committed manifest is valid against its own validator", () => {
+  // psm is now a project the deployment engine has to be able to read. A schema
+  // change that invalidates the manifest in this repository is a change that
+  // would break every other project's manifest too, and should fail here first.
+  const root = path.resolve(import.meta.dirname, "..", "..", "..");
+  const loaded = loadDeploymentManifest(root, "prj_b59f38f33cea066492d8");
+  assert.ok(loaded, "psm should carry .psm/deployments.json");
+  const production = loaded.manifest.environments.find((item) => item.id === "production");
+  assert.ok(production, "psm declares a production environment");
+  assert.equal(production.risk, "production");
+  const ingress = production.resources.find((item) => item.kind === "nginx-static-site@1");
+  assert.equal(ingress?.kind === "nginx-static-site@1" && ingress.desired.hostname, "psm.werewolf.solutions");
+  // The hosted page must never answer psm's own API: that belongs to the agent
+  // on the user's machine, and a page that served it would be another product.
+  assert.deepEqual(ingress?.kind === "nginx-static-site@1" ? ingress.desired.denyPrefixes : null, ["/api/"]);
+  assert.ok(
+    production.units[0].verification.some((probe) =>
+      probe.kind === "http-status@1" && probe.request.url.endsWith("/api/projects") && probe.expect.status === 404),
+    "a release is only verified if /api/ is proven sealed",
+  );
+});

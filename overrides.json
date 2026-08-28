@@ -318,7 +318,7 @@
     "priority": "high",
     "pinned": true,
     "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
-    "next": "The managed deployment engine and its surfaces are complete and tested, but no executor has run against a real target. Next: stand up the Werewolf-Solutions/deployment-control workflow, install the host helper on the droplet, bind a Better Stack monitor, then commit todo-app's draft .psm/deployments.json and take one real managed release.",
+    "next": "psm and todo-app both declare desired state now, and both plans stop at connection-missing. Next: stand up the Werewolf-Solutions/deployment-control workflow, install the host helper on the droplet, bind the DigitalOcean and Better Stack connections, then take one real managed release.",
     "aiFullAccess": true,
     "aiEngine": "claude",
     "attachments": [
@@ -383,7 +383,9 @@
     "port": 5200,
     "aiEngine": "codex",
     "aiModel": "gpt-5.6-sol",
-    "aiEffort": "high"
+    "aiEffort": "high",
+    "workingOn": true,
+    "workingOnAt": 1787838265175
   },
   "proteus": {
     "category": "AI & automation",

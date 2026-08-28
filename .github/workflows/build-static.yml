@@ -1,0 +1,101 @@
+name: Prepare managed static artifact
+run-name: prepare ${{ inputs.psm_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      psm_run_id: { required: true, type: string }
+      psm_artifact_id: { required: true, type: string }
+      project_id: { required: true, type: string }
+      environment_id: { required: true, type: string }
+      unit_id: { required: true, type: string }
+      commit_sha: { required: true, type: string }
+      manifest_digest: { required: true, type: string }
+      build_profile_json: { required: true, type: string }
+      build_profile_digest: { required: true, type: string }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-${{ inputs.psm_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.commit_sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Validate contract and expose public build inputs
+        env:
+          PSM_RUN_ID: ${{ inputs.psm_run_id }}
+          PSM_ARTIFACT_ID: ${{ inputs.psm_artifact_id }}
+          PSM_PROJECT_ID: ${{ inputs.project_id }}
+          PSM_ENVIRONMENT_ID: ${{ inputs.environment_id }}
+          PSM_UNIT_ID: ${{ inputs.unit_id }}
+          PSM_COMMIT_SHA: ${{ inputs.commit_sha }}
+          PSM_MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+          PSM_BUILD_PROFILE_JSON: ${{ inputs.build_profile_json }}
+          PSM_BUILD_PROFILE_DIGEST: ${{ inputs.build_profile_digest }}
+        run: node .psm/scripts/prepare-static-artifact.mjs environment >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # There is no build step. web/ is vanilla HTML/CSS/JS, served as authored,
+      # and the payload is an immutable copy of exactly those bytes.
+
+      - name: Package and independently identify served bytes
+        env:
+          PSM_RUN_ID: ${{ inputs.psm_run_id }}
+          PSM_ARTIFACT_ID: ${{ inputs.psm_artifact_id }}
+          PSM_PROJECT_ID: ${{ inputs.project_id }}
+          PSM_ENVIRONMENT_ID: ${{ inputs.environment_id }}
+          PSM_UNIT_ID: ${{ inputs.unit_id }}
+          PSM_COMMIT_SHA: ${{ inputs.commit_sha }}
+          PSM_MANIFEST_DIGEST: ${{ inputs.manifest_digest }}
+          PSM_BUILD_PROFILE_JSON: ${{ inputs.build_profile_json }}
+          PSM_BUILD_PROFILE_DIGEST: ${{ inputs.build_profile_digest }}
+        run: node .psm/scripts/prepare-static-artifact.mjs prepare
+
+      - name: Upload immutable transport archive
+        id: payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.psm_artifact_id }}
+          path: ${{ runner.temp }}/psm-static-artifact/payload.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Finalize redacted result
+        env:
+          PSM_GITHUB_ARTIFACT_ID: ${{ steps.payload.outputs.artifact-id }}
+          PSM_GITHUB_RUN_ID: ${{ github.run_id }}
+        run: node .psm/scripts/prepare-static-artifact.mjs result
+
+      - name: Upload result contract separately
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.psm_artifact_id }}-result
+          path: ${{ runner.temp }}/psm-static-artifact/psm-artifact-result.json
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 30

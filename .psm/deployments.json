@@ -1,0 +1,210 @@
+{
+  "apiVersion": "psm.werewolf.solutions/deployments/v1",
+  "kind": "DeploymentManifest",
+  "projectId": "prj_b59f38f33cea066492d8",
+  "environments": [
+    {
+      "id": "production",
+      "risk": "production",
+      "releasePolicy": {
+        "allowedBranch": "master",
+        "requireReachableFromBranch": true,
+        "requireChecks": true,
+        "approval": "authenticated-local-operator"
+      },
+      "connections": {
+        "github": {
+          "kind": "github-actions@1"
+        },
+        "dns": {
+          "kind": "digitalocean-api@1"
+        },
+        "host": {
+          "kind": "ssh-host-helper@1"
+        }
+      },
+      "dependencies": [
+        {
+          "id": "werewolf-api",
+          "kind": "http-status@1",
+          "projectId": "prj_83c4a799bc7ca92d8e73",
+          "request": {
+            "url": "https://werewolf.solutions/api/v1/health",
+            "method": "GET",
+            "timeoutMs": 5000
+          },
+          "expect": {
+            "status": 200
+          }
+        }
+      ],
+      "resources": [
+        {
+          "id": "dns",
+          "kind": "digitalocean-dns-record@1",
+          "connection": "dns",
+          "desired": {
+            "zone": "werewolf.solutions",
+            "type": "A",
+            "name": "psm",
+            "valueFrom": {
+              "connection": "host",
+              "field": "address"
+            },
+            "ttl": 300
+          }
+        },
+        {
+          "id": "directory",
+          "kind": "host-release-directory@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns"
+          ],
+          "desired": {
+            "root": "/var/www/psm.werewolf.solutions",
+            "retainReleases": 5
+          }
+        },
+        {
+          "id": "ingress",
+          "kind": "nginx-static-site@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns",
+            "resource:directory"
+          ],
+          "desired": {
+            "hostname": "psm.werewolf.solutions",
+            "documentRoot": "/var/www/psm.werewolf.solutions/current",
+            "spaFallback": true,
+            "denyPrefixes": [
+              "/api/"
+            ],
+            "cachePolicy": "no-cache",
+            "securityHeaders": "werewolf-static-spa@1"
+          }
+        },
+        {
+          "id": "certificate",
+          "kind": "letsencrypt-certificate@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns",
+            "resource:ingress#http-ready"
+          ],
+          "desired": {
+            "hostname": "psm.werewolf.solutions",
+            "renewal": "automatic"
+          }
+        }
+      ],
+      "units": [
+        {
+          "id": "web",
+          "recipe": "static-ssh-nginx@1",
+          "resourceRefs": [
+            "resource:dns",
+            "resource:directory",
+            "resource:ingress",
+            "resource:certificate"
+          ],
+          "artifact": {
+            "kind": "static-files@1",
+            "output": "web",
+            "buildProfile": {
+              "id": "production",
+              "publicInputs": {
+                "PSM_BASE_URL": "https://psm.werewolf.solutions"
+              }
+            }
+          },
+          "executor": {
+            "kind": "github-actions@1",
+            "connection": "github",
+            "sourceRepository": "Werewolf-Solutions/psm",
+            "prepareWorkflow": "build-static.yml",
+            "releaseController": "werewolf-static@1"
+          },
+          "target": {
+            "kind": "ssh-release-directory@1",
+            "targetId": "werewolf:psm-production-web",
+            "observerConnection": "host",
+            "root": "/var/www/psm.werewolf.solutions"
+          },
+          "verification": [
+            {
+              "id": "home",
+              "kind": "http-status@1",
+              "request": {
+                "url": "https://psm.werewolf.solutions/",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 200
+              }
+            },
+            {
+              "id": "app-js",
+              "kind": "http-status@1",
+              "request": {
+                "url": "https://psm.werewolf.solutions/app.js",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 200
+              }
+            },
+            {
+              "id": "spa-fallback",
+              "kind": "http-status@1",
+              "request": {
+                "url": "https://psm.werewolf.solutions/auth/callback",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 200
+              }
+            },
+            {
+              "id": "api-sealed",
+              "kind": "http-status@1",
+              "request": {
+                "url": "https://psm.werewolf.solutions/api/projects",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 404
+              }
+            },
+            {
+              "id": "release-metadata",
+              "kind": "release-metadata@1",
+              "request": {
+                "url": "https://psm.werewolf.solutions/version.json",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "commit": "$release.commit",
+                "psmArtifactId": "$release.psmArtifactId",
+                "version": "$release.version"
+              }
+            }
+          ]
+        }
+      ],
+      "watch": [],
+      "policy": {
+        "planTtlSeconds": 900,
+        "rollbackOnVerificationFailure": true,
+        "allowDelete": false,
+        "requireFreshWatchBeforeRelease": false
+      }
+    }
+  ]
+}

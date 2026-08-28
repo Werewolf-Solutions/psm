@@ -52,7 +52,13 @@ installed:
 | The host helper is not installed on any droplet, and no target contract is enrolled | the eight host action kinds |
 | No Better Stack monitor is bound | `observe-watch@1` |
 | No DigitalOcean connection profile is configured | `reconcile-dns@1` |
-| No project has *committed* a `.psm/deployments.json` — todo-app has an uncommitted draft, which plans preview-only and cannot be approved | approval of anything |
+| No connection profile is bound in any slot, so every environment reports `connection-missing` | approval of anything |
+
+PSM and todo-app both carry a manifest: psm declares `production`
+(`psm.werewolf.solutions`), todo-app declares `staging` and `production`
+(`todo-staging` and `todo.werewolf.solutions`). Both parse, expand into a graph and plan;
+both stop at the same wall. todo-app's is still uncommitted, so it additionally plans
+preview-only.
 
 So a managed plan today reaches the point where it would call a provider and stops there,
 reporting the missing connection or contract. That is the intended failure — an unconfigured
