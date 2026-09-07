@@ -111,7 +111,18 @@ async function oneRequest(
         "User-Agent": "psm-deployment-probe/1",
         ...(input.authorization ? { Authorization: input.authorization } : {}),
       },
-      lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
+      // Node asks a custom lookup for every address at once whenever it picks
+      // the family itself — autoSelectFamily, on by default since Node 20 — and
+      // then expects an array. Answering with the scalar form makes it read
+      // `addresses[0].address` as undefined and fail every probe as "Invalid IP
+      // address: undefined". An IP literal skips lookup altogether, which is
+      // why probing 127.0.0.1 never noticed. Either shape still offers exactly
+      // the one address `addressesFor` validated, so the peer cannot change
+      // between the check and the connection.
+      lookup: (_hostname, options, callback) => {
+        if (options.all) callback(null, [{ address: selected.address, family: selected.family }]);
+        else callback(null, selected.address, selected.family);
+      },
       timeout: input.timeoutMs,
     }, (response) => {
       const remote = response.socket.remoteAddress || "";

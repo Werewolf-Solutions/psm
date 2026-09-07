@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import dns from "node:dns/promises";
 import http from "node:http";
 import test from "node:test";
 
@@ -39,4 +40,26 @@ test("public probes refuse loopback and state-changing methods", async () => {
 test("JSON path intentionally has no expression language", () => {
   assert.equal(jsonPath({ a: { b: 3 } }, "$.a.b"), 3);
   assert.throws(() => jsonPath({ a: [1] }, "$.a[0]"));
+});
+
+test("a probe reaches a host named by DNS, not only one named by IP literal", async () => {
+  // Every other probe test names 127.0.0.1, and Node skips a custom lookup
+  // entirely for an IP literal — so the lookup that real hostnames depend on
+  // went unexercised, and failed all of them as "Invalid IP address: undefined".
+  const [first] = await dns.lookup("localhost", { all: true, verbatim: true });
+  const server = http.createServer((_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, first.address, resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const origin = `http://localhost:${address.port}`;
+  try {
+    const result = await httpProbe({ url: `${origin}/health`, privateAllowedOrigins: [origin] });
+    assert.equal(result.status, 200);
+    assert.equal(jsonPath(result.json, "$.ok"), true);
+  } finally {
+    server.close();
+  }
 });
