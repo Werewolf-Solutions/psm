@@ -345,6 +345,36 @@ function hasRegressionRationale(subject: string): boolean {
   return /(?:version[- ]regression[- ]reason|version decrease|lower version)\s*:/i.test(subject);
 }
 
+/**
+ * The plan's content, with "when we looked" left out.
+ *
+ * The runner re-derives an approved plan at every mutation gate and refuses to
+ * continue unless the digest still matches, so any field that moves on its own
+ * turns a legitimate run into "the plan changed since approval". Observation
+ * timestamps do exactly that: they are `Date.now()` at build time, so a rebuild
+ * a millisecond later already failed the gate.
+ *
+ * Only the timestamps are dropped. What was observed — state, detail,
+ * fingerprint, evidence — stays in the digest, which is what makes real drift
+ * detectable, and plan expiry rather than the digest bounds how stale an
+ * observation may be. The document itself keeps its real timestamps: the
+ * operator approved a plan that says when each thing was checked.
+ */
+function digestableDocument(document: DeploymentPlanDocument): DeploymentPlanDocument {
+  const atZero = <T extends { observedAt: number }>(item: T): T => ({ ...item, observedAt: 0 });
+  const observations = document.observations;
+  return {
+    ...document,
+    observations: {
+      ...observations,
+      dependencies: observations.dependencies.map(atZero),
+      resources: observations.resources.map(atZero),
+      watch: observations.watch.map(atZero),
+      observedAt: 0,
+    },
+  };
+}
+
 export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeploymentPlan {
   const now = input.now ?? Date.now();
   const id = input.planId ?? planId();
@@ -492,7 +522,7 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
     acknowledgements: [...new Map(acknowledgements.map((item) => [item.id, item])).values()].sort((a, b) => a.id.localeCompare(b.id)),
   };
   const document: DeploymentPlanDocument = { ...documentWithoutBlocked, blocked: blockers.length > 0 };
-  const digest = canonicalDigest(DEPLOYMENT_PLAN_SCHEMA, document);
+  const digest = canonicalDigest(DEPLOYMENT_PLAN_SCHEMA, digestableDocument(document));
   return { id, revision, digest, createdAt: now, expiresAt, blocked: document.blocked, document, actions };
 }
 

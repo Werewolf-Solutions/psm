@@ -538,12 +538,29 @@ export class DeploymentService {
     const document = this.store.getPlan(String(result.plan.id), Number(result.plan.revision)).document as unknown as DeploymentPlanDocument;
     let canPrepare = (options.preparationAvailable ?? this.artifactPreparationAvailable) && !!unit
       && !(document.observations.execution ?? []).some((item) => item.purpose === "prepare" && !item.ready);
+    // Preparation refuses for one concrete reason at a time — uncommitted
+    // inputs, an unreachable commit, an unbound build connection. Keep it: a
+    // checklist that lists every possible cause is one the operator has to
+    // debug, which is what the check was meant to save them from.
+    let preparationDetail: string | null = null;
     if (canPrepare) {
       try { await this.artifactPreparationContext(context.project.id, environmentId, unit!.id); }
-      catch { canPrepare = false; }
+      catch (error) {
+        canPrepare = false;
+        preparationDetail = error instanceof ManagedDeploymentError ? error.message : null;
+      }
+    } else if (!unit && environment.units.length > 1) {
+      preparationDetail = "This environment has several deployment units; psm prepares a build for one unit at a time.";
     }
     const activePreparation = this.store.listRuns(context.project.id, environmentId).some((run) => run.runKind === "prepare" && !runTerminal(run.state));
-    return { ...result, readiness: deploymentReadiness(document, canPrepare, options.preparing || activePreparation) };
+    return {
+      ...result,
+      readiness: deploymentReadiness(document, {
+        canPrepare,
+        preparing: options.preparing || activePreparation,
+        ...(preparationDetail ? { preparationDetail } : {}),
+      }),
+    };
   }
 
   async artifactPreparationContext(

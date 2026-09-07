@@ -21,7 +21,15 @@ export interface DeploymentReadiness {
   items: DeploymentReadinessItem[];
 }
 
-function requiredItem(blocker: PlanBlocker, canPrepare: boolean): DeploymentReadinessItem {
+export interface DeploymentReadinessOptions {
+  /** Whether psm can run the deployment build itself, on this operator's behalf. */
+  canPrepare: boolean;
+  preparing?: boolean;
+  /** Why preparation is unavailable, when the reason is known and concrete. */
+  preparationDetail?: string;
+}
+
+function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions): DeploymentReadinessItem {
   let action: DeploymentReadinessItem["action"] = "review-policy";
   let detail = blocker.message;
   let title = blocker.title;
@@ -33,7 +41,10 @@ function requiredItem(blocker: PlanBlocker, canPrepare: boolean): DeploymentRead
   } else if (["artifact-missing", "artifact-expired", "artifact-source-mismatch", "artifact-build-profile-mismatch", "artifact-repository-mismatch"].includes(blocker.code)) {
     action = "prepare-artifact";
     title = "Prepare the deployment build";
-    detail = canPrepare ? "Build the committed source with the configured GitHub Actions workflow and verify the immutable artifact." : "Connect the build provider, configure its workflow, and commit the deployment inputs before preparing a build.";
+    detail = options.canPrepare
+      ? "Build the committed source with the configured GitHub Actions workflow and verify the immutable artifact."
+      : options.preparationDetail
+        ?? "Connect the build provider, configure its workflow, and commit the deployment inputs before preparing a build.";
   } else if (blocker.code.startsWith("source-") || blocker.code === "version-not-increased") {
     action = "review-source";
     title = blocker.code === "source-dirty" ? "Commit deployment inputs" : "Review the release source";
@@ -47,15 +58,16 @@ function requiredItem(blocker: PlanBlocker, canPrepare: boolean): DeploymentRead
     action = "configure-provider";
     title = blocker.code === "monitor-stale" ? "Restore fresh external monitoring" : "Configure the deployment provider";
   }
-  const automatic = action === "prepare-artifact" && canPrepare;
+  const automatic = action === "prepare-artifact" && options.canPrepare;
   return { id: blocker.id, code: blocker.code, title, detail, status: automatic ? "action-required" : "blocked", action, automatic, ...(slot ? { slot } : {}) };
 }
 
 /** A readiness report is derived from the same fresh plan the deploy button approves. */
-export function deploymentReadiness(document: DeploymentPlanDocument, canPrepare: boolean, preparing = false): DeploymentReadiness {
+export function deploymentReadiness(document: DeploymentPlanDocument, options: DeploymentReadinessOptions): DeploymentReadiness {
+  const preparing = options.preparing ?? false;
   const blockers = document.blockers.filter((item) => item.code !== "action-blocked"
     || !document.blockers.some((other) => other.code !== "action-blocked" && other.ownerRef === item.ownerRef));
-  const items = blockers.map((item) => requiredItem(item, canPrepare));
+  const items = blockers.map((item) => requiredItem(item, options));
   for (const connection of document.connections.filter((item) => item.ready)) {
     items.push({ id: `connection:${connection.slot}`, code: "connection-ready", title: `${connection.slot} connected`, detail: `${connection.profile}: credentials present and permitted for this environment.`, status: "ready", action: null, automatic: false, slot: connection.slot });
   }

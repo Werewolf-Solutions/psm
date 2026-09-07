@@ -298,3 +298,71 @@ test("without a runner, approval still records durable intent and does not claim
   assert.equal(run.state, "queued");
   assert.equal(run.terminal, false);
 });
+
+/**
+ * "Make ready" is the one button that spends something on the operator's
+ * behalf, so its guards are tested against a stubbed service: what matters here
+ * is what the route does with a readiness answer, not how that answer was
+ * derived.
+ */
+async function makeReadyHarness(readiness: { ready: boolean; canMakeReady: boolean }) {
+  const store = new DeploymentStore(openDatabase(":memory:"));
+  const prepared: string[] = [];
+  const service = {
+    resolveProject: () => ({ id: "prj_todo", name: "todo-app", path: "/nonexistent/todo-app" }),
+    store,
+    checkReadiness: async () => ({ readiness: { ...readiness, items: [] }, plan: {}, environment: {} }),
+    runView: (runId: string) => ({ id: runId, terminal: false, state: "running" }),
+  } as unknown as DeploymentService;
+
+  const app = express();
+  app.use(express.json());
+  app.use(createDeploymentRouter({
+    service,
+    currentUser: async () => OPERATOR,
+    localRequest: () => true,
+    preparer: {
+      prepare: async () => {
+        prepared.push("run");
+        // A real dispatch is a network round trip; overlap the requests here.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return { runId: `run_prepare_${prepared.length}` };
+      },
+    },
+  }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const makeReady = () => fetch(`${base}/api/projects/prj_todo/deployments/production/make-ready`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+  }).then(async (response) => ({ status: response.status, body: await response.json() as Record<string, unknown> }));
+  return { makeReady, prepared, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("make ready does not start a build for work only the operator can do", async (t) => {
+  const kit = await makeReadyHarness({ ready: false, canMakeReady: false });
+  t.after(kit.close);
+
+  const response = await kit.makeReady();
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.steps, []);
+  assert.match(String(response.body.message), /Complete the listed connection, source, or provider tasks/);
+  assert.deepEqual(kit.prepared, [], "a connection psm cannot supply is not a reason to spend a build");
+});
+
+test("two clicks on make ready are one build, not two", async (t) => {
+  // The button stays live while the dispatch is in flight, and a build is a
+  // real CI run against a real repository.
+  const kit = await makeReadyHarness({ ready: false, canMakeReady: true });
+  t.after(kit.close);
+
+  const [first, second] = await Promise.all([kit.makeReady(), kit.makeReady()]);
+  assert.equal(kit.prepared.length, 1, "the second request must join the first, not dispatch again");
+  assert.equal(first.status, 202);
+  assert.equal(second.status, 202);
+  assert.equal(asRun(first.body).id, asRun(second.body).id);
+});
+
+function asRun(body: Record<string, unknown>): { id?: string } {
+  return (body.run ?? {}) as { id?: string };
+}

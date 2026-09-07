@@ -216,3 +216,48 @@ test("an unmanaged or missing member contributes nothing rather than failing the
   ]);
   assert.deepEqual(mixed.service.crossProjectDependencies(["todo-app", "ghost", "never-linked"]), []);
 });
+
+test("an approved plan is still the approved plan when nothing has moved", async () => {
+  // This is the gate the runner applies before every mutation: it re-derives
+  // the plan from today's inputs and stops the run unless the digest matches.
+  // werewolf-dapp declares no dependencies, so the rebuild reads no network and
+  // the only thing that can differ between the two builds is the clock.
+  const kit = workspace();
+  const { plan } = await kit.service.createPlan(DAPP, { environment: "production", operation: "deploy" });
+  const approved = plan as { id: string; revision: number; digest: string };
+  const rebuilt = await kit.service.recheckPlan(approved.id, approved.revision);
+  assert.equal(rebuilt.digest, approved.digest);
+  assert.deepEqual([...rebuilt.lockKeys], [
+    "resource/digitalocean-dns-record@1/public-dns",
+    "resource/host-release-directory@1/site-directory",
+    "resource/letsencrypt-certificate@1/tls",
+    "resource/nginx-static-site@1/ingress",
+    "target/werewolf:werewolf-dapp-production-web",
+  ], "the rebuild must also claim the same set of targets");
+});
+
+test("readiness for a real project names what is missing, not that something is", async () => {
+  // The whole path: read the committed manifest, build a fresh plan, turn its
+  // blockers into the checklist the deploy pane shows. Nothing is bound in a
+  // fixture workspace, which is exactly the state an operator starts from.
+  const kit = workspace();
+  const { readiness } = await kit.service.checkReadiness(DAPP, "production");
+
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.environmentId, "production");
+  assert.equal(readiness.canMakeReady, false, "psm has no build provider to run and must not offer one");
+
+  const connect = readiness.items.filter((item) => item.action === "connect");
+  assert.deepEqual(connect.map((item) => item.slot).sort(), ["dns", "github", "infrastructure"]);
+  assert.ok(connect.every((item) => item.status === "blocked"));
+
+  // Readiness always answers for a deploy, so the build is on the list — as the
+  // operator's step, since there is no build provider to run it for them.
+  const build = readiness.items.find((item) => item.code === "artifact-missing");
+  assert.ok(build, JSON.stringify(readiness.items));
+  assert.equal(build.automatic, false);
+  assert.equal(build.action, "prepare-artifact");
+
+  // Work already done is on the list too, or the remaining count means nothing.
+  assert.ok(readiness.items.some((item) => item.code === "source-ready" && item.status === "ready"));
+});

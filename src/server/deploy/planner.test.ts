@@ -192,3 +192,54 @@ test("an observed unowned record is adoptable without an adoption blocker", () =
     JSON.stringify(plan.document.blockers),
   );
 });
+
+/** One dependency observation, so the digest has a timestamp to be sensitive to. */
+function inputWithObservation(at: number, state = "ready", fingerprint = "sha256:dep"): BuildDeploymentPlanInput {
+  const changed = input();
+  changed.observations = {
+    dependencies: [{
+      id: "api",
+      kind: "http-status@1",
+      state: state as BuildDeploymentPlanInput["observations"]["dependencies"][number]["state"],
+      title: "api",
+      detail: "HTTP 401 in 12ms",
+      observedAt: at,
+      fingerprint,
+    }],
+    resources: [],
+    watch: [],
+    observedAt: at,
+  };
+  return changed;
+}
+
+test("looking again at an unchanged world still produces the approved digest", () => {
+  // The runner re-derives the plan at every mutation gate and stops the run
+  // unless the digest matches. Observations are re-read there, so a digest that
+  // moved with the clock stopped every approved run as if the plan had changed.
+  const approved = buildDeploymentPlan(inputWithObservation(1_000));
+  const rebuilt = buildDeploymentPlan(inputWithObservation(9_999));
+  assert.equal(rebuilt.digest, approved.digest);
+});
+
+test("the plan still records when each thing was observed", () => {
+  // Dropping the timestamps from the digest must not drop them from the plan:
+  // the operator approved a document that says when it was checked.
+  const plan = buildDeploymentPlan(inputWithObservation(1_234));
+  assert.equal(plan.document.observations.observedAt, 1_234);
+  assert.equal(plan.document.observations.dependencies[0].observedAt, 1_234);
+});
+
+test("a dependency that is no longer ready is a different plan", () => {
+  const approved = buildDeploymentPlan(inputWithObservation(1_000));
+  const rebuilt = buildDeploymentPlan(inputWithObservation(1_000, "blocked"));
+  assert.notEqual(rebuilt.digest, approved.digest);
+});
+
+test("the same state observed on a different underlying thing is a different plan", () => {
+  // State alone is too coarse: the fingerprint is what distinguishes "ready"
+  // from "ready, but now pointing somewhere else".
+  const approved = buildDeploymentPlan(inputWithObservation(1_000));
+  const rebuilt = buildDeploymentPlan(inputWithObservation(1_000, "ready", "sha256:moved"));
+  assert.notEqual(rebuilt.digest, approved.digest);
+});
