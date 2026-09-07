@@ -915,6 +915,11 @@ function emptyManagedDeploymentState() {
     environment: null,
     plan: null,
     planEnvironment: null,
+    readiness: null,
+    readinessEnvironment: null,
+    preparationRunId: null,
+    readinessTimer: null,
+    error: null,
     run: null,
     poll: null,
   };
@@ -4531,9 +4536,93 @@ function deploymentRequestIsCurrent(scope) {
 }
 
 function clearDeploymentPoll(state = WS.managedDeploy) {
-  if (!state?.poll) return;
-  clearTimeout(state.poll);
-  state.poll = null;
+  if (state?.poll) clearTimeout(state.poll);
+  if (state?.readinessTimer) clearTimeout(state.readinessTimer);
+  if (state) { state.poll = null; state.readinessTimer = null; }
+}
+
+function invalidateDeploymentReadiness(state = WS.managedDeploy) {
+  state.readiness = null;
+  state.readinessEnvironment = null;
+  state.plan = null;
+  state.planEnvironment = null;
+  if (state.readinessTimer) clearTimeout(state.readinessTimer);
+  state.readinessTimer = null;
+}
+
+function deploymentReadyToApprove() {
+  const state = WS.managedDeploy;
+  const plan = state.plan;
+  const readiness = state.readiness;
+  if (state.loading || state.preparationRunId || !plan || plan.blocked || !plan.id || !plan.digest) return false;
+  if (state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state)) return false;
+  if (state.planEnvironment !== state.environment || !(Number(plan.expiresAt) > Date.now())) return false;
+  if (plan.operation !== "rollback" && (!readiness?.ready || state.readinessEnvironment !== state.environment
+    || !(Number(readiness.expiresAt) > Date.now()) || (readiness.artifactId || null) !== state.artifactId)) return false;
+  return !(plan.acknowledgements || []).length || $("#dep-ack").checked;
+}
+
+function renderDeploymentReadiness() {
+  const state = WS.managedDeploy;
+  const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
+  const rows = (readiness?.items || []).map((item) => ({
+    ...item,
+    state: item.status === "ready" ? "ready" : item.status === "action-required" ? "warning" : "blocked",
+    kind: item.status === "ready" ? "Ready" : item.automatic ? "Can prepare" : "Action needed",
+  }));
+  depRows($("#dep-readiness"), rows, "Check readiness to see the steps needed for this environment.");
+  const outstanding = rows.filter((item) => item.status !== "ready");
+  $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
+  for (const [index, item] of rows.entries()) {
+    if (item.status === "ready" || !["connect", "review-source"].includes(item.action)) continue;
+    const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : "Review changes");
+    button.type = "button";
+    button.onclick = () => item.action === "connect"
+      ? $("#dep-connections-section").scrollIntoView({ behavior: "smooth", block: "start" })
+      : switchPane("changes");
+    $("#dep-readiness").children[index]?.append(button);
+  }
+  const expired = readiness && Number(readiness.expiresAt) <= Date.now();
+  $("#dep-status").textContent = state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
+    : state.loading ? "Checking deployment readiness…"
+    : state.error ? "The check could not finish. Resolve the error and check again."
+    : expired ? "Readiness has expired. Check again before deploying."
+    : readiness?.ready ? "Ready to deploy. Review the plan below, then deploy."
+    : readiness ? `${outstanding.length} step${outstanding.length === 1 ? "" : "s"} need attention before deployment.`
+    : "Check readiness to see what this environment needs.";
+  const busy = state.loading || !!state.preparationRunId || !!(state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state));
+  $("#dep-discover").disabled = busy;
+  $("#dep-discover").textContent = readiness ? "Check again" : "Check readiness";
+  $("#dep-make-ready").hidden = !readiness || readiness.ready;
+  $("#dep-make-ready").disabled = busy || !readiness?.canMakeReady;
+  $("#dep-make-ready").title = readiness?.canMakeReady ? "Run the available preparation steps, then check again"
+    : "Complete the listed connection or source steps to enable preparation";
+  $("#dep-approve").disabled = !deploymentReadyToApprove();
+  $("#dep-approve").textContent = state.plan?.operation === "rollback" ? "Deploy rollback" : "Deploy";
+  $("#dep-error").hidden = !state.error;
+  $("#dep-error").textContent = state.error || "";
+  if (state.readinessTimer) clearTimeout(state.readinessTimer);
+  if (readiness && !expired && WS.pane === "deploy") {
+    state.readinessTimer = setTimeout(() => {
+      if (WS.managedDeploy === state && WS.pane === "deploy") renderDeploymentReadiness();
+    }, Math.min(Number(readiness.expiresAt) - Date.now() + 20, 2_147_483_647));
+  }
+}
+
+function loadDeploymentConnectionSetup() {
+  const scope = deploymentRequestScope({ environment: true });
+  const environment = deploymentEnvironment();
+  if (!environment) return;
+  window.PsmDeploymentConnections.render($("#dep-connection-setup"), {
+    projectKey: scope.projectKey, environment, api: agentApi,
+    isCurrent: () => deploymentRequestIsCurrent(scope),
+    onChanged: async () => {
+      if (!deploymentRequestIsCurrent(scope)) return;
+      invalidateDeploymentReadiness();
+      await loadManagedDeploy({ quiet: true });
+      if (deploymentRequestIsCurrent(scope)) await checkDeploymentReadiness();
+    },
+  });
 }
 
 function depText(tag, className, text) {
@@ -4680,11 +4769,12 @@ function renderManagedReleases(environment) {
 }
 
 function renderDeploymentPlan(plan) {
+  const changed = WS.managedDeploy.plan?.digest !== plan?.digest;
   WS.managedDeploy.plan = plan || null;
   WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
   const section = $("#dep-plan-section");
   section.hidden = !plan;
-  if (!plan) return;
+  if (!plan) { $("#dep-approve").disabled = true; return; }
   $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
   $("#dep-plan-meta").textContent = plan.expiresAt
     ? `Exact plan · expires ${new Date(plan.expiresAt).toLocaleTimeString()}`
@@ -4711,11 +4801,11 @@ function renderDeploymentPlan(plan) {
   const acknowledgements = plan.acknowledgements || [];
   $("#dep-ack-wrap").hidden = !acknowledgements.length;
   $("#dep-ack-copy").textContent = acknowledgements.map((item) => item.label || item.message || item.id).join(" ") || "I reviewed this exact plan.";
-  $("#dep-ack").checked = false;
+  if (changed) $("#dep-ack").checked = false;
   $("#dep-approval-note").textContent = plan.blocked
     ? `${(plan.blockers || []).length || 1} blocker${(plan.blockers || []).length === 1 ? "" : "s"} must be resolved`
     : plan.risk === "production" ? "Production requires the signed-in local operator" : "Approval is bound to this digest";
-  $("#dep-approve").disabled = !!plan.blocked || acknowledgements.length > 0;
+  $("#dep-approve").disabled = !deploymentReadyToApprove();
 }
 
 const DEPLOY_PHASES = ["queued", "locks", "preflight", "reconcile", "dispatch", "executor", "verify"];
@@ -4764,6 +4854,9 @@ function renderManagedDeploy() {
   $("#ws-deploy-legacy").hidden = true;
   $("#dep-managed-title").textContent = `${data.project?.name || WS.name} · ${environment.id}`;
   $("#dep-managed-subtitle").textContent = environment.hostname || environment.target?.hostname || "Managed desired state";
+  $("#dep-destination").textContent = environment.units?.[0]?.recipe === "static-ssh-nginx@1"
+    ? `Publish static files with GitHub Actions to ${environment.hostname || "the configured server"}. ${environment.id === "staging" ? "This is the staging environment." : "This is the production environment."}`
+    : `Deploy using the connections configured for ${environment.id}.`;
   $("#dep-risk").textContent = `${environment.risk || "unknown"} risk`;
   $("#dep-risk").dataset.risk = environment.risk || "unknown";
   const envs = $("#dep-envs");
@@ -4797,20 +4890,12 @@ function renderManagedDeploy() {
   }
   renderDeploymentArtifacts(environment);
   renderManagedSummary(environment);
-  const readiness = [
-    ...(environment.dependencies || []),
-    ...(environment.resources || []),
-    ...(environment.blockers || []).map((blocker) => ({ ...blocker, state: "blocked" })),
-  ];
-  depRows($("#dep-readiness"), readiness, "No discovery results yet. Choose Discover changes.");
-  const blocked = readiness.filter((item) => ["blocked", "conflict", "unknown", "missing"].includes(item.state)).length;
-  $("#dep-readiness-count").textContent = blocked ? `${blocked} blocking` : readiness.length ? "ready" : "not observed";
   renderManagedConnections(environment);
   renderManagedReleases(environment);
   renderDeploymentPlan(WS.managedDeploy.plan);
   renderDeploymentRun(WS.managedDeploy.run || environment.latestRun || null);
   $("#dep-prepare").disabled = WS.managedDeploy.loading || !environment.canPrepare;
-  $("#dep-discover").disabled = WS.managedDeploy.loading || environment.canPlan === false;
+  renderDeploymentReadiness();
 }
 
 async function loadManagedDeploy({ quiet = false } = {}) {
@@ -4834,7 +4919,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
     state.data = data;
     state.artifacts = Array.isArray(artifactBody.artifacts) ? artifactBody.artifacts : state.artifacts;
     if (!state.environment || !data.environments.some((item) => item.id === state.environment)) {
-      state.environment = data.environments.find((item) => item.id === "production")?.id || data.environments[0]?.id || null;
+      state.environment = data.environments.find((item) => item.id === "staging")?.id || data.environments[0]?.id || null;
     }
     const environment = deploymentEnvironment();
     selectDeploymentArtifact(environment);
@@ -4851,6 +4936,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       WS.depEs = null;
     }
     renderManagedDeploy();
+    loadDeploymentConnectionSetup();
     const run = state.run;
     if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
   } catch {
@@ -4881,7 +4967,12 @@ function scheduleDeploymentPoll() {
     if (!deploymentRequestIsCurrent({ ...scope, runId: state.run?.id }) || WS.pane !== "deploy") return;
     const run = state.run;
     if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
-    else loadManagedDeploy({ quiet: true });
+    else {
+      const prepared = state.preparationRunId === run?.id;
+      state.preparationRunId = null;
+      await loadManagedDeploy({ quiet: true });
+      if (prepared && deploymentRequestIsCurrent({ ...scope, runId: state.run?.id })) await checkDeploymentReadiness();
+    }
   }, 1500);
 }
 
@@ -4945,40 +5036,93 @@ function selectDeployTarget(target) {
 async function prepareDeploymentArtifact() {
   const environment = deploymentEnvironment();
   if (!environment) return;
-  WS.managedDeploy.loading = true;
+  const scope = deploymentRequestScope({ environment: true, artifact: true });
+  const state = scope.state;
+  invalidateDeploymentReadiness(state);
+  state.loading = true;
+  state.error = null;
   renderManagedDeploy();
   try {
-    const response = await agentApi(`/api/projects/${encodeURIComponent(deploymentKey())}/deployment-artifacts/prepare`, {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployment-artifacts/prepare`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ environment: environment.id, unitId: environment.units?.[0]?.id }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Artifact preparation could not start");
-    WS.managedDeploy.run = body.run;
+    if (!deploymentRequestIsCurrent(scope)) return;
+    state.run = body.run;
+    state.preparationRunId = body.run?.id;
     renderDeploymentRun(body.run);
     scheduleDeploymentPoll();
   } catch (error) {
-    toast(error.message || "Artifact preparation failed");
+    if (deploymentRequestIsCurrent(scope)) state.error = error.message || "Artifact preparation failed";
   } finally {
-    WS.managedDeploy.loading = false;
-    renderManagedDeploy();
+    if (deploymentRequestIsCurrent(scope)) {
+      state.loading = false;
+      renderManagedDeploy();
+    }
+  }
+}
+
+async function checkDeploymentReadiness(makeReady = false) {
+  const scope = deploymentRequestScope({ environment: true });
+  const state = scope.state;
+  if (!scope.environmentId || state.loading) return;
+  const artifactId = state.artifactId;
+  invalidateDeploymentReadiness(state);
+  state.loading = true;
+  state.error = null;
+  renderManagedDeploy();
+  try {
+    const action = makeReady ? "make-ready" : "readiness";
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/${action}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ artifactId }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not check deployment readiness");
+    if (!deploymentRequestIsCurrent(scope)) return;
+    state.readiness = body.readiness;
+    state.readinessEnvironment = scope.environmentId;
+    state.artifactId = body.readiness?.artifactId || null;
+    const index = state.data.environments.findIndex((item) => item.id === scope.environmentId);
+    if (body.environment && index >= 0) state.data.environments[index] = body.environment;
+    renderDeploymentPlan(body.plan);
+    if (body.run) {
+      state.run = body.run;
+      state.preparationRunId = body.run.id;
+      scheduleDeploymentPoll();
+    }
+  } catch (error) {
+    if (deploymentRequestIsCurrent(scope)) state.error = error.message || "Could not check deployment readiness";
+  } finally {
+    if (deploymentRequestIsCurrent(scope)) {
+      state.loading = false;
+      renderManagedDeploy();
+      loadDeploymentConnectionSetup();
+    }
   }
 }
 
 async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
+  if (operation === "deploy") return checkDeploymentReadiness();
   const environment = deploymentEnvironment();
   if (!environment) return;
-  WS.managedDeploy.loading = true;
+  const scope = deploymentRequestScope({ environment: true });
+  const state = scope.state;
+  invalidateDeploymentReadiness(state);
+  state.loading = true;
   renderManagedDeploy();
   try {
-    const response = await agentApi(`/api/projects/${encodeURIComponent(deploymentKey())}/deployment-plans`, {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployment-plans`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ environment: environment.id, operation, releaseId }),
+      body: JSON.stringify({ environment: environment.id, operation, releaseId, artifactId: state.artifactId }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not discover deployment changes");
+    if (!deploymentRequestIsCurrent(scope)) return;
     renderDeploymentPlan(body.plan);
     if (body.environment) {
       const index = WS.managedDeploy.data.environments.findIndex((item) => item.id === environment.id);
@@ -4986,23 +5130,28 @@ async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
       renderManagedDeploy();
     }
   } catch (error) {
-    toast(error.message || "Discovery failed");
+    if (deploymentRequestIsCurrent(scope)) state.error = error.message || "Discovery failed";
   } finally {
-    WS.managedDeploy.loading = false;
-    renderManagedDeploy();
+    if (deploymentRequestIsCurrent(scope)) { state.loading = false; renderManagedDeploy(); }
   }
 }
 
 async function approveDeploymentPlan() {
+  if (!deploymentReadyToApprove()) return;
+  const scope = deploymentRequestScope({ environment: true, plan: true, artifact: true });
+  const state = scope.state;
   const plan = WS.managedDeploy.plan;
   if (!plan || plan.blocked) return;
   const acknowledgements = plan.acknowledgements || [];
   if (acknowledgements.length && !$("#dep-ack").checked) return toast("Review and acknowledge the production plan first");
-  $("#dep-approve").disabled = true;
+  state.loading = true;
+  state.error = null;
+  renderDeploymentReadiness();
   try {
     const intentResponse = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approval-intents`, { method: "POST" });
     const intentBody = await intentResponse.json().catch(() => ({}));
     if (!intentResponse.ok) throw new Error(intentBody.error || "Could not create an approval intent");
+    if (!deploymentRequestIsCurrent(scope)) return;
     const response = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approve`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5015,11 +5164,20 @@ async function approveDeploymentPlan() {
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "The plan could not be approved");
+    if (!deploymentRequestIsCurrent(scope)) return;
     renderDeploymentRun(body.run);
     scheduleDeploymentPoll();
   } catch (error) {
-    toast(error.message || "Approval failed");
-    $("#dep-approve").disabled = false;
+    if (deploymentRequestIsCurrent(scope)) {
+      state.error = error.message || "Deployment could not start";
+      invalidateDeploymentReadiness(state);
+    }
+  } finally {
+    // A failed approval clears the plan, so compare project/environment here.
+    if (deploymentRequestIsCurrent({ state, projectKey: scope.projectKey, environmentId: scope.environmentId })) {
+      state.loading = false;
+      renderManagedDeploy();
+    }
   }
 }
 
@@ -5270,10 +5428,16 @@ $("#ws-targets").onclick = (e) => {
 $("#dep-envs").onclick = (e) => {
   const button = e.target.closest("[data-environment]");
   if (!button || button.dataset.environment === WS.managedDeploy.environment) return;
+  if (WS.managedDeploy.loading || WS.managedDeploy.preparationRunId) return;
+  clearDeploymentPoll();
+  invalidateDeploymentReadiness();
   WS.managedDeploy.environment = button.dataset.environment;
-  WS.managedDeploy.plan = null;
+  WS.managedDeploy.error = null;
+  WS.managedDeploy.artifactId = null;
   WS.managedDeploy.run = deploymentEnvironment()?.latestRun || null;
   renderManagedDeploy();
+  loadDeploymentConnectionSetup();
+  if (WS.managedDeploy.run && !DEPLOYMENT_TERMINAL_STATES.has(WS.managedDeploy.run.state)) scheduleDeploymentPoll();
 };
 $("#dep-releases").onclick = (e) => {
   const button = e.target.closest("[data-rollback-release]");
@@ -5281,11 +5445,16 @@ $("#dep-releases").onclick = (e) => {
 };
 $("#dep-prepare").onclick = prepareDeploymentArtifact;
 $("#dep-discover").onclick = () => discoverDeploymentPlan();
+$("#dep-make-ready").onclick = () => checkDeploymentReadiness(true);
+$("#dep-artifact").onchange = (event) => {
+  WS.managedDeploy.artifactId = event.target.value || null;
+  invalidateDeploymentReadiness();
+  renderManagedDeploy();
+};
 $("#dep-approve").onclick = approveDeploymentPlan;
 $("#dep-cancel").onclick = cancelDeploymentRun;
 $("#dep-ack").onchange = () => {
-  const plan = WS.managedDeploy.plan;
-  $("#dep-approve").disabled = !plan || !!plan.blocked || ((plan.acknowledgements || []).length > 0 && !$("#dep-ack").checked);
+  renderDeploymentReadiness();
 };
 $("#ws-dep-run").onclick = deployRun;
 $("#ws-dep-stop").onclick = deployStop;

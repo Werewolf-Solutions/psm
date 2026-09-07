@@ -770,10 +770,25 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
 .dep-env-host.unset { font-family: inherit; font-style: italic; }
 .dep-env-note { font-size: 11.5px; color: var(--faint); margin-left: 4px; white-space: normal; }
 .dep-toolbar {
-  display: flex; align-items: center; gap: 8px; padding: 12px 22px; border-bottom: 1px solid var(--line);
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 22px; border-bottom: 1px solid var(--line);
   background: var(--bg-soft); position: sticky; top: 0; z-index: 2;
 }
 .dep-toolbar-copy { flex: 1; color: var(--muted); font-size: 12px; }
+.dep-destination { margin: 8px 22px 12px; color: var(--muted); font-size: 12px; }
+.dep-error { margin: 12px 22px 0; padding: 10px 12px; color: #f85149; border: 1px solid currentColor; border-radius: 8px; }
+.dep-build-options { margin: 10px 22px 0; color: var(--muted); font-size: 12px; }
+.dep-build-options summary { cursor: pointer; }
+.dep-build-options .dep-toolbar { position: static; padding: 10px 0; background: transparent; }
+.dep-plan-meta { margin: 8px 12px; color: var(--muted); font-size: 11px; }
+.dep-connection-controls, .dep-connection-secret { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dep-connection-credentials { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.dep-connection-select, .dep-connection-secret input, .dep-connection-profile {
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); max-width: 100%;
+}
+.dep-connection-import { margin-top: 8px; }
+.dep-connection-import summary { cursor: pointer; }
+.dep-connection-profile { width: 100%; min-height: 140px; margin: 8px 0; font: 11px/1.5 monospace; }
+.dep-connection-status { margin-top: 6px; font-size: 12px; color: var(--muted); }
 .dep-artifact-picker { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; }
 .dep-artifact-picker span { font-weight: 750; text-transform: uppercase; letter-spacing: .04em; }
 .dep-artifact-picker select {

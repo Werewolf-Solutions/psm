@@ -136,6 +136,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
   const { service } = options;
   const intents = options.intents ?? new ApprovalIntentRegistry();
   const streamTickets = options.streamTickets ?? new DeploymentStreamTicketRegistry();
+  const preparationRequests = new Map<string, Promise<Record<string, unknown>>>();
 
   router.get("/api/projects/:id/deployments", async (req, res) => {
     try { res.json(await service.overview(req.params.id)); } catch (error) { apiError(res, error); }
@@ -143,6 +144,49 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
 
   router.get("/api/projects/:id/deployments/:environment", async (req, res) => {
     try { res.json({ managed: true, environment: await service.environmentView(req.params.id, req.params.environment) }); } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/projects/:id/deployments/:environment/readiness", async (req, res) => {
+    try {
+      res.json(await service.checkReadiness(req.params.id, req.params.environment, {
+        artifactId: req.body?.artifactId == null ? null : String(req.body.artifactId),
+        preparationAvailable: !!options.preparer,
+      }));
+    } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/projects/:id/deployments/:environment/make-ready", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      const project = service.resolveProject(req.params.id);
+      const environmentId = req.params.environment;
+      const key = `${project.id}/${environmentId}`;
+      let pending = preparationRequests.get(key);
+      if (!pending) {
+        pending = (async () => {
+          const existing = service.store.listRuns(project.id, environmentId).find((run) => run.runKind === "prepare" && !TERMINAL_RUN_STATES.has(run.state));
+          const checked = await service.checkReadiness(project.id, environmentId, {
+            artifactId: req.body?.artifactId == null ? null : String(req.body.artifactId),
+            preparationAvailable: !!options.preparer,
+          });
+          if (existing) return { ...checked, run: service.runView(existing.runId), steps: [{ id: "prepare-artifact", status: "running", detail: "The deployment build is already running." }] };
+          if (!checked.readiness.canMakeReady || !options.preparer) {
+            return { ...checked, steps: [], message: checked.readiness.ready ? "Ready to deploy." : "Complete the listed connection, source, or provider tasks, then check again." };
+          }
+          // Preparation dispatches a build only. Deployment still goes through
+          // its separate exact-plan approval intent and reviewed action graph.
+          const prepared = await options.preparer.prepare({ projectId: project.id, environmentId });
+          const run = service.runView(prepared.runId);
+          const rechecked = await service.checkReadiness(project.id, environmentId, { preparationAvailable: true, preparing: !run.terminal });
+          return { ...rechecked, run, steps: [{ id: "prepare-artifact", status: run.terminal ? run.state : "running", detail: run.terminal ? "Deployment build finished; readiness checked again." : "Preparing the committed deployment build. Readiness is checked again when it finishes." }] };
+        })();
+        preparationRequests.set(key, pending);
+        void pending.finally(() => { if (preparationRequests.get(key) === pending) preparationRequests.delete(key); }).catch(() => {});
+      }
+      const result = await pending;
+      const run = asObject(result.run);
+      res.status(run.id && !run.terminal ? 202 : 200).json(result);
+    } catch (error) { apiError(res, error); }
   });
 
   router.get("/api/projects/:id/deployment-artifacts", (req, res) => {

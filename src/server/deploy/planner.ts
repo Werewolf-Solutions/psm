@@ -358,6 +358,9 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
   for (const connection of input.connections) {
     if (!connection.ready) blockers.push(blocker("connection-missing", connection.detail, `connection:${connection.slot}`));
   }
+  for (const check of input.observations.execution ?? []) {
+    if (check.purpose === "deploy" && !check.ready) blockers.push(blocker("executor-not-ready", check.detail, `executor:${check.id}`));
+  }
   if (input.sourceInputsDirty) {
     blockers.push(blocker("source-dirty", "Deployment inputs differ from the selected committed source", "source"));
   }
@@ -401,6 +404,11 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
   if (input.artifact) {
     if (input.artifact.tombstonedAt !== null || input.artifact.retainedUntil <= now) blockers.push(blocker("artifact-expired", "The selected artifact is no longer retained", "artifact"));
     if (input.artifact.commitSha !== input.source.commit) blockers.push(blocker("artifact-source-mismatch", "Artifact and exact source commit differ", "artifact"));
+    for (const unit of input.environment.units) {
+      if (input.artifact.sourceRepository !== unit.executor.sourceRepository) blockers.push(blocker("artifact-repository-mismatch", "Artifact was produced by a different source repository", "artifact"));
+      const profileDigest = canonicalDigest("psm-deployment-build-profile:v1", unit.artifact.buildProfile);
+      if (input.artifact.buildProfileDigest !== profileDigest) blockers.push(blocker("artifact-build-profile-mismatch", "Artifact was built with different environment inputs", "artifact"));
+    }
     const activeVersions = input.activeReleases ?? [];
     for (const release of activeVersions) {
       const receipt = release.receipt as { version?: unknown };

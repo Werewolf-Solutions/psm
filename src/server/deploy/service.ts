@@ -16,6 +16,7 @@ import { loadDeploymentManifest, parseDeploymentManifest } from "./manifest.ts";
 import { observeEnvironment, type ObservationAdapters } from "./observations.ts";
 import { buildDeploymentPlan, planView, type DeploymentPlanDocument, type PlanConnectionSnapshot } from "./planner.ts";
 import { composeDeploymentPolicy, type DeploymentPolicyLayer } from "./policy.ts";
+import { deploymentReadiness, type DeploymentReadiness } from "./readiness.ts";
 import {
   checkoutId,
   commitReachableFrom,
@@ -407,20 +408,21 @@ export class DeploymentService {
     const activeFirst = firstUnit ? active.find((release) => release.unitId === firstUnit.id) ?? null : null;
     return {
       id: environment.id,
+      projectId: context.project.id,
       risk: environment.risk,
       hostname,
       releasePolicy: environment.releasePolicy,
-      source: { version: context.source.version, branch: context.source.branch, commit: context.source.commit, committed: context.committed },
+      source: { version: context.source.version, branch: context.source.branch, commit: context.source.commit, committed: context.committed, inputsDirty: context.sourceInputsDirty },
       activeRelease: activeFirst ? releaseView(activeFirst, activeFirst.releaseId) : null,
       watch: watch ? { effectiveState: watch.effectiveState, observedAt: watch.observedAt, freshness: watch.freshness } : { effectiveState: "not-monitored" },
       target: firstUnit ? { targetId: firstUnit.target.targetId, kind: firstUnit.target.kind, hostname } : null,
       dependencies,
       resources,
       blockers,
-      connections: connections.map((item) => ({ slot: item.slot, kind: item.kind, ready: item.ready, profile: item.profile, principal: item.principal, detail: item.detail })),
+      connections: connections.map((item) => ({ slot: item.slot, kind: item.kind, connectionId: item.connectionId, bindingRevision: item.bindingRevision, metadataRevision: item.metadataRevision, ready: item.ready, profile: item.profile, principal: item.principal, detail: item.detail })),
       units: environment.units.map((unit) => ({ id: unit.id, recipe: unit.recipe, executor: unit.executor.kind, target: unit.target.targetId })),
       releases: all.map((release) => releaseView(release, active.find((item) => item.targetId === release.targetId)?.releaseId ?? null)),
-      canPrepare: this.artifactPreparationAvailable && connections.some((item) => item.kind === "github-actions@1" && item.ready),
+      canPrepare: this.artifactPreparationAvailable && context.committed && !context.sourceInputsDirty && environment.units.length === 1 && connections.some((item) => item.slot === firstUnit?.executor.connection && item.ready),
       canPlan: true,
       latestPlan: this.storedPlanView(latestPlan),
       latestRun: runs[0] ? this.runView(runs[0].runId) : null,
@@ -513,6 +515,35 @@ export class DeploymentService {
   artifacts(idOrName: string): DeploymentArtifact[] {
     const project = this.resolveProject(idOrName);
     return this.store.listArtifacts({ projectId: project.id });
+  }
+
+  async checkReadiness(idOrName: string, environmentId: string, options: {
+    artifactId?: string | null;
+    preparationAvailable?: boolean;
+    preparing?: boolean;
+  } = {}): Promise<{ readiness: DeploymentReadiness; plan: Record<string, unknown>; environment: Record<string, unknown> }> {
+    const context = this.loadCurrent(idOrName);
+    const environment = context.manifest.environments.find((item) => item.id === environmentId);
+    if (!environment) throw new ManagedDeploymentError("deployment environment not found", "environment-not-found", 404);
+    const unit = environment.units.length === 1 ? environment.units[0] : null;
+    // Automatic selection must not carry a production build (or a different
+    // commit) into staging merely because it is the newest recorded artifact.
+    const matching = unit ? this.artifacts(context.project.id).find((artifact) =>
+      artifact.commitSha === context.source.commit
+      && artifact.sourceRepository === unit.executor.sourceRepository
+      && artifact.buildProfileDigest === canonicalDigest("psm-deployment-build-profile:v1", unit.artifact.buildProfile)
+      && artifact.retainedUntil > Date.now() && artifact.tombstonedAt === null
+    ) : null;
+    const result = await this.createPlan(context.project.id, { environment: environmentId, operation: "deploy", artifactId: options.artifactId ?? matching?.artifactId ?? null });
+    const document = this.store.getPlan(String(result.plan.id), Number(result.plan.revision)).document as unknown as DeploymentPlanDocument;
+    let canPrepare = (options.preparationAvailable ?? this.artifactPreparationAvailable) && !!unit
+      && !(document.observations.execution ?? []).some((item) => item.purpose === "prepare" && !item.ready);
+    if (canPrepare) {
+      try { await this.artifactPreparationContext(context.project.id, environmentId, unit!.id); }
+      catch { canPrepare = false; }
+    }
+    const activePreparation = this.store.listRuns(context.project.id, environmentId).some((run) => run.runKind === "prepare" && !runTerminal(run.state));
+    return { ...result, readiness: deploymentReadiness(document, canPrepare, options.preparing || activePreparation) };
   }
 
   async artifactPreparationContext(
@@ -617,6 +648,14 @@ export class DeploymentService {
     const layers = this.policyLayers(resolved);
     const composed = composeDeploymentPolicy(resolved.environment.risk, layers);
     const observations = await observeEnvironment(context.project.id, context.source.checkoutId, resolved.environment, this.observations, operation);
+    if (this.observations.executionReadiness) {
+      observations.execution = (await Promise.all(resolved.environment.units.map((unit) => this.observations.executionReadiness!(unit, {
+        projectId: context.project.id,
+        checkoutId: context.source.checkoutId,
+        environment: resolved.environment,
+        commit: context.source.commit,
+      })))).flat();
+    }
     for (const observation of observations.watch) {
       const definition = resolved.environment.watch.find((item) => item.id === observation.monitorId);
       if (!definition) continue;

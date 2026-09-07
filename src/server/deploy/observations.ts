@@ -5,6 +5,7 @@ import type {
   EnvironmentManifest,
   ExternalHttpWatch,
   ResourceManifest,
+  UnitManifest,
   VerificationManifest,
 } from "./types.ts";
 
@@ -55,6 +56,7 @@ export interface WatchObservation {
 }
 
 export interface ObservationAdapters {
+  executionReadiness?: (unit: UnitManifest, context: { projectId: string; checkoutId: string; environment: EnvironmentManifest; commit: string }) => Promise<ExecutionReadinessCheck[]>;
   discoverResource?: (
     resource: ResourceManifest,
     context: { projectId: string; checkoutId: string; environment: EnvironmentManifest; operation?: string },
@@ -68,11 +70,20 @@ export interface ObservationAdapters {
   ) => Promise<WatchObservation | null>;
 }
 
+export interface ExecutionReadinessCheck {
+  id: string;
+  title: string;
+  ready: boolean;
+  detail: string;
+  purpose: "prepare" | "deploy";
+}
+
 export interface EnvironmentObservations {
   dependencies: DeploymentObservation[];
   resources: DeploymentObservation[];
   watch: WatchObservation[];
   observedAt: number;
+  execution?: ExecutionReadinessCheck[];
 }
 
 function fingerprint(kind: string, value: unknown): string {

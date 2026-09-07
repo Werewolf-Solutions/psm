@@ -1218,6 +1218,7 @@ export class DeploymentStore {
   createPreparationRun(input: {
     runId?: string;
     projectId: string;
+    environmentId?: string;
     rawLogPath?: string | null;
     createdAt: number;
   }): DeploymentRun {
@@ -1230,10 +1231,10 @@ export class DeploymentStore {
           plan_digest, approval_id, artifact_run_id, state, phase, audit_degraded,
           cancellation_requested_at, recovery_reason, raw_log_path, created_at, updated_at,
           started_at, finished_at)
-         VALUES (?, 'prepare', ?, NULL, 'prepare', NULL, NULL, NULL, NULL, NULL, 'queued',
+         VALUES (?, 'prepare', ?, ?, 'prepare', NULL, NULL, NULL, NULL, NULL, 'queued',
           'queued', 0, NULL, NULL, ?, ?, ?, NULL, NULL)`,
       )
-      .run(runId, text(input.projectId, "project id"), input.rawLogPath ?? null, at, at);
+      .run(runId, text(input.projectId, "project id"), input.environmentId == null ? null : text(input.environmentId, "environment id"), input.rawLogPath ?? null, at, at);
     return this.getRun(runId);
   }
 

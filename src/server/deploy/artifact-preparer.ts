@@ -71,7 +71,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
 
   async prepare(input: { projectId: string; environmentId: string; unitId?: string }): Promise<{ runId: string }> {
     const context = await this.#service.artifactPreparationContext(input.projectId, input.environmentId, input.unitId);
-    const run = this.#store.createPreparationRun({ projectId: context.project.id, createdAt: Date.now() });
+    const run = this.#store.createPreparationRun({ projectId: context.project.id, environmentId: context.environment.id, createdAt: Date.now() });
     const psmArtifactId = `artifact_${randomUUID().replaceAll("-", "").slice(0, 24)}`;
     const buildProfile = { id: context.unit.artifact.buildProfile.id, publicInputs: context.unit.artifact.buildProfile.publicInputs };
     const dispatch: PrepareArtifactDispatch = {

@@ -479,8 +479,17 @@
               <span class="dep-risk" id="dep-risk"></span>
             </header>
             <div class="dep-envs" id="dep-envs"></div>
+            <p class="dep-destination" id="dep-destination"></p>
             <div class="dep-toolbar">
-              <div class="dep-toolbar-copy" id="dep-plan-meta">Discover current state before approving any mutation.</div>
+              <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
+              <button class="btn" id="dep-discover">Check readiness</button>
+              <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
+              <button class="btn btn-primary" id="dep-approve" disabled>Deploy</button>
+            </div>
+            <div class="dep-error" id="dep-error" role="alert" hidden></div>
+            <details class="dep-build-options">
+              <summary>Build and release options</summary>
+              <div class="dep-toolbar">
               <label class="dep-artifact-picker" for="dep-artifact">
                 <span>Artifact</span>
                 <select id="dep-artifact" disabled>
@@ -488,8 +497,8 @@
                 </select>
               </label>
               <button class="btn" id="dep-prepare">Prepare artifact</button>
-              <button class="btn" id="dep-discover">Discover changes</button>
-            </div>
+              </div>
+            </details>
             <div class="dep-content">
               <section class="dep-summary" id="dep-summary"></section>
               <section class="dep-section">
@@ -497,11 +506,13 @@
                 <div class="dep-list" id="dep-readiness"></div>
               </section>
               <section class="dep-section" id="dep-connections-section">
-                <div class="dep-section-head"><h3>Connections</h3><span>values stay local</span></div>
+                <div class="dep-section-head"><h3>Deployment connections</h3><span>credentials stay on this machine</span></div>
                 <div class="dep-connections" id="dep-connections"></div>
+                <div id="dep-connection-setup"></div>
               </section>
               <section class="dep-section" id="dep-plan-section" hidden>
                 <div class="dep-section-head"><h3>Exact plan</h3><span id="dep-plan-digest"></span></div>
+                <p class="dep-plan-meta" id="dep-plan-meta"></p>
                 <div class="dep-plan" id="dep-plan"></div>
                 <label class="dep-ack" id="dep-ack-wrap" hidden>
                   <input id="dep-ack" type="checkbox" />
@@ -509,7 +520,6 @@
                 </label>
                 <div class="dep-approve-row">
                   <span id="dep-approval-note"></span>
-                  <button class="btn btn-primary" id="dep-approve" disabled>Approve and deploy</button>
                 </div>
               </section>
               <section class="dep-section" id="dep-run-section" hidden>
@@ -832,6 +842,7 @@
 
     <script src="/auth.js"></script>
     <script src="/agent.js"></script>
+    <script src="/deployment-connections.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>
   </body>

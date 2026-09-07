@@ -198,7 +198,7 @@ app.post("/api/auth/logout", async (_req, res) => {
  * so the page can notice it has gone stale and offer a reload rather than
  * failing at whichever button is pressed first.
  */
-const WEB_ASSETS = ["index.html", "app.js", "auth.js", "agent.js", "cloud.js", "styles.css"];
+const WEB_ASSETS = ["index.html", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "styles.css"];
 
 function webAssetVersion(): string {
   const parts: string[] = [];
