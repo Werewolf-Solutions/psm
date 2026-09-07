@@ -454,6 +454,12 @@ that. Every shipped change bumps something; docs-only changes need not.
   starting psm.
 - The AI panes shell out to the `claude` / `codex` CLIs; they must be installed and
   authenticated. Their live APIs supply the current model and supported-effort catalogs;
-  a safe built-in fallback remains available if discovery fails. Full-access mode runs the
+  discovery failures are shown without inventing model or effort choices. Full-access mode runs the
   AI with elevated permissions in that project — it's off by default and opt-in per
   project.
+
+## Provider maintenance
+
+Run `npm run providers:check` to check installed AI CLIs, available updates, and
+live model/effort discovery. See [provider maintenance](docs/provider-maintenance.md)
+for project-specific checks and the contract for adding providers.

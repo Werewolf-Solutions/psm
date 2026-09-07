@@ -169,7 +169,7 @@
           </select>
         </label>
         <label>AI model
-          <input id="d-model" type="text" list="ai-models" placeholder="default for selected engine" spellcheck="false" />
+          <select id="d-model" aria-label="AI model"><option value="">Provider default</option></select>
         </label>
         <label>AI effort
           <select id="d-effort">
@@ -388,7 +388,7 @@
               <option value="claude">Claude Code</option>
               <option value="codex">Codex</option>
             </select>
-            <input id="ws-model" class="ws-model" type="text" list="ai-models" placeholder="default model" title="Model id or alias" spellcheck="false" />
+            <select id="ws-model" class="ws-model" aria-label="AI model"><option value="">Provider default</option></select>
             <select id="ws-effort" class="ws-effort" title="Reasoning effort for the selected model">
               <option value="">Default effort</option>
             </select>
@@ -442,7 +442,7 @@
               <option value="claude">Claude Code</option>
               <option value="codex">Codex</option>
             </select>
-            <input id="web-model" class="ws-model" type="text" list="ai-models" placeholder="default model" title="Model id or alias" spellcheck="false" />
+            <select id="web-model" class="ws-model" aria-label="AI model"><option value="">Provider default</option></select>
             <select id="web-effort" class="ws-effort" title="Reasoning effort for the selected model">
               <option value="">Default effort</option>
             </select>
@@ -819,7 +819,6 @@
       </div>
     </div>
 
-    <datalist id="ai-models"></datalist>
 
     <div class="toast" id="toast" hidden></div>
     <!-- web/ has no build step, so a tab left open keeps running the JavaScript

@@ -39,7 +39,8 @@ const el = (tag, cls, html) => {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const scVar = (status) => `var(--st-${status})`;
-const MODEL_CATALOGS = { claude: null, codex: null };
+const MODEL_CATALOGS = new Map();
+const modelCatalogKey = (project, engine) => JSON.stringify([project, engine]);
 const MODEL_FETCH_TOKENS = new WeakMap();
 
 function modelEntry(catalog, model) {
@@ -47,27 +48,33 @@ function modelEntry(catalog, model) {
   return catalog?.models?.find((entry) => entry.id === value || entry.resolvedModel === value) || null;
 }
 
-// The datalist is shared by every model box, so it must always describe the
-// engine currently selected — a null catalog empties it rather than leaving the
-// other engine's models on offer while discovery runs.
-function showModelCatalog(catalog) {
-  const list = $("#ai-models");
-  list.innerHTML = "";
+function showModelCatalog(catalog, list, selected = "") {
+  list.innerHTML = '<option value="">Provider default</option>';
   for (const model of catalog?.models || []) {
     const option = document.createElement("option");
     option.value = model.id;
-    option.label = model.label && model.label !== model.id
+    option.textContent = model.label && model.label !== model.id
       ? `${model.label}${model.resolvedModel ? ` · ${model.resolvedModel}` : ""}`
-      : model.resolvedModel || "";
+      : model.id;
     option.title = model.description || "";
     list.append(option);
   }
+  if (selected && !catalog?.models?.some((model) => model.id === selected)) {
+    const option = document.createElement("option");
+    option.value = selected;
+    option.textContent = `${selected} (saved; availability unverified)`;
+    list.append(option);
+  }
+  list.value = selected;
 }
 
-function renderEffortOptions(select, engine, model, selected = "") {
-  const catalog = MODEL_CATALOGS[engine];
+function renderEffortOptions(select, engine, model, selected = "", project = select.dataset.project) {
+  select.dataset.project = project || "";
+  const catalog = MODEL_CATALOGS.get(modelCatalogKey(project, engine));
+  const modelSelect = document.getElementById(select.id.replace("-effort", "-model"));
+  showModelCatalog(catalog, modelSelect, model);
   const entry = modelEntry(catalog, model);
-  const levels = entry ? entry.effortLevels || [] : catalog?.effortLevels || [];
+  const levels = entry?.effortLevels || [];
   const value = String(selected || "").trim();
   select.innerHTML = "";
   const automatic = document.createElement("option");
@@ -85,13 +92,31 @@ function renderEffortOptions(select, engine, model, selected = "") {
   if (value && !levels.includes(value)) {
     const option = document.createElement("option");
     option.value = value;
-    option.textContent = `${value} (custom)`;
+    option.textContent = `${value} (saved; availability unverified)`;
     select.append(option);
   }
   select.value = value;
   select.title = catalog?.source === "fallback" && catalog.message
     ? `Live model discovery failed: ${catalog.message}`
     : "Reasoning effort for the selected model";
+  let status = document.getElementById(`${select.id}-status`);
+  if (!status) {
+    status = document.createElement("span");
+    status.id = `${select.id}-status`;
+    status.className = "model-catalog-status";
+    status.setAttribute("role", "status");
+    select.after(status);
+    const refresh = document.createElement("button");
+    refresh.type = "button";
+    refresh.className = "btn";
+    refresh.textContent = "Refresh models";
+    refresh.onclick = () => modelSelect.dispatchEvent(new Event("focus"));
+    status.after(refresh);
+  }
+  status.textContent = !catalog ? "Checking models…"
+    : catalog.source !== "live" ? "Models unavailable — refresh to retry"
+    : `Models checked ${new Date(catalog.updatedAt).toLocaleTimeString()}`;
+  status.title = catalog?.message || "Current choices from the installed provider";
 }
 
 // `effortSelect` may be one select or several: the AI tab and the Web tab's dev
@@ -108,8 +133,11 @@ async function refreshModelCatalog(project, engine, selection, effortSelect) {
   const token = {};
   for (const select of selects) {
     MODEL_FETCH_TOKENS.set(select, token);
+    select.dataset.project = project;
     select.dataset.loading = "true";
     select.title = `Looking up ${engine} models…`;
+    const status = document.getElementById(`${select.id}-status`);
+    if (status) status.textContent = "Checking models…";
   }
   const mine = (select) => MODEL_FETCH_TOKENS.get(select) === token;
   try {
@@ -119,13 +147,20 @@ async function refreshModelCatalog(project, engine, selection, effortSelect) {
     );
     const catalog = await response.json();
     if (!response.ok) throw new Error(catalog.error || "Model discovery failed");
-    MODEL_CATALOGS[engine] = catalog;
     if (!selects.some(mine)) return;
-    showModelCatalog(catalog);
+    MODEL_CATALOGS.set(modelCatalogKey(project, engine), catalog);
     const { model, effort } = selection();
     for (const select of selects) if (mine(select)) renderEffortOptions(select, engine, model, effort);
   } catch (error) {
-    for (const select of selects) if (mine(select)) select.title = error.message || "Model discovery failed";
+    if (!selects.some(mine)) return;
+    MODEL_CATALOGS.delete(modelCatalogKey(project, engine));
+    const { model, effort } = selection();
+    for (const select of selects) if (mine(select)) {
+      renderEffortOptions(select, engine, model, effort);
+      const status = document.getElementById(`${select.id}-status`);
+      status.textContent = "Models unavailable — refresh to retry";
+      status.title = error.message || "Model discovery failed";
+    }
   } finally {
     for (const select of selects) if (mine(select)) delete select.dataset.loading;
   }
@@ -739,7 +774,7 @@ function openDrawer(p) {
   $("#d-model").placeholder = p.aiModel || "default for selected engine";
   const drawerEngine = $("#d-engine").value || p.aiEngine || "claude";
   const drawerEffort = p.overridden.includes("aiEffort") ? p.aiEffort || "" : "";
-  renderEffortOptions($("#d-effort"), drawerEngine, $("#d-model").value || p.aiModel || "", drawerEffort);
+  renderEffortOptions($("#d-effort"), drawerEngine, p.aiModel || "", drawerEffort, p.name);
   refreshModelCatalog(p.name, drawerEngine, () => ({
     model: $("#d-model").value || p.aiModel || "",
     effort: $("#d-effort").value,
@@ -3858,17 +3893,14 @@ function renderAiModel() {
     node.textContent = `model: ${text}`;
     node.title = title;
   }
-  const placeholder = WS.engine === "codex" ? "default from Codex config" : "default from Claude Code";
-  for (const node of aiControlNodes("model")) node.placeholder = placeholder;
 }
 
 /** Push WS's engine/model/effort/full-access onto every mirror. */
 function syncAiControls() {
-  showModelCatalog(MODEL_CATALOGS[WS.engine]); // never offer the other engine's models
   for (const set of AI_CONTROLS) {
     $(set.engine).value = WS.engine;
     $(set.model).value = WS.model;
-    renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort);
+    renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort, WS.name);
     $(set.full).checked = WS.fullAccess;
   }
   renderScopeChip();
@@ -5155,7 +5187,10 @@ $("#web-notes-clear").onclick = () => {
 };
 for (const set of AI_CONTROLS) {
   $(set.engine).onchange = (e) => applyEngine(e.target.value);
-  $(set.model).onchange = (e) => applyModel(e.target.value);
+  $(set.model).onchange = (e) => {
+    applyModel(e.target.value);
+    $(set.effort).focus();
+  };
   $(set.model).onfocus = refreshAiModels;
   $(set.effort).onfocus = refreshAiModels;
   $(set.effort).onchange = (e) => applyEffort(e.target.value);
@@ -6540,6 +6575,7 @@ $("#d-engine").onchange = () => {
 $("#d-model").onchange = () => {
   const engine = $("#d-engine").value || "claude";
   renderEffortOptions($("#d-effort"), engine, $("#d-model").value.trim(), "");
+  $("#d-effort").focus();
 };
 $("#d-model").onfocus = () => {
   if (!editing) return;

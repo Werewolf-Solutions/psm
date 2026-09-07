@@ -27,8 +27,6 @@ export interface AiModelCatalog {
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
-const CLAUDE_FALLBACK_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-const CODEX_FALLBACK_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function uniqueStrings(values: unknown[]): string[] {
   return [...new Set(values
@@ -74,21 +72,11 @@ export function normalizeCodexModels(models: any[]): AiModelOption[] {
     .filter((model) => model.id);
 }
 
-function fallbackCatalog(engine: AiEngine, error: unknown): AiModelCatalog {
-  const effortLevels = engine === "claude" ? CLAUDE_FALLBACK_EFFORTS : CODEX_FALLBACK_EFFORTS;
-  const aliases = engine === "claude" ? ["default", "sonnet", "opus", "fable", "haiku"] : [];
+export function fallbackCatalog(engine: AiEngine, error: unknown): AiModelCatalog {
   return {
     engine,
-    models: aliases.map((id) => ({
-      id,
-      resolvedModel: null,
-      label: id === "default" ? "Default" : id[0].toUpperCase() + id.slice(1),
-      description: "",
-      effortLevels: id === "haiku" ? [] : effortLevels,
-      defaultEffort: null,
-      isDefault: id === "default",
-    })),
-    effortLevels,
+    models: [],
+    effortLevels: [],
     source: "fallback",
     updatedAt: Date.now(),
     message: error instanceof Error ? error.message : "Model discovery failed.",
@@ -133,6 +121,7 @@ function discoverCodexModels(cwd: string): Promise<AiModelOption[]> {
     });
     const lines = readline.createInterface({ input: child.stdout });
     const entries: any[] = [];
+    const cursors = new Set<string>();
     let settled = false;
     let requestId = 2;
 
@@ -161,6 +150,8 @@ function discoverCodexModels(cwd: string): Promise<AiModelOption[]> {
     );
 
     child.on("error", () => finish(new Error("Could not start the Codex app server.")));
+    child.stdin.on("error", () => finish(new Error("Codex model discovery connection closed.")));
+    child.stderr.resume();
     child.on("exit", (code) => {
       if (!settled) finish(new Error(`Codex app server exited with code ${code ?? "unknown"}.`));
     });
@@ -179,11 +170,16 @@ function discoverCodexModels(cwd: string): Promise<AiModelOption[]> {
       }
       if (message.id !== requestId) return;
       if (message.error) return finish(new Error("Codex model discovery failed."));
-      entries.push(...(Array.isArray(message.result?.data) ? message.result.data : []));
+      if (!Array.isArray(message.result?.data)) {
+        return finish(new Error("Codex model/list response changed; run npm run providers:check."));
+      }
+      entries.push(...message.result.data);
       const cursor = typeof message.result?.nextCursor === "string"
         ? message.result.nextCursor.trim()
         : "";
       if (cursor) {
+        if (cursors.has(cursor)) return finish(new Error("Codex model/list repeated a page cursor."));
+        cursors.add(cursor);
         requestId += 1;
         requestPage(cursor);
       } else {
@@ -199,11 +195,15 @@ function discoverCodexModels(cwd: string): Promise<AiModelOption[]> {
   });
 }
 
+// Future providers must supply discovery, never a versioned model allowlist.
+export const MODEL_PROVIDERS = {
+  claude: { package: "@anthropic-ai/claude-code", discover: discoverClaudeModels },
+  codex: { package: "@openai/codex", discover: discoverCodexModels },
+} satisfies Record<AiEngine, { package: string; discover: (cwd: string) => Promise<AiModelOption[]> }>;
+
 export async function modelCatalog(engine: AiEngine, cwd: string): Promise<AiModelCatalog> {
   try {
-    const models = engine === "claude"
-      ? await discoverClaudeModels(cwd)
-      : await discoverCodexModels(cwd);
+    const models = await MODEL_PROVIDERS[engine].discover(cwd);
     if (!models.length) throw new Error(`${engine} returned no available models.`);
     return {
       engine,

@@ -8,7 +8,7 @@
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
     "next": "Continue AI builder workspace links so generated sites stay connected to their separate repos/projects.",
     "runCommand": "npm run dev",
-    "port": 5173,
+    "port": 5174,
     "aiFullAccess": true,
     "aiEngine": "claude",
     "aiModel": "sonnet",
@@ -320,7 +320,7 @@
     "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
     "next": "psm and todo-app both declare desired state now, and both plans stop at connection-missing. Next: stand up the Werewolf-Solutions/deployment-control workflow, install the host helper on the droplet, bind the DigitalOcean and Better Stack connections, then take one real managed release.",
     "aiFullAccess": true,
-    "aiEngine": "claude",
+    "aiEngine": "codex",
     "attachments": [
       {
         "capabilityRef": "workspace:werewolf",
@@ -334,7 +334,8 @@
     "runCommand": "npm run dev",
     "workingOn": true,
     "workingOnAt": 1787653845117,
-    "aiModel": "opus"
+    "aiModel": "gpt-6-astra",
+    "aiEffort": "medium"
   },
   "__workspace__": {
     "aiFullAccess": true,

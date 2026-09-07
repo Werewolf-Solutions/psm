@@ -653,7 +653,8 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
 
 /* AI pane */
 .ws-ai { display: flex; flex-direction: column; }
-.ws-aibar { display: flex; align-items: center; gap: 14px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.ws-aibar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 8px 14px; border-bottom: 1px solid var(--line); }
+.model-catalog-status { color: var(--muted); font-size: 11px; }
 .ws-aibar select {
   padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
   background: var(--card); color: var(--text); font: inherit; font-size: 13px;
