@@ -1,14 +1,14 @@
 # Todo staging deployment
 
 The staging target requested on 2026-09-07 is
-`https://random-url.werewolf.solutions`, serving todo-app's Vite build through
+`https://a6s1j3p3zh.werewolf.solutions`, serving todo-app's Vite build through
 nginx. GitHub Actions prepares `client/dist`; the managed SSH host helper installs
-the artifact under `/var/www/random-url.werewolf.solutions` and activates its
+the artifact under `/var/www/a6s1j3p3zh.werewolf.solutions` and activates its
 `current` release. No additional application process is needed on the host.
 
 The browser uses `https://staging.werewolf.solutions/api/v1` for the API and
 `https://staging.werewolf.solutions` for sign-in. Its exact callback is
-`https://random-url.werewolf.solutions/auth/callback`. Production remains a
+`https://a6s1j3p3zh.werewolf.solutions/auth/callback`. Production remains a
 separate environment, currently configured for `https://todo.werewolf.solutions`;
 a different production domain has not been selected.
 
@@ -20,7 +20,7 @@ These are point-in-time checks; run **Check if ready to deploy** for current evi
 | --- | --- | --- |
 | Committed deployment source | The todo manifest, managed build workflow, and artifact script are untracked; `HEAD` has no manifest | Review and commit the intended deployment files and application version, then make that commit available to GitHub Actions. Preserve unrelated working-tree edits. |
 | Local connections | PSM has no deployment connection profiles or bindings | Configure and bind GitHub, DigitalOcean DNS, and SSH host-helper profiles for staging. Supply credentials through local secret storage and verify their scopes. |
-| Staging hostname | DNS lookup for `random-url.werewolf.solutions` returned `ENOTFOUND` | Plan and apply the DNS record, release directory, nginx ingress, and TLS certificate once the host and DNS connections are ready. |
+| Staging hostname | DNS lookup for `a6s1j3p3zh.werewolf.solutions` returned `ENOTFOUND` | Plan and apply the DNS record, release directory, nginx ingress, and TLS certificate once the host and DNS connections are ready. |
 | Werewolf staging health | `/api/v1/health` returned HTTP 200 | Keep the health check, alongside the app-specific checks below. |
 | Todo API on staging | Unauthenticated `/api/v1/apps/todo/board` returned HTTP 404, `API endpoint not found` | Deploy the todo API through werewolf-dapp's staging workflow; the guarded route must return HTTP 401 without credentials. |
 | Todo sign-in on staging | `/api/v1/apps/todo/public?redirectUri=…` returned HTTP 404, `Application not found` | Select the publishing business and register the todo web application in staging, allowing the exact callback above. The current bootstrap script only allows production and localhost callbacks. |

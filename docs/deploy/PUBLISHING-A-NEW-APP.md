@@ -46,6 +46,27 @@ Three questions, and they determine everything below:
 If all three are no, you are publishing a static marketing page and only steps 1, 3, 4
 and 5 apply.
 
+### Choosing the subdomain
+
+Production gets a name people will type: `todo.werewolf.solutions`. Every other
+environment gets random characters — `a6s1j3p3zh.werewolf.solutions` — because every
+project's staging site shares one droplet, one DNS zone and one nginx with all the
+others, and predictable names are how two of them end up fighting over
+`staging.werewolf.solutions` or `<app>-staging`. Random labels cannot collide by
+accident, and a staging site nobody can guess the address of is not one search engines
+or strangers find.
+
+```bash
+node -e 'const{randomInt}=require("node:crypto");const l="abcdefghjkmnpqrstvwxyz";const a=l+"0123456789";let s=l[randomInt(l.length)];while(s.length<10)s+=a[randomInt(a.length)];console.log(s)'
+```
+
+No `i`, `l`, `o` or `u`, so a label cannot spell a word or be misheard, and it starts
+with a letter. Generate it **once** and record it in the project's
+`.psm/deployments.json`. The DNS record, the release directory, the nginx vhost, the TLS
+certificate and the callback registered in step 2 all pin the exact string — changing it
+later means redoing all five, and the app stops being able to sign anyone in until you
+do.
+
 ## 1. DNS ⚙️
 
 ```bash
