@@ -296,7 +296,8 @@ Click **▶** on a card to open its cockpit:
 
   **No executor has run against a real target yet.** The repository, droplet helper install
   and monitor those adapters talk to do not exist, so a managed plan stops at the point it
-  would call a provider and says which connection is missing. Deploying anything today still
+  would call a provider and says which connection is missing; filling those slots in is
+  [`CONNECTIONS.md`](docs/deploy/CONNECTIONS.md). Deploying anything today still
   means the unmanaged commands above or
   [`PUBLISHING-A-NEW-APP.md`](docs/deploy/PUBLISHING-A-NEW-APP.md). See
   ["What is not proven yet"](docs/deploy/DEPLOYMENT-SYSTEM.md#0-what-is-built-today).

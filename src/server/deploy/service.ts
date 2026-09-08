@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { Project } from "../../types.ts";
 import { canonicalDigest } from "./canonical.ts";
+import { discoverConnectionDefaults, type GitHubDefaults } from "./connection-defaults.ts";
 import {
   connectionReadinessView,
   resolveConnectionBinding,
@@ -83,6 +84,7 @@ export interface DeploymentServiceOptions {
   artifactPreparationAvailable?: boolean;
   /** Action kinds the runner has adapters for; surfaced as plan blockers, not run-time surprises. */
   installedActionKinds?: readonly string[];
+  githubConnectionDefaults?: (repo: string, workflow: string, ref?: string) => Promise<GitHubDefaults>;
 }
 
 interface LoadedContext {
@@ -208,6 +210,7 @@ export class DeploymentService {
   readonly observations: ObservationAdapters;
   readonly artifactPreparationAvailable: boolean;
   readonly installedActionKinds: readonly string[] | undefined;
+  readonly #githubConnectionDefaults: DeploymentServiceOptions["githubConnectionDefaults"];
 
   constructor(options: DeploymentServiceOptions) {
     this.store = options.store;
@@ -216,6 +219,7 @@ export class DeploymentService {
     this.observations = options.observations ?? {};
     this.artifactPreparationAvailable = options.artifactPreparationAvailable ?? false;
     this.installedActionKinds = options.installedActionKinds;
+    this.#githubConnectionDefaults = options.githubConnectionDefaults;
   }
 
   resolveProject(idOrName: string): ManagedDeploymentProject {
@@ -401,11 +405,29 @@ export class DeploymentService {
     const watch = watchDefinition
       ? this.store.getWatchSnapshot(watchDefinition.id, environment.id, watchDefinition.unit)
       : null;
+    const profiles = this.store.listConnections().map(profileFromRecord);
+    const bound = new Map(profiles.map((profile) => [profile.connectionId, profile]));
+    // A connection can be scoped and credentialed and still have no reviewed release workflow
+    // behind it. Say so while there is still a plan to block, not when the dispatch fails.
+    const unpinned = environment.units.filter((unit) => {
+      const connection = connections.find((item) => item.slot === unit.executor.connection);
+      if (!connection?.ready || !connection.connectionId) return false;
+      const controllers = bound.get(connection.connectionId)?.publicMetadata?.releaseControllers;
+      return !(Array.isArray(controllers) ? controllers : []).some((controller) =>
+        (controller as { targetId?: unknown } | null)?.targetId === unit.target.targetId);
+    });
     const blockers = [
       ...(!context.committed ? [{ id: "source-uncommitted", code: "source-dirty", title: "Commit deployment inputs", message: "The managed manifest is preview-only until committed" }] : []),
       ...connections.filter((item) => !item.ready).map((item) => ({ id: `connection:${item.slot}`, code: "connection-missing", title: `${item.slot} connection`, message: item.detail })),
+      ...unpinned.map((unit) => ({ id: `release-controller:${unit.id}`, code: "release-controller-unpinned", title: "Release controller not pinned", message: `The ${unit.executor.connection} connection has no reviewed release workflow for ${unit.target.targetId}. PSM pins it once it can read the release repository.` })),
     ];
     const activeFirst = firstUnit ? active.find((release) => release.unitId === firstUnit.id) ?? null : null;
+    const projects = this.#projects();
+    const defaults = new Map(await Promise.all(connections.map(async (connection) => [connection.slot, await discoverConnectionDefaults({
+      project: context.project, projects, environment, slot: connection.slot, profiles,
+      boundConnectionId: connection.connectionId,
+      github: this.#githubConnectionDefaults,
+    })] as const)));
     return {
       id: environment.id,
       projectId: context.project.id,
@@ -419,7 +441,19 @@ export class DeploymentService {
       dependencies,
       resources,
       blockers,
-      connections: connections.map((item) => ({ slot: item.slot, kind: item.kind, connectionId: item.connectionId, bindingRevision: item.bindingRevision, metadataRevision: item.metadataRevision, ready: item.ready, profile: item.profile, principal: item.principal, detail: item.detail })),
+      connections: connections.map((item) => ({
+        slot: item.slot, kind: item.kind, connectionId: item.connectionId,
+        bindingRevision: item.bindingRevision, metadataRevision: item.metadataRevision,
+        ready: item.ready, profile: item.profile, principal: item.principal, detail: item.detail,
+        // Public suggestions only: creating a profile still requires an explicit local action.
+        setup: {
+          defaults: defaults.get(item.slot),
+          zones: [...new Set(environment.resources.flatMap((resource) => resource.connection === item.slot && resource.kind === "digitalocean-dns-record@1" ? [resource.desired.zone] : []))],
+          targets: environment.units.filter((unit) => unit.target.observerConnection === item.slot).map((unit) => ({ id: unit.target.targetId, root: unit.target.root })),
+          workflows: environment.units.filter((unit) => unit.executor.connection === item.slot).map((unit) => ({ repository: unit.executor.sourceRepository, workflow: unit.executor.prepareWorkflow, targetId: unit.target.targetId })),
+          monitorIds: environment.watch.filter((watch) => watch.connection === item.slot).map((watch) => watch.monitorKey),
+        },
+      })),
       units: environment.units.map((unit) => ({ id: unit.id, recipe: unit.recipe, executor: unit.executor.kind, target: unit.target.targetId })),
       releases: all.map((release) => releaseView(release, active.find((item) => item.targetId === release.targetId)?.releaseId ?? null)),
       canPrepare: this.artifactPreparationAvailable && context.committed && !context.sourceInputsDirty && environment.units.length === 1 && connections.some((item) => item.slot === firstUnit?.executor.connection && item.ready),

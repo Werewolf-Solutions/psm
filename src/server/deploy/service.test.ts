@@ -114,6 +114,7 @@ function service(projects: { id: string; name: string; path: string }[]) {
         fingerprintKey: new Uint8Array(32),
       }),
       projects: () => projects as never,
+      githubConnectionDefaults: async () => ({}),
     }),
   };
 }
@@ -260,4 +261,39 @@ test("readiness for a real project names what is missing, not that something is"
 
   // Work already done is on the list too, or the remaining count means nothing.
   assert.ok(readiness.items.some((item) => item.code === "source-ready" && item.status === "ready"));
+});
+
+test("connection setup suggests only the resources and workflows declared for each slot", async () => {
+  const kit = workspace();
+  const view = await kit.service.environmentView(DAPP, "production");
+  const connections = view.connections as { slot: string; setup: Record<string, unknown> }[];
+  const setup = (slot: string) => connections.find((connection) => connection.slot === slot)!.setup;
+  assert.deepEqual(setup("dns").zones, ["example.com"]);
+  assert.deepEqual(setup("dns").targets, []);
+  assert.deepEqual(setup("infrastructure").targets, [{ id: "werewolf:werewolf-dapp-production-web", root: "/var/www/werewolf-dapp.example.com" }]);
+  assert.deepEqual(setup("github").workflows, [{ repository: "Werewolf-Solutions/werewolf-dapp", workflow: "build-static.yml", targetId: "werewolf:werewolf-dapp-production-web" }]);
+  assert.deepEqual(setup("github").targets, []);
+});
+
+test("a bound GitHub connection with no reviewed release workflow blocks the plan, not the dispatch", async () => {
+  const kit = workspace();
+  const target = "werewolf:werewolf-dapp-production-web";
+  const profile = (releaseControllers: unknown[]) => ({
+    connectionId: "con_release", kind: "github-actions@1", label: "Release", secretGeneration: 0,
+    readiness: "ready" as const, createdAt: Date.now(),
+    metadata: { publicMetadata: { revision: 1, prepareWorkflows: [], releaseControllers }, credentialIdentity: null, requiredSecretSlots: [] },
+    constraints: { allowedProjectIds: [DAPP], allowedEnvironmentIds: ["production"], maximumAuthorizedRisk: "production", allowedTargetIds: [target], allowedRepositories: ["Werewolf-Solutions/werewolf-dapp"], allowedSourceRefs: ["master"] },
+  });
+  kit.store.createConnection(profile([]) as never);
+  await kit.service.bindConnection(DAPP, "production", "github", "con_release", null);
+
+  const blocked = (await kit.service.environmentView(DAPP, "production")).blockers as { code: string; message: string }[];
+  assert.ok(blocked.some((item) => item.code === "release-controller-unpinned" && item.message.includes(target)), JSON.stringify(blocked));
+  // The connection itself is bound and in scope; only the release workflow is unpinned.
+  assert.ok(!blocked.some((item) => item.code === "connection-missing" && item.message.includes("github")));
+
+  const reviewed = profile([{ controller: "werewolf-static@1", targetId: target }]);
+  kit.store.updateConnection({ connectionId: "con_release", expectedMetadataRevision: 1, label: reviewed.label, readiness: "ready", metadata: reviewed.metadata as never, constraints: reviewed.constraints as never, secretGeneration: 0, updatedAt: Date.now() });
+  const pinned = (await kit.service.environmentView(DAPP, "production")).blockers as { code: string }[];
+  assert.ok(!pinned.some((item) => item.code === "release-controller-unpinned"));
 });

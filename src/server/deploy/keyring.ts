@@ -5,7 +5,8 @@ import { InMemorySecretBackend, type SecretBackend } from "./connections.ts";
 export const DEPLOYMENT_KEYRING_SERVICE = "werewolf.psm.deployments";
 
 interface KeyringEntry {
-  getSecret(signal?: AbortSignal): Promise<Uint8Array | undefined>;
+  // Native bindings can return number[] despite declaring Uint8Array in their typings.
+  getSecret(signal?: AbortSignal): Promise<Uint8Array | number[] | undefined>;
   setSecret(value: Uint8Array, signal?: AbortSignal): Promise<void>;
   deleteCredential(signal?: AbortSignal): Promise<boolean>;
 }
@@ -24,10 +25,10 @@ function indexAccount(connectionId: string): string {
   return `v1:index:${encoded(connectionId)}`;
 }
 
-function parseIndex(value: Uint8Array | undefined): string[] {
+function parseIndex(value: Uint8Array | number[] | undefined): string[] {
   if (!value) return [];
   try {
-    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(value));
+    const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array(value)));
     if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) return [];
     return [...new Set(parsed)].sort();
   } catch {

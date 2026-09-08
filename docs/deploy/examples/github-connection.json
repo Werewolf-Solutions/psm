@@ -1,0 +1,39 @@
+{
+  "connectionId": "github:example-production",
+  "label": "Example production GitHub",
+  "kind": "github-actions@1",
+  "publicMetadata": {
+    "revision": 1,
+    "prepareWorkflows": [
+      {
+        "repository": "REPLACE_OWNER/REPLACE_SOURCE_REPO",
+        "workflow": "build-static.yml",
+        "workflowPath": ".github/workflows/build-static.yml",
+        "refs": [{ "ref": "main" }]
+      }
+    ],
+    "releaseControllers": [
+      {
+        "controller": "werewolf-static@1",
+        "targetId": "REPLACE_WITH_TARGET_ID",
+        "repository": "REPLACE_OWNER/REPLACE_RELEASE_REPO",
+        "workflow": "release-static.yml",
+        "workflowPath": ".github/workflows/release-static.yml",
+        "ref": "main",
+        "expectedHeadSha": "REPLACE_WITH_REVIEWED_RELEASE_COMMIT_SHA",
+        "expectedWorkflowBlobSha": "REPLACE_WITH_RELEASE_WORKFLOW_GIT_BLOB_SHA",
+        "githubEnvironment": "production",
+        "allowedSourceRepositories": ["REPLACE_OWNER/REPLACE_SOURCE_REPO"]
+      }
+    ]
+  },
+  "requiredSecretSlots": ["apiToken"],
+  "constraints": {
+    "allowedProjectIds": ["REPLACE_WITH_PROJECT_ID"],
+    "allowedEnvironmentIds": ["production"],
+    "maximumAuthorizedRisk": "production",
+    "allowedRepositories": ["REPLACE_OWNER/REPLACE_SOURCE_REPO"],
+    "allowedSourceRefs": ["main"],
+    "allowedTargetIds": ["REPLACE_WITH_TARGET_ID"]
+  }
+}

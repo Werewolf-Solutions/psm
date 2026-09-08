@@ -782,13 +782,36 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
 .dep-plan-meta { margin: 8px 12px; color: var(--muted); font-size: 11px; }
 .dep-connection-controls, .dep-connection-secret { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dep-connection-credentials { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-.dep-connection-select, .dep-connection-secret input, .dep-connection-profile {
+.dep-connection-select, .dep-connection-input, .dep-connection-profile {
   padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); max-width: 100%;
 }
 .dep-connection-import { margin-top: 8px; }
 .dep-connection-import summary { cursor: pointer; }
 .dep-connection-profile { width: 100%; min-height: 140px; margin: 8px 0; font: 11px/1.5 monospace; }
 .dep-connection-status { margin-top: 6px; font-size: 12px; color: var(--muted); }
+.dep-connection-guided { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; margin: 12px 0; }
+.dep-connection-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.dep-connection-field input { width: 100%; box-sizing: border-box; }
+.dep-connection-help { font-size: 11px; line-height: 1.5; color: var(--muted); }
+.dep-connection-guided > button { grid-column: 1 / -1; justify-self: start; }
+.dep-connection-pin { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 4px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg-soft); }
+.dep-connection-pin p { margin: 0; overflow-wrap: anywhere; }
+.dep-connection-advanced { margin-top: 14px; }
+.dep-field-has-help { position: relative; min-width: 0; max-width: 100%; }
+.dep-connection-secret > label.dep-field-has-help { display: flex; flex-direction: column; gap: 5px; }
+.dep-connection-field > .dep-row-detail:first-child::after { content: " ⓘ"; color: var(--muted); }
+.dep-field-tooltip {
+  position: absolute; top: 100%; left: 0; z-index: 30; visibility: hidden;
+  width: min(360px, 100%); min-width: min(240px, 100%); box-sizing: border-box;
+  padding: 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); color: var(--text); box-shadow: 0 6px 20px rgba(0,0,0,.25);
+  font: 12px/1.5 var(--font-body, sans-serif); text-align: left; white-space: normal; overflow-wrap: anywhere;
+  cursor: help;
+}
+.dep-field-has-help:hover > .dep-field-tooltip,
+.dep-field-has-help:focus-within > .dep-field-tooltip { visibility: visible; }
+.dep-field-has-help[data-help-dismissed="true"] > .dep-field-tooltip { visibility: hidden; }
+.dep-field-example { display: block; margin-top: 8px; color: var(--muted); }
 .dep-artifact-picker { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10.5px; }
 .dep-artifact-picker span { font-weight: 750; text-transform: uppercase; letter-spacing: .04em; }
 .dep-artifact-picker select {
