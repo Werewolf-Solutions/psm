@@ -544,3 +544,26 @@ test("a resumed preparation keeps the room and the engine it was last given", as
   assert.equal(asJob(again.body).engine, "claude");
   assert.equal(asJob(again.body).workroomId, "wrk_room", "the transcript carries across the stop");
 });
+
+test("source publication requires same-origin review, an authenticated policy match and a one-use intent", async (t) => {
+  let approved = 0, authenticated = false;
+  const publication = { id: "pub_test", digest: "sha256:reviewed", state: "pending", expiresAt: Date.now() + 60_000, projectId: "project", environmentId: "staging", policy: policyDocument("authenticated-local-operator", "staging") };
+  const app = express(); app.use(express.json());
+  app.use(createDeploymentRouter({
+    service: {} as DeploymentService, currentUser: async () => authenticated ? OPERATOR : null, localRequest: () => true,
+    publisher: { get: () => publication, approve: async () => { approved++; return { ...publication, state: "succeeded" }; } } as never,
+  }));
+  const server = app.listen(0, "127.0.0.1"); await new Promise<void>((resolve) => server.once("listening", resolve));
+  t.after(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const request = (action: string, body = {}, browser = true) => fetch(`${origin}/api/source-publications/pub_test/${action}`, { method: "POST", headers: { "Content-Type": "application/json", ...(browser ? { Origin: origin, "Sec-Fetch-Site": "same-origin" } : {}) }, body: JSON.stringify(body) });
+  assert.equal((await request("approval-intents", {}, false)).status, 403);
+  assert.equal((await request("approval-intents")).status, 403);
+  authenticated = true;
+  assert.equal((await request("approve", { digest: publication.digest })).status, 403);
+  const intent = await (await request("approval-intents")).json();
+  assert.equal((await request("approve", { digest: "forged", intent: intent.intent })).status, 403);
+  assert.equal((await request("approve", { digest: publication.digest, intent: intent.intent })).status, 200);
+  assert.equal((await request("approve", { digest: publication.digest, intent: intent.intent })).status, 403);
+  assert.equal(approved, 1);
+});

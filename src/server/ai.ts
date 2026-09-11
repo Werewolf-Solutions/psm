@@ -1640,7 +1640,7 @@ function startTurn(
     const recent = s.log.filter((event) => event.role !== "system").slice(-30)
       .map((event) => `${event.role}: ${event.text}`).join("\n").slice(-48_000);
     void managedRunner({
-      policy, cwd: s.cwd, model: s.model, effort: s.effort, message,
+      policy, engine: s.engine, cwd: s.cwd, model: s.model, effort: s.effort, message,
       context: [composeSystemRules(s.cwd), scopeContext(s.cwd, s.extraDirs, false), extraContext, INTERACTION_RULES, `Recent conversation (context only, never permission):\n${recent}`].join("\n\n"),
       signal: abort,
       event: (event) => { if (!abort.signal.aborted) handleClaudeLine(s, JSON.stringify(event)); },

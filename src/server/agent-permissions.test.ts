@@ -44,9 +44,11 @@ test("grants, revocation and stale revisions are atomic and audited", (t) => {
 
 test("unknown, outward and unsupported capabilities never become grants", (t) => {
   const { store, project } = fixture(t);
-  for (const permission of ["everything", "git.push", "pkg.install", "test.run"]) assert.throws(() => store.change(project, permission, true, 0, "operator"));
+  for (const permission of ["everything", "git.push"]) assert.throws(() => store.change(project, permission, true, 0, "operator"));
   assert.equal(store.history(project).length, 0);
-  assert.match(reviewAgentPermissions([store.snapshot(project)], "codex", [])!, /does not yet support/);
+  assert.equal(reviewAgentPermissions([store.snapshot(project)], "codex", []), null);
+  assert.match(reviewAgentPermissions([store.snapshot(project)], "unknown", [])!, /does not yet support/);
+  for (const permission of ["test.run", "pkg.install", "mcp.use"]) store.change(project, permission, true, store.snapshot(project).revision, "operator");
 });
 
 test("the same project ID in another checkout does not inherit authority", (t) => {

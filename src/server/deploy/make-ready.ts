@@ -1,3 +1,4 @@
+import type { SourcePublicationController } from "./source-publication.ts";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { db } from "../db.ts";
@@ -11,7 +12,7 @@ export interface PreparationJob {
   projectId: string;
   environmentId: string;
   state: PreparationState;
-  phase: "check" | "repair" | "build" | "infrastructure";
+  phase: "check" | "repair" | "publish" | "build" | "infrastructure";
   message: string;
   createdAt: number;
   updatedAt: number;
@@ -20,6 +21,7 @@ export interface PreparationJob {
   repairs: number;
   runId: string | null;
   planId: string | null;
+  publicationId?: string | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -64,6 +66,7 @@ export function preparationView(job: PreparationJob | null): Record<string, unkn
     workroomId: job.workroomId,
     runId: job.runId,
     planId: job.planId,
+    publicationId: job.publicationId ?? null,
     failure: job.failure,
     engine: job.engine,
     model: job.model,
@@ -83,6 +86,7 @@ export class DeploymentPreparationController {
   constructor(readonly options: {
     service: DeploymentService;
     preparer: ArtifactPreparationController;
+    publisher?: SourcePublicationController;
     runner: DeploymentRunController;
     repairs: PreparationRepairer;
     repository?: PreparationRepository;
@@ -128,6 +132,7 @@ export class DeploymentPreparationController {
     if (!job || !preparationActive(job)) return job;
     job.state = "cancelled"; job.message = "Preparation stopped.";
     this.save(job);
+    if (job.publicationId) this.options.publisher?.cancel(job.publicationId);
     if (job.workroomId) this.options.repairs.stop(job.workroomId);
     if (job.runId) await this.options.runner.cancel(job.runId);
     return job;
@@ -204,6 +209,14 @@ export class DeploymentPreparationController {
       job.waitingForRepair = false; job.state = "running";
     }
     const { service, preparer } = this.options;
+    if (job.publicationId && this.options.publisher) {
+      const publication = this.options.publisher.get(job.publicationId);
+      if (publication.state === "publishing" || publication.state === "pending" && publication.expiresAt > Date.now()) return;
+      if (publication.state !== "succeeded") {
+        job.state = "blocked"; job.message = publication.expiresAt <= Date.now() ? "Source publication review expired. Resume preparation for a fresh review." : publication.events.at(-1)?.message ?? "Source publication stopped."; this.save(job); return;
+      }
+      job.publicationId = null; job.state = "running";
+    }
     if (job.planId && !job.runId) {
       const approved = service.store.listRuns(projectId, environmentId).find((run) => run.planId === job.planId);
       if (approved) job.runId = approved.runId;
@@ -225,6 +238,12 @@ export class DeploymentPreparationController {
     }
     if (outstanding.some((item) => item.action === "prepare-artifact")) {
       if (!checked.readiness.canMakeReady) { await this.repair(job, checked); return; }
+      const publication = await this.options.publisher?.review(projectId, environmentId);
+      if (!this.live(job)) { if (publication) this.options.publisher?.cancel(publication.id); return; }
+      if (publication) {
+        job.publicationId = publication.id; job.phase = "publish"; job.state = "awaiting-approval";
+        job.message = "Review and approve publishing the local source commit to GitHub; the build will continue afterward."; this.save(job); return;
+      }
       job.phase = "build"; job.message = "Building and verifying the committed deployment artifact…"; this.save(job);
       const existing = service.store.listRuns(projectId, environmentId).find((run) => run.runKind === "prepare" && !service.runView(run.runId).terminal);
       const prepared = existing ? { runId: existing.runId } : await preparer.prepare({ projectId, environmentId });

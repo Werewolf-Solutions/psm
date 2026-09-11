@@ -641,6 +641,18 @@ export class DeploymentService {
     return { project, source: context.source, manifest: context.manifest, environment, unit, connection };
   }
 
+  async sourcePublicationContext(projectId: string, environmentId: string, unitId?: string) {
+    const context = await this.artifactPreparationContext(projectId, environmentId, unitId);
+    const loaded = exactManifest(context.project, "HEAD");
+    if (loaded.source.commit !== context.source.commit) throw new ManagedDeploymentError("Source changed during review", "source-changed", 409);
+    const resolved = await this.resolveEnvironment(loaded, environmentId);
+    const composed = composeDeploymentPolicy(resolved.environment.risk, this.policyLayers(resolved));
+    if (!composed.ok) throw new ManagedDeploymentError(composed.blockers.map((blocker) => blocker.message).join("; "), "policy-blocked", 409);
+    const branch = context.environment.releasePolicy.allowedBranch;
+    if (composed.policy.allowedSourceRefs && !composed.policy.allowedSourceRefs.some((ref) => ref === branch || ref === `refs/heads/${branch}`)) throw new ManagedDeploymentError("Publication branch is outside the deployment policy", "policy-blocked", 403);
+    return { ...context, policy: composed.policy };
+  }
+
   runs(idOrName: string, environmentId?: string): Record<string, unknown>[] {
     const project = this.resolveProject(idOrName);
     return this.store.listRuns(project.id, environmentId).map((run) => this.runView(run.runId));

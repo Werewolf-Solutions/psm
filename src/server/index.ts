@@ -1,3 +1,5 @@
+import { SourcePublicationController } from "./deploy/source-publication.ts";
+import { ManagedMcpTools } from "./agent-mcp-tools.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
 import { databaseFile } from "./db.ts";
 import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
@@ -2072,7 +2074,9 @@ const deploymentEngine = createDeploymentEngine({
   ],
   artifactPreparationAvailable: true,
 });
+const sourcePublisher = new SourcePublicationController(deploymentEngine.service, deploymentSecretBroker);
 const deploymentArtifactPreparer = new GitHubArtifactPreparer({
+  publisher: sourcePublisher,
   service: deploymentEngine.service,
   store: deploymentStore,
   broker: deploymentSecretBroker,
@@ -2105,6 +2109,11 @@ function preparationPermissionGap(projectId: string, engine: string | null, work
   catch (error) { return `Review capabilities — ${error instanceof PermissionError ? error.message : "Managed Git needs an ordinary checkout with an existing commit, an attached branch and a configured Git author."}`; }
   return null;
 }
+const managedMcp = new ManagedMcpTools(agentPermissions, (snapshot) => {
+  const project = getProjects().find((entry) => entry.id === snapshot.project.id && fs.realpathSync(entry.path) === snapshot.project.path);
+  if (!project) return [];
+  return currentCatalog().filter((capability): capability is import("../types.ts").McpCapability => capability.kind === "mcp" && capability.providerProject !== project.name && project.attachments.some((attachment) => attachment.capabilityRef === capability.ref && attachment.manifestDigest === capability.manifestDigest));
+});
 configureManagedAgents((scope) => {
   const projects = getProjects();
   const snapshots = [scope.cwd, ...scope.extraDirs].map((directory) => {
@@ -2118,14 +2127,18 @@ configureManagedAgents((scope) => {
     && workSessions.get(scope.name.slice("__psm_work__:".length)).permissionProfile === "deployment-preparation";
   const gap = reviewAgentPermissions(snapshots, scope.engine, preparation ? PREPARATION_OPERATIONS.map((entry) => entry.permission) : ["repo.read"]);
   if (gap) throw new PermissionError(gap);
-  return { store: agentPermissions, snapshots, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+  // An attached executable provider cannot also be edited by this managed turn.
+  const attachedRefs = new Set(projects.filter((project) => snapshots.some((snapshot) => snapshot.project.id === project.id)).flatMap((project) => project.attachments.map((attachment) => attachment.capabilityRef)));
+  const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
+  return { store: agentPermissions, snapshots, mcp: managedMcp, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
 });
-local.use(agentPermissionRouter({ store: agentPermissions, project: permissionProject, changed: (project) => stopProjectAgents(project.path) }));
+local.use(agentPermissionRouter({ store: agentPermissions, mcp: managedMcp, project: permissionProject, changed: (project) => stopProjectAgents(project.path) }));
 
 const deploymentPreparation = new DeploymentPreparationController({
   reviewCapabilities: preparationPermissionGap,
   service: deploymentEngine.service,
   preparer: deploymentArtifactPreparer,
+  publisher: sourcePublisher,
   runner: deploymentEngine.controller,
   repairs: new WorkroomPreparationRepairer({
     open: ({ projectId, title, objective, ai }) => {
@@ -2190,6 +2203,7 @@ local.use(createDeploymentRouter({
   localRequest,
   runner: deploymentEngine.controller,
   preparer: deploymentArtifactPreparer,
+  publisher: sourcePublisher,
   preparation: deploymentPreparation,
   streamTickets: deploymentStreamTickets,
   agentGeneration: () => agentSecret().createdAt,

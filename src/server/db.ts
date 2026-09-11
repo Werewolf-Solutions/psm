@@ -400,6 +400,8 @@ const MIGRATIONS: readonly string[] = [
   `ALTER TABLE work_sessions ADD COLUMN permission_profile TEXT;
    UPDATE work_sessions SET permission_profile = 'deployment-preparation'
      WHERE id IN (SELECT json_extract(document, '$.workroomId') FROM deployment_preparations);`,
+  `CREATE TABLE agent_tool_requests (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, document TEXT NOT NULL CHECK(json_valid(document)));`,
+  `CREATE TABLE source_publication_plans (id TEXT PRIMARY KEY, document TEXT NOT NULL CHECK(json_valid(document)));`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

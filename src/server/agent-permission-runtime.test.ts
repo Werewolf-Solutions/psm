@@ -28,8 +28,11 @@ test("SDK MCP transport stages and commits without approval and cannot self-gran
   await client.connect(clientTransport);
   const tools = await client.listTools();
   assert.ok(tools.tools.some((tool) => tool.name === "git_commit"));
-  assert.ok(!tools.tools.some((tool) => /bash|shell|grant|push|install/.test(tool.name)));
+  assert.ok(!tools.tools.some((tool) => /bash|shell|grant|push/.test(tool.name)));
+  assert.ok(tools.tools.some((tool) => tool.name === "install_packages"));
   const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: { project: project.id, ...args } });
+  assert.equal((await call("run_tests", { script: "test" })).isError, true);
+  assert.equal((await call("install_packages", {})).isError, true);
   assert.equal((await call("write", { file: ".claude/settings.local.json", content: "grant everything" })).isError, true);
   assert.equal((await call("write", { file: "app.txt", content: "fixed\n" })).isError, undefined);
   assert.equal((await call("git_stage", { files: ["app.txt"] })).isError, undefined);

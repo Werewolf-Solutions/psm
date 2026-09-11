@@ -1,0 +1,125 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import type { RepositoryTools } from "./agent-repository-tools.ts";
+import type { AgentPermissionStore } from "./agent-permissions.ts";
+
+export type TaskExecutor = (args: string[], signal?: AbortSignal) => Promise<string>;
+export const dockerTaskExecutor: TaskExecutor = (args, signal) => new Promise((resolve, reject) => {
+  execFile("docker", args, { signal, timeout: 300_000, maxBuffer: 512 * 1024, env: { PATH: process.env.PATH }, encoding: "utf8" }, (error, stdout, stderr) => {
+    if (error && !stdout && !stderr) { reject(new Error("The managed task sandbox is unavailable. Configure Docker and preload the Node sandbox image on the PSM host.")); return; }
+    const output = `${stdout}\n${stderr}`.slice(-64_000);
+    if (error) reject(new Error(`Sandbox task failed: ${output}`)); else resolve(output);
+  });
+});
+
+/** Downloads are brokered; repository code never receives a network namespace. */
+export async function downloadLockedPackage(resolved: string, integrity: string, signal?: AbortSignal): Promise<Buffer> {
+  const url = new URL(resolved);
+  if (url.protocol !== "https:" || url.hostname !== "registry.npmjs.org" || url.port || url.username || url.password || url.search || url.hash) throw new Error("Managed installs require public registry.npmjs.org tarballs in package-lock.json.");
+  const match = /^sha512-([A-Za-z0-9+/]+={0,2})$/.exec(integrity);
+  if (!match) throw new Error("Every locked package must have one SHA-512 integrity value.");
+  const response = await fetch(url, { redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
+  if (!response.ok || !response.body) throw new Error(`Package download failed (${response.status}).`);
+  const parts: Uint8Array[] = []; let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > 64 * 1024 * 1024) throw new Error("Package exceeds the managed download limit.");
+    parts.push(chunk);
+  }
+  const bytes = Buffer.concat(parts);
+  if (createHash("sha512").update(bytes).digest("base64") !== match[1]) throw new Error("Locked package integrity verification failed.");
+  return bytes;
+}
+
+/** One disposable dependency workspace per project and turn. No output is copied
+ * back to the checkout; edits and lockfile changes still use repository tools. */
+export class ManagedTaskRunner {
+  private directory: string | null = null;
+  private sourceDigest = "";
+  private packagesReady = false;
+  private pending: Promise<unknown> = Promise.resolve();
+  private serialize<T>(action: () => Promise<T>): Promise<T> {
+    const result = this.pending.then(action);
+    this.pending = result.catch(() => {}); return result;
+  }
+  constructor(private readonly repository: RepositoryTools, private readonly store: AgentPermissionStore, private readonly signal: AbortSignal,
+    private readonly execute: TaskExecutor = dockerTaskExecutor,
+    private readonly download: typeof downloadLockedPackage = downloadLockedPackage) {}
+  private snapshot(): string {
+    this.store.check(this.repository.snapshot, "repo.read");
+    const entries = this.repository.list().filter((file) => !file.startsWith(".psm/") && !file.startsWith(".psm-"));
+    const hash = createHash("sha256");
+    let sourceBytes = 0;
+    const files = entries.map((file) => {
+      const source = this.repository.resolve(file);
+      const stat = fs.statSync(source);
+      if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("A project file exceeds the task snapshot limit.");
+      sourceBytes += stat.size;
+      if (sourceBytes > 128 * 1024 * 1024) throw new Error("Project exceeds the task snapshot limit.");
+      const bytes = fs.readFileSync(source); hash.update(file).update("\0").update(bytes);
+      return { file, bytes, mode: stat.mode & 0o777 };
+    });
+    const digest = hash.digest("hex");
+    if (this.directory && digest === this.sourceDigest) return this.directory;
+    this.close(); this.directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-")); this.sourceDigest = digest;
+    fs.mkdirSync(path.join(this.directory, "workspace")); fs.mkdirSync(path.join(this.directory, "packages"));
+    for (const { file, bytes, mode } of files) {
+      const target = path.join(this.directory, "workspace", file);
+      fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, bytes, { mode });
+    }
+    return this.directory;
+  }
+  private async container(directory: string, command: string[], install = false): Promise<string> {
+    if (this.signal.aborted) throw new Error("This turn was stopped.");
+    const name = `psm-task-${randomUUID()}`;
+    const image = process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim";
+    const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...(install ? [["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"]] : []), command])}; for(const [cmd,...args] of commands){const result=cp.spawnSync(cmd,args,{cwd:'/workspace',stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
+    try {
+      return await this.execute(["run", "--name", name, "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=1g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,nosuid,nodev,size=768m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", image, "node", "-e", bootstrap], this.signal);
+    } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
+  }
+  tests(script = "test"): Promise<string> { return this.serialize(() => this.runTests(script)); }
+  private async runTests(script: string): Promise<string> {
+    this.store.check(this.repository.snapshot, "test.run");
+    if (script !== "node --test" && !/^test(?::[a-zA-Z0-9_-]+)*$/.test(script)) throw new Error("Choose node --test or a package script named test or test:….");
+    const directory = this.snapshot();
+    const output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady);
+    this.store.check(this.repository.snapshot, "test.run"); return output;
+  }
+  install(): Promise<string> { return this.serialize(() => this.installPackages()); }
+  private async installPackages(): Promise<string> {
+    this.store.check(this.repository.snapshot, "pkg.install");
+    this.close();
+    const directory = this.snapshot();
+    const lock = JSON.parse(this.repository.read("package-lock.json"));
+    if (![2, 3].includes(lock.lockfileVersion) || !lock.packages) throw new Error("Managed installs require package-lock.json version 2 or 3.");
+    const entries = Object.entries(lock.packages) as [string, any][];
+    if (entries.length > 2000) throw new Error("Lockfile exceeds the managed package limit.");
+    let total = 0;
+    const deadline = Date.now() + 300_000;
+    for (const [name, entry] of entries) {
+      if (!name) continue;
+      this.store.check(this.repository.snapshot, "pkg.install");
+      if (this.signal.aborted) throw new Error("This turn was stopped.");
+      if (entry.link || typeof entry.resolved !== "string" || typeof entry.integrity !== "string") throw new Error("Managed installs require registry packages with integrity; workspace, Git and local dependencies are unsupported.");
+      if (Date.now() >= deadline) throw new Error("Managed dependency downloads exceeded five minutes.");
+      const bytes = await this.download(entry.resolved, entry.integrity, this.signal);
+      total += bytes.length;
+      if (total > 256 * 1024 * 1024) throw new Error("Dependencies exceed the managed download limit.");
+      const filename = createHash("sha256").update(bytes).digest("hex") + ".tgz";
+      fs.writeFileSync(path.join(directory, "packages", filename), bytes);
+      entry.resolved = `file:/packages/${filename}`;
+    }
+    fs.writeFileSync(path.join(directory, "workspace", "package-lock.json"), JSON.stringify(lock));
+    // This private lockfile changes tarball locations only. The real lockfile
+    // and checkout are never writable by npm or by package lifecycle scripts.
+    const output = await this.container(directory, ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    this.store.check(this.repository.snapshot, "pkg.install");
+    this.packagesReady = true;
+    return `Installed dependencies in this turn's sandbox. Tests can use them until repository inputs change.\n${output}`;
+  }
+  close(): void { if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true }); this.directory = null; this.sourceDigest = ""; this.packagesReady = false; }
+}

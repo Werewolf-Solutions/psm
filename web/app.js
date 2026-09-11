@@ -5006,6 +5006,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       // across the switch would show this environment somebody else's progress.
       state.preparation = null;
       state.preparationPlan = null;
+      state.preparationPublication = null;
       state.preparationSignature = "";
       state.preparationEngine = null;
     } else if (!state.run && environment?.latestRun) {
@@ -5175,6 +5176,7 @@ async function checkDeploymentReadiness(makeReady = false) {
     if (body.preparation !== undefined) {
       state.preparation = body.preparation;
       state.preparationPlan = null;
+      state.preparationPublication = null;
       state.preparationSignature = preparationStep(body.preparation);
       if (body.preparation?.active) scheduleDeploymentPreparationPoll();
     }
@@ -5209,6 +5211,7 @@ const PREPARATION_PHASES = {
   check: "Checking",
   repair: "Repairing",
   build: "Building",
+  publish: "Publishing source for",
   infrastructure: "Preparing infrastructure for",
 };
 
@@ -5250,6 +5253,7 @@ async function pollDeploymentPreparation(scope) {
   const moved = preparationStep(job) !== state.preparationSignature;
   state.preparation = job;
   state.preparationPlan = body.plan || null;
+  state.preparationPublication = body.publication || null;
   state.preparationSignature = preparationStep(job);
   if (body.run) renderDeploymentRun(body.run);
   renderDeploymentPreparation();
@@ -5290,6 +5294,7 @@ async function stopDeploymentPreparation() {
 async function approvePreparationInfrastructure() {
   const scope = deploymentRequestScope({ environment: true });
   const state = scope.state;
+  if (state.preparation?.phase === "publish") return approvePreparationPublication();
   const plan = state.preparationPlan;
   if (!plan || plan.blocked) return;
   $("#dep-prep-approve").disabled = true;
@@ -5307,6 +5312,23 @@ async function approvePreparationInfrastructure() {
   } finally {
     if (deploymentRequestIsCurrent(scope)) renderDeploymentPreparation();
   }
+}
+
+async function approvePreparationPublication() {
+  const scope = deploymentRequestScope({ environment: true });
+  const publication = scope.state.preparationPublication;
+  if (!publication || !window.confirm(`Publish ${publication.commit} to ${publication.repository}:${publication.branch}?\n\nThis may trigger GitHub workflows.`)) return;
+  $("#dep-prep-approve").disabled = true;
+  try {
+    const base = `/api/source-publications/${encodeURIComponent(publication.id)}`;
+    const intentResponse = await agentApi(`${base}/approval-intents`, { method: "POST" });
+    const intent = await intentResponse.json();
+    if (!intentResponse.ok) throw new Error(intent.error || "Publication review failed");
+    const response = await agentApi(`${base}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: publication.digest, intent: intent.intent }) });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "Publication failed");
+  } catch (error) { if (deploymentRequestIsCurrent(scope)) scope.state.error = error.message; }
+  finally { if (deploymentRequestIsCurrent(scope)) { scheduleDeploymentPreparationPoll(100); renderManagedDeploy(); } }
 }
 
 function renderDeploymentPreparation() {
@@ -5331,8 +5353,22 @@ function renderDeploymentPreparation() {
   const plan = job.state === "awaiting-approval" ? state.preparationPlan : null;
   $("#dep-prep-plan").hidden = !plan;
   if (plan) renderPlanActions($("#dep-prep-plan"), plan);
+  $("#dep-prep-approve").textContent = "Approve infrastructure plan";
   $("#dep-prep-approve").hidden = !plan;
   $("#dep-prep-approve").disabled = !plan || !!plan.blocked;
+  const publication = job.phase === "publish" && job.state === "awaiting-approval" ? state.preparationPublication : null;
+  if (publication) {
+    const panel = $("#dep-prep-plan"); panel.hidden = false; panel.replaceChildren();
+    panel.append(depText("h3", "", "Publish source to GitHub"));
+    panel.append(depText("p", "", `${publication.repository} → ${publication.branch}`));
+    panel.append(depText("p", "", `${publication.previousCommit} → ${publication.commit}`));
+    panel.append(depText("pre", "", publication.commits));
+    panel.append(depText("pre", "", publication.changes));
+    panel.append(depText("p", "", "Publishes these commits and may trigger GitHub workflows. The deployment build continues after publication is verified."));
+    $("#dep-prep-approve").hidden = false;
+    $("#dep-prep-approve").disabled = publication.state !== "pending" || publication.expiresAt <= Date.now();
+    $("#dep-prep-approve").textContent = "Approve source publication";
+  }
   $("#dep-prep-open").hidden = !job.workroomId;
   $("#dep-prep-stop").hidden = !job.active;
 }

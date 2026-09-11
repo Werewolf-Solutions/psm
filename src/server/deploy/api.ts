@@ -1,3 +1,5 @@
+import { isPermissionOperatorRequest } from "../agent-permissions.ts";
+import type { SourcePublicationController } from "./source-publication.ts";
 import express, { type Request, type Response } from "express";
 import { agentIdentity, isLoopbackHost } from "../agent.ts";
 import type { PsmSessionUser } from "../session.ts";
@@ -41,6 +43,7 @@ export interface DeploymentApiOptions {
   preparer?: ArtifactPreparationController;
   /** When configured, "make ready" runs the whole preparation flow instead of one build. */
   preparation?: DeploymentPreparationController;
+  publisher?: SourcePublicationController;
   intents?: ApprovalIntentRegistry;
   streamTickets?: DeploymentStreamTicketRegistry;
   /** Rotates when the long-lived pairing token rotates, invalidating outstanding stream tickets. */
@@ -246,6 +249,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       }
       res.json({
         preparation: preparationView(job),
+        ...(job?.publicationId && options.publisher ? { publication: options.publisher.get(job.publicationId) } : {}),
         ...(plan ? { plan } : {}),
         ...(job?.runId ? { run: service.runView(job.runId) } : {}),
       });
@@ -263,6 +267,28 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       res.json({ ok: true, preparation: preparationView(job) });
     } catch (error) { apiError(res, error); }
   });
+
+  for (const action of ["approval-intents", "approve"] as const) {
+    router.post(`/api/source-publications/:publicationId/${action}`, async (req, res) => {
+      if (!requireLocal(options, req, res)) return;
+      if (!isPermissionOperatorRequest(req)) return res.status(403).json({ error: "Review publication from the local, same-origin cockpit." });
+      try {
+        if (!options.publisher) throw new Error("Source publishing is not configured.");
+        const plan = options.publisher.get(req.params.publicationId);
+        const user = await options.currentUser();
+        const decision = authorizeDeploymentAction(plan.policy, { action: "approve", origin: "local", authenticated: !!user });
+        if (!decision.allowed) return res.status(403).json({ error: decision.reasons.join("; ") });
+        if (plan.state !== "pending" || plan.expiresAt <= Date.now()) return res.status(409).json({ error: "Publication review is stale or consumed." });
+        const actor = user?.id ?? "local-operator";
+        const binding = { planId: plan.id, planRevision: 1, planDigest: plan.digest, actorSubject: actor, agentId: agentIdentity().agentId, origin: "local" as const };
+        if (action === "approval-intents") return res.json(intents.mint(binding));
+        if (req.body?.digest !== plan.digest || !intents.consume(String(req.body?.intent ?? ""), binding)) return res.status(403).json({ error: "Publication approval intent is missing, expired or belongs to another review." });
+        const publication = await options.publisher.approve(plan.id, plan.digest, actor);
+        await options.preparation?.advance(plan.projectId, plan.environmentId);
+        res.status(publication.state === "succeeded" ? 200 : 409).json({ publication, ...(publication.state === "failed" ? { error: publication.events.at(-1)?.message } : {}) });
+      } catch (error) { apiError(res, error); }
+    });
+  }
 
   router.get("/api/projects/:id/deployment-artifacts", (req, res) => {
     try { res.json({ artifacts: service.artifacts(req.params.id) }); } catch (error) { apiError(res, error); }

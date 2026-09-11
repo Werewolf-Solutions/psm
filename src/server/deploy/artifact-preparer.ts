@@ -1,3 +1,4 @@
+import type { SourcePublicationController } from "./source-publication.ts";
 import { randomUUID } from "node:crypto";
 
 import { canonicalDigest } from "./canonical.ts";
@@ -25,6 +26,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
   readonly #broker: SecretBroker;
   readonly #pollMs: number;
   readonly #maximumPolls: number;
+  readonly #publisher?: SourcePublicationController;
 
   constructor(options: {
     service: DeploymentService;
@@ -32,7 +34,9 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
     broker: SecretBroker;
     pollMs?: number;
     maximumPolls?: number;
+    publisher?: SourcePublicationController;
   }) {
+    this.#publisher = options.publisher;
     this.#service = options.service;
     this.#store = options.store;
     this.#broker = options.broker;
@@ -70,6 +74,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
   }
 
   async prepare(input: { projectId: string; environmentId: string; unitId?: string }): Promise<{ runId: string }> {
+    if (await this.#publisher?.review(input.projectId, input.environmentId, input.unitId)) throw new Error("Source needs publication approval. Use Make ready to deploy to review the exact commit and branch before building.");
     const context = await this.#service.artifactPreparationContext(input.projectId, input.environmentId, input.unitId);
     const run = this.#store.createPreparationRun({ projectId: context.project.id, environmentId: context.environment.id, createdAt: Date.now() });
     const psmArtifactId = `artifact_${randomUUID().replaceAll("-", "").slice(0, 24)}`;

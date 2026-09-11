@@ -1,3 +1,4 @@
+import type { ManagedMcpTools } from "./agent-mcp-tools.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
@@ -10,8 +11,9 @@ export const AGENT_PERMISSIONS = [
   { id: "repo.edit", title: "Edit repository", description: "Create and update ordinary project files. Permission config, credentials and Git internals are protected.", supported: true },
   { id: "git.commit", title: "Stage and commit", description: "Stage named files and commit those changes locally. Hooks and signing are disabled; existing staged work is preserved.", supported: true },
   { id: "git.branch", title: "Create branch", description: "Create a local branch at HEAD. Does not switch, delete or publish branches.", supported: true },
-  { id: "test.run", title: "Run tests", description: "Unavailable until a sandboxed script runner is configured. Test scripts can execute arbitrary code.", supported: false },
-  { id: "pkg.install", title: "Install packages", description: "Unavailable until a sandboxed package runner is configured.", supported: false },
+  { id: "test.run", title: "Run tests", description: "Run project tests in an isolated, offline container. Requires Docker and a preloaded Node image.", supported: true },
+  { id: "pkg.install", title: "Install packages", description: "Download integrity-verified public npm packages and install offline in the turn sandbox. Does not change the checkout.", supported: true },
+  { id: "mcp.use", title: "Use attached tools", description: "Discover explicitly attached MCP tools and request individual calls. Each invocation requires operator review in Capabilities.", supported: true },
   { id: "git.push", title: "Publish source", description: "PSM-managed; requires approval of a publishing plan. Never a standing agent grant.", supported: false },
 ] as const;
 export type AgentPermission = typeof AGENT_PERMISSIONS[number]["id"];
@@ -66,7 +68,7 @@ export const PREPARATION_OPERATIONS: ReadonlyArray<{ permission: AgentPermission
   { permission: "git.commit", instruction: "Fix the cause in this repository, and commit what you change. psm deploys committed source, so an uncommitted fix leaves the check failing. Use the PSM Git tools to stage explicit file paths and commit; do not include unrelated work. Publishing requires a separate PSM-approved operation." },
 ];
 export function reviewAgentPermissions(snapshots: PermissionSnapshot[], engine: string, required: readonly AgentPermission[]): string | null {
-  if (engine !== "claude") return `Review capabilities — ${engine} does not yet support PSM's managed permission tools. Select Claude to prepare this project.`;
+  if (!["claude", "codex"].includes(engine)) return `Review capabilities — ${engine} does not yet support PSM's managed permission tools. Select Claude or Codex to prepare this project.`;
   if (!snapshots.length) return "Review capabilities — register this project's identity before starting a managed agent.";
   for (const snapshot of snapshots) {
     const missing = required.filter((permission) => snapshot.grants[permission]?.granted !== true);
@@ -85,9 +87,10 @@ export function agentPermissionRouter(options: {
   store: AgentPermissionStore;
   project: (id: string) => PermissionProject;
   changed: (project: PermissionProject) => void;
+  mcp?: ManagedMcpTools;
 }): express.Router {
   const router = express.Router();
-  const view = (project: PermissionProject) => ({ ...options.store.snapshot(project), permissions: AGENT_PERMISSIONS, history: options.store.history(project), supportedEngines: ["claude"] });
+  const view = (project: PermissionProject) => ({ ...options.store.snapshot(project), permissions: AGENT_PERMISSIONS, history: options.store.history(project), supportedEngines: ["claude", "codex"] });
   router.get("/api/projects/:id/agent-permissions", (req, res) => {
     try { res.json(view(options.project(req.params.id))); }
     catch (error) { res.status(400).json({ error: (error as Error).message }); }
@@ -100,6 +103,17 @@ export function agentPermissionRouter(options: {
       options.changed(project);
       res.json(view(project));
     } catch (error) { res.status(error instanceof PermissionError ? 409 : 400).json({ error: (error as Error).message }); }
+  });
+  router.get("/api/projects/:id/agent-tool-requests", (req, res) => {
+    try { res.json({ requests: options.mcp?.history(options.project(req.params.id).id) ?? [] }); }
+    catch { res.status(400).json({ error: "Project is not available." }); }
+  });
+  router.post("/api/projects/:id/agent-tool-requests/:request/decision", async (req, res) => {
+    if (!isPermissionOperatorRequest(req)) { res.status(403).json({ error: "Review attached tool calls from the local cockpit." }); return; }
+    try {
+      if (!options.mcp || typeof req.body?.approve !== "boolean") throw new Error("Invalid MCP review.");
+      res.json(await options.mcp.decide(options.project(req.params.id).id, req.params.request, req.body.digest, req.body.approve, `local:${userInfo().username}`));
+    } catch (error) { res.status(409).json({ error: (error as Error).message }); }
   });
   return router;
 }

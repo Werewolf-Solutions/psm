@@ -31,7 +31,7 @@
     const show = (data) => {
       container.querySelector(".permission-list")?.remove();
       const list = node("div", "", "permission-list");
-      list.append(node("p", "Managed execution: Claude. Codex, test scripts and package installs are unavailable until their permission adapters are supported.", "cap-section-description"));
+      list.append(node("p", "Managed execution: Claude and Codex. Tests and installs use a disposable offline Docker sandbox. Attached MCP calls require individual review below.", "cap-section-description"));
       for (const permission of data.permissions) {
         const grant = data.grants[permission.id];
         const row = node("article", "", "permission-row");
@@ -108,7 +108,38 @@
       const manage = node("button", "Open deployment setup", "btn");
       manage.type = "button"; manage.onclick = onDeploy; connections.append(manage);
     }).catch((error) => { if (current()) connections.append(node("p", error.message)); });
-    await Promise.all([permissions, connectionTask]);
+    const toolSection = node("section", "", "permission-tool-reviews");
+    container.append(toolSection);
+    const loadReviews = async () => {
+      try {
+        const data = await request(api, `${base}/agent-tool-requests`);
+        if (!current()) return;
+        toolSection.replaceChildren(node("h3", "Attached tool requests"));
+        const refresh = node("button", "Refresh requests", "btn"); refresh.onclick = loadReviews; toolSection.append(refresh);
+        if (!data.requests.length) toolSection.append(node("p", "No attached tool calls awaiting review."));
+        for (const call of data.requests) {
+          const row = node("article", "", "permission-row");
+          const detail = node("div", "");
+          detail.append(node("h4", `${call.capability} · ${call.tool}`), node("pre", JSON.stringify(call.arguments, null, 2)), node("p", `${call.state}${call.actor ? ` · ${call.actor}` : ""}`));
+          row.append(detail);
+          if (call.state === "pending" && call.expiresAt > Date.now()) {
+            for (const approve of [true, false]) {
+              const button = node("button", approve ? "Approve call" : "Reject", "btn");
+              button.onclick = async () => {
+                if (approve && !window.confirm(`Run ${call.tool} through ${call.capability} with the displayed arguments? This may change an external service.`)) return;
+                row.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+                try { await request(api, `${base}/agent-tool-requests/${encodeURIComponent(call.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: call.digest, approve }) }); }
+                catch (error) { status.textContent = error.message; }
+                await loadReviews();
+              };
+              row.append(button);
+            }
+          }
+          toolSection.append(row);
+        }
+      } catch (error) { if (current()) toolSection.replaceChildren(node("p", error.message)); }
+    };
+    await Promise.all([permissions, connectionTask, loadReviews()]);
   }
   window.PsmAgentPermissions = { render };
 })();

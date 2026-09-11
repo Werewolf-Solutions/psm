@@ -146,3 +146,17 @@ test("missing capabilities block before opening a room or consuming an attempt",
   assert.equal(h.counts().repairs, 1);
   assert.equal(h.current().repairs, 1);
 });
+
+
+test("publication pauses before a GitHub build and resumes after verified operator approval", async (t) => {
+  const h = harness(); t.after(h.close);
+  let published = false;
+  const plan = { id: "publication", state: "pending", expiresAt: Date.now() + 60_000, events: [] };
+  h.controller.options.publisher = { review: async () => published ? null : plan, get: () => plan, cancel: () => { plan.state = "cancelled"; } } as never;
+  h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+  assert.equal(h.current().phase, "publish"); assert.equal(h.current().state, "awaiting-approval");
+  assert.equal(h.counts().builds, 0); assert.equal(h.counts().repairs, 0);
+  await h.advance(); assert.equal(h.counts().builds, 0);
+  published = true; plan.state = "succeeded"; await h.advance();
+  assert.equal(h.current().phase, "build"); assert.equal(h.counts().builds, 1);
+});

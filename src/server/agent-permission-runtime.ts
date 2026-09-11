@@ -1,4 +1,7 @@
 import { createSdkMcpServer, query, tool, type Options } from "@anthropic-ai/claude-agent-sdk";
+import type { ManagedMcpTools } from "./agent-mcp-tools.ts";
+import { ManagedTaskRunner } from "./agent-task-runner.ts";
+import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
@@ -9,6 +12,7 @@ export interface ManagedAgentPolicy {
   snapshots: PermissionSnapshot[];
   protectedRoots: string[];
   projectBoundaries?: string[];
+  mcp?: ManagedMcpTools;
 }
 export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController): Options {
   return {
@@ -32,13 +36,15 @@ export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer
 export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal: AbortController) {
   const input = { policy, signal };
   const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, input.policy.store, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))])]));
+  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, policy.store, signal.signal)]));
+  signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const project = z.string().describe("Registered project ID from the session scope");
   const invoke = async (id: string, action: (repository: RepositoryTools) => unknown) => {
     try {
       if (input.signal.signal.aborted) throw new Error("This turn was stopped.");
       const repository = repositories.get(id);
       if (!repository) throw new Error("This project is outside the workroom scope.");
-      const result = action(repository);
+      const result = await action(repository);
       return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
     } catch (error) {
       // Never relay raw subprocess stderr, which may contain credential/config values.
@@ -47,6 +53,13 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     }
   };
   const server = createSdkMcpServer({ name: "psm", version: "1.0.0", tools: [
+    ...(policy.mcp ? [
+      tool("attached_tools", "List reviewed project attachments and their MCP tools.", { project }, ({ project }) => invoke(project, (repo) => policy.mcp!.list(repo.snapshot))),
+      tool("request_attached_call", "Request an exact attached MCP call for operator approval in Capabilities. Ask the operator to review, then use attached_call_result.", { project, capability: z.string(), tool: z.string(), arguments: z.record(z.string(), z.unknown()) }, (args) => invoke(args.project, (repo) => policy.mcp!.request(repo.snapshot, args.capability, args.tool, args.arguments))),
+      tool("attached_call_result", "Read the outcome of an operator-reviewed attached MCP call.", { project, request: z.string() }, ({ project, request }) => invoke(project, (repo) => policy.mcp!.result(repo.snapshot, request))),
+    ] : []),
+    tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
+    tool("install_packages", "Install the public npm lockfile into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project }, ({ project }) => invoke(project, () => tasks.get(project)!.install())),
     tool("files", "List ordinary project files.", { project }, ({ project }) => invoke(project, (repo) => repo.list())),
     tool("read", "Read one project text file.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.read(file))),
     tool("search", "Search project files for literal text.", { project, text: z.string() }, ({ project, text }) => invoke(project, (repo) => repo.search(text))),
@@ -57,16 +70,20 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     tool("git_commit", "Commit this turn's staged changes locally, with Git hooks and signing disabled. Does not publish.", { project, message: z.string() }, ({ project, message }) => invoke(project, (repo) => repo.commit(message))),
     tool("git_branch", "Create a local branch at HEAD; does not switch or delete branches.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.branch(name))),
   ] });
+  const close = server.instance.close.bind(server.instance);
+  server.instance.close = async () => { for (const task of tasks.values()) task.close(); await close(); };
   return server;
 }
 
 export async function runManagedAgent(input: {
-  policy: ManagedAgentPolicy; cwd: string; model: string | null; effort?: string | null;
+  policy: ManagedAgentPolicy; engine?: string; cwd: string; model: string | null; effort?: string | null;
   message: string; context: string; signal: AbortController;
   event: (event: unknown) => void;
 }): Promise<void> {
   const server = createManagedRepositoryServer(input.policy, input.signal);
   const scope = input.policy.snapshots.map(({ project, grants }) => `${project.name}: ${project.id}; grants: ${Object.entries(grants).filter(([, value]) => value?.granted).map(([name]) => name).join(", ") || "none"}`).join("\n");
+  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nUse the PSM tools. Grants are enforced outside the conversation. Ask the operator with the PSM question marker if a required operation is unavailable.`;
+  if (input.engine === "codex") return runCodexManaged({ ...input, server, context });
   const stream = query({
     // SDK MCP servers require streaming input, including for a single user turn.
     prompt: (async function* () { yield { type: "user" as const, session_id: "", parent_tool_use_id: null, message: { role: "user" as const, content: input.message } }; })(),
@@ -74,9 +91,9 @@ export async function runManagedAgent(input: {
       ...managedAgentOptions(server, input.signal), cwd: input.cwd,
       ...(input.model ? { model: input.model } : {}),
       ...(["low", "medium", "high", "xhigh", "max"].includes(input.effort ?? "") ? { effort: input.effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
-      systemPrompt: `${input.context}\n\nPSM managed project scope:\n${scope}\nUse only the PSM tools. Grants are enforced outside the conversation. No shell, external integrations, tests, installs or publishing tools are available. If an unavailable operation is needed, ask the operator using the PSM question marker and stop.`,
+      systemPrompt: context,
     },
   });
   try { for await (const event of stream) input.event(event); }
-  finally { stream.close(); }
+  finally { stream.close(); await server.instance.close(); }
 }
