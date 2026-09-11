@@ -1298,16 +1298,6 @@ local.get("/api/projects/:name/ai/usage", async (req, res) => {
   res.json(await subscriptionUsage(engine, model, force));
 });
 
-// Always ask the installed CLI for its current catalog. Model availability can
-// change independently of psm releases and may be scoped by account or policy.
-local.get("/api/projects/:name/ai/models", async (req, res) => {
-  const target = aiTarget(req.params.name);
-  if (!target) return res.status(404).json({ error: "unknown project" });
-  const engine = parseEngine(req.query.engine, target.aiEngine);
-  res.setHeader("Cache-Control", "no-store");
-  res.json(await modelCatalog(engine, target.path));
-});
-
 // the workspace-wide chat target (its saved engine / full-access defaults)
 local.get("/api/workspace", (_req, res) => {
   const o = loadOverrides()[WORKSPACE_NAME] || {};
@@ -1855,6 +1845,19 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
     }
     res.status(400).json({ error: (err as Error).message || "could not resolve that AI target" });
   };
+
+  // Discovery uses the same resolved checkout as the conversation, including
+  // workrooms. A room id is not a project name.
+  local.get(`${base}/ai/models`, async (req, res) => {
+    try {
+      const target = resolve(req);
+      const engine = parseEngine(req.query.engine, target.engine);
+      res.setHeader("Cache-Control", "no-store");
+      res.json(await modelCatalog(engine, target.path));
+    } catch (err) {
+      guard(res, err);
+    }
+  });
 
   // transcript stream (replays history, then live)
   local.get(`${base}/ai/stream`, (req, res) => {

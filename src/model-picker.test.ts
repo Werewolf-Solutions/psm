@@ -23,14 +23,21 @@ function picker() {
     node(`${prefix}-effort`);
   }
   const requests: ((response: any) => void)[] = [];
+  const urls: string[] = [];
   const context = vm.createContext({
     document: { getElementById: (id: string) => nodes.get(id), createElement: () => node() },
-    agentApi: () => new Promise((resolve) => requests.push(resolve)),
+    agentApi: (url: string) => {
+      urls.push(url);
+      return new Promise((resolve) => requests.push(resolve));
+    },
     Date, Event,
   });
   const source = fs.readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   vm.runInContext(source.slice(source.indexOf("const MODEL_CATALOGS"), source.indexOf("async function load()")), context);
-  return { nodes, requests, context, run: (code: string) => vm.runInContext(code, context) };
+  vm.runInContext(source.slice(source.indexOf("function refreshAiModels()"), source.indexOf("/**", source.indexOf("function refreshAiModels()"))), context);
+  vm.runInContext(source.slice(source.indexOf("function aiBase("), source.indexOf("function connectAi(")), context);
+  context.aiControlNodes = () => [nodes.get("ws-effort"), nodes.get("web-effort")];
+  return { nodes, requests, urls, context, run: (code: string) => vm.runInContext(code, context) };
 }
 
 const catalog = (engine: string, id: string, levels: string[]) => ({
@@ -75,3 +82,28 @@ test("failed refresh clears offered choices and displays a retry state", async (
   assert.equal(p.nodes.get("ws-model").children.length, 0);
   assert.match(p.nodes.get("ws-effort-status").textContent, /unavailable/);
 });
+
+for (const target of [
+  { kind: "work", id: "wrk_preparation", name: "wrk_preparation", base: "/api/work-sessions/wrk_preparation" },
+  { kind: "project", id: null, name: "todo app", base: "/api/projects/todo%20app" },
+  { kind: "project", id: null, name: "__workspace__", base: "/api/projects/__workspace__" },
+]) {
+  test(`${target.kind} ${target.name} discovers the selected provider for both model controls`, async () => {
+    const p = picker();
+    p.context.WS = { ...target, engine: "claude", model: "", effort: "" };
+    const first = p.run("refreshAiModels()");
+    p.context.WS.engine = "codex";
+    const second = p.run("refreshAiModels()");
+    assert.deepEqual(p.urls, [
+      `${target.base}/ai/models?engine=claude`,
+      `${target.base}/ai/models?engine=codex`,
+    ]);
+    p.requests[1]({ ok: true, json: async () => catalog("codex", "codex-model", ["high"]) });
+    await second;
+    p.requests[0]({ ok: true, json: async () => catalog("claude", "claude-model", ["low"]) });
+    await first;
+    for (const prefix of ["ws", "web"]) {
+      assert.deepEqual(p.nodes.get(`${prefix}-model`).children.map((n: any) => n.value), ["codex-model"]);
+    }
+  });
+}

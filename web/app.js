@@ -126,7 +126,7 @@ function renderEffortOptions(select, engine, model, selected = "", project = sel
 // time it lands the user may have picked a different model or effort. Rendering
 // the arguments captured at call time would silently undo that choice, so the
 // current selection is read at render time instead.
-async function refreshModelCatalog(project, engine, selection, effortSelect) {
+async function refreshModelCatalog(project, engine, selection, effortSelect, base = `/api/projects/${encodeURIComponent(project)}`) {
   if (!engine || !project) return;
   const selects = [].concat(effortSelect).filter(Boolean);
   if (!selects.length) return;
@@ -142,7 +142,7 @@ async function refreshModelCatalog(project, engine, selection, effortSelect) {
   const mine = (select) => MODEL_FETCH_TOKENS.get(select) === token;
   try {
     const response = await agentApi(
-      `/api/projects/${encodeURIComponent(project)}/ai/models?engine=${encodeURIComponent(engine)}`,
+      `${base}/ai/models?engine=${encodeURIComponent(engine)}`,
       { cache: "no-store" },
     );
     const catalog = await response.json();
@@ -3929,11 +3929,12 @@ function syncAiControls() {
 }
 
 function refreshAiModels() {
-  refreshModelCatalog(
+  return refreshModelCatalog(
     WS.name,
     WS.engine,
     () => ({ model: WS.model, effort: WS.effort }),
     aiControlNodes("effort"),
+    aiBase(),
   );
 }
 

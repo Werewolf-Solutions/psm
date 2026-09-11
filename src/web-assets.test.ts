@@ -241,7 +241,7 @@ test("a late model catalog cannot undo a newer choice", () => {
   const js = read("app.js");
   assert.match(
     js,
-    /async function refreshModelCatalog\(project, engine, selection, effortSelect\)/,
+    /async function refreshModelCatalog\(project, engine, selection, effortSelect[,)]/,
     "refreshModelCatalog should take a selection getter, not fixed values",
   );
   assert.match(js, /const \{ model, effort \} = selection\(\);/);
