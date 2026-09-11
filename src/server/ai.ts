@@ -121,6 +121,8 @@ interface AiSession {
   subscribers: Set<Response>;
   summary: string | null; // "where we left off" recap
   summaryAt: number; // log length the summary was generated at
+  /** Conversation turns (user + assistant) the summary covers; absent on summaries saved before it existed. */
+  summaryTurns?: number;
   // messages sent while a turn was running, dispatched in order as it finishes.
   // the CLI resumes one session id at a time, so turns must stay sequential.
   queue: QueuedTurn[];
@@ -201,6 +203,7 @@ interface PersistedSession {
   log: AiEvent[];
   summary: string | null;
   summaryAt: number;
+  summaryTurns?: number;
   question?: AiQuestionRequest | null;
   extraDirs?: string[];
   updatedAt: number;
@@ -233,6 +236,7 @@ function loadSessions(): void {
       subscribers: new Set(),
       summary: p.summary ?? null,
       summaryAt: p.summaryAt ?? 0,
+      summaryTurns: p.summaryTurns,
       queue: [],
       question: p.question ?? null,
     });
@@ -267,6 +271,7 @@ function saveSessions(): void {
       log: s.log.slice(-MAX_PERSIST),
       summary: s.summary,
       summaryAt: s.summaryAt,
+      summaryTurns: s.summaryTurns,
       question: s.question,
       extraDirs: s.extraDirs,
       updatedAt: Date.now(),
@@ -1751,10 +1756,29 @@ function finishTurn(s: AiSession) {
 }
 
 /** A short "where we left off" recap, regenerated only when the log has grown. */
+/** What a recap summarises: what was said, not the system lines around it. */
+export function conversationTurns(log: readonly AiEvent[]): number {
+  return log.filter((event) => event.role === "user" || event.role === "assistant").length;
+}
+
+/**
+ * Whether the saved recap still describes the conversation.
+ *
+ * Counting every log line made any system line — an engine switch, a limit
+ * notice, a tool call echo — look like progress, so the recap was regenerated
+ * with a fresh AI call on almost every visit. Only the conversation counts now.
+ * A summary saved before turns were counted keeps the old rule until it is next
+ * regenerated.
+ */
+export function recapIsCurrent(s: { summary: string | null; summaryAt: number; summaryTurns?: number; log: readonly AiEvent[] }): boolean {
+  if (!s.summary) return false;
+  return s.summaryTurns === undefined ? s.summaryAt >= s.log.length : s.summaryTurns >= conversationTurns(s.log);
+}
+
 export async function recap(name: string): Promise<string | null> {
   const s = sessions.get(name);
   if (!s || !s.log.length) return null;
-  if (s.summary && s.summaryAt >= s.log.length) return s.summary; // still current
+  if (recapIsCurrent(s)) return s.summary;
 
   const transcript = s.log
     .map((e) =>
@@ -1778,6 +1802,7 @@ export async function recap(name: string): Promise<string | null> {
     if (firstBullet > 0) clean = clean.slice(firstBullet).trim();
     s.summary = clean;
     s.summaryAt = s.log.length;
+    s.summaryTurns = conversationTurns(s.log);
     saveSessionsSoon();
   }
   return s.summary;
@@ -1803,6 +1828,7 @@ export function restoreCachedRecap(name: string, value: unknown): void {
   }
   session.summary = summary;
   session.summaryAt = session.log.length;
+  session.summaryTurns = conversationTurns(session.log);
   saveSessionsSoon();
 }
 

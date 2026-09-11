@@ -1368,6 +1368,14 @@ select[data-loading] { opacity: 0.55; font-style: italic; }
   cursor: pointer; font: inherit; font-size: 17px; line-height: 1;
 }
 .ai-recap-close:hover { color: var(--text); }
+.ai-recap.collapsed { padding: 5px 12px; max-height: none; overflow: visible; }
+.ai-recap-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 0; border: 0;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.ai-recap-toggle .ai-recap-title { margin-bottom: 0; }
+.ai-recap-chevron { color: var(--muted); font-size: 11px; }
+.ai-recap-toggle:hover .ai-recap-chevron, .ai-recap-toggle:focus-visible .ai-recap-chevron { color: var(--text); }
 
 /* ---- AI question dialog ---- */
 .question-backdrop { position: fixed; inset: 0; z-index: 130; background: rgba(0, 0, 0, .62); }

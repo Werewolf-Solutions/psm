@@ -30,7 +30,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PSM_ROOT = path.resolve(__dirname, "..");
 
 // Per-account in hosted mode, one file beside the repo locally — see src/store.ts.
-const linksFile = () => process.env.PSM_LINKS_FILE || statePath(".psm-links.json");
+export const linksFile = () => process.env.PSM_LINKS_FILE || statePath(".psm-links.json");
 
 export type LinkKind = "workspace" | "project";
 

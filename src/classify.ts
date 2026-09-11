@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Locally this is overrides.json beside the repo, as it always was. Hosted it
 // resolves inside the requesting account's own directory, so two accounts with a
 // project of the same name cannot overwrite each other. See src/store.ts.
-const overridesFile = () => statePath("overrides.json");
+export const overridesFile = () => statePath("overrides.json");
 
 export function loadOverrides(): Record<string, Override> {
   const file = overridesFile();

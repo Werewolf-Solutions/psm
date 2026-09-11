@@ -10,7 +10,10 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { getProjects, writeMarkdown } from "../index.ts";
+import { getProjects as scanProjects, writeMarkdown } from "../index.ts";
+import { createProjectCache } from "./project-cache.ts";
+import { overridesFile } from "../classify.ts";
+import { linksFile } from "../links.ts";
 import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
 import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
@@ -136,6 +139,26 @@ import { DeploymentStreamTicketRegistry } from "./deploy/stream-tickets.ts";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(__dirname, "..", "..", "web");
 const PORT = Number(process.env.PORT || 4317);
+
+/**
+ * The workspace scan behind nearly every request, done once and reused.
+ *
+ * Uncached, each call re-read 60 project folders and ran four git processes
+ * per repository, and a single tab switch triggered several calls — so opening
+ * a project took seconds of identical work. See ./project-cache.ts for what
+ * refreshes it.
+ */
+const projectCache = createProjectCache({
+  scan: scanProjects,
+  inputs: () => [
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..", "psm.config.json"),
+    overridesFile(),
+    linksFile(),
+  ],
+});
+function getProjects(): ReturnType<typeof scanProjects> {
+  return projectCache.get();
+}
 
 const app = express();
 app.disable("x-powered-by");
@@ -320,6 +343,17 @@ app.get("/api/projects", (_req, res) => {
 
 // What psm is looking at. In dev this includes the configured workspace root,
 // flagged `implicit` so the UI does not offer to unlink something it cannot.
+// A request that adds, removes, renames or re-identifies a project makes the
+// cached list stale both before and after it runs. Overrides and links are also
+// caught by the cache's file check; a new project folder or identity file is not.
+const PROJECT_WRITES = /^\/api\/(?:links(?:\/[^/]+)?|projects\/new|projects\/[^/]+(?:\/id|\/attachments(?:\/[^/]+)?)?)$/;
+app.use((req, res, next) => {
+  if (req.method === "GET" || !PROJECT_WRITES.test(req.path)) return next();
+  projectCache.invalidate();
+  res.on("finish", () => projectCache.invalidate());
+  next();
+});
+
 app.get("/api/links", (_req, res) => {
   res.json({ mode: psmMode(), canLink: true, links: describeLinks(loadConfig()) });
 });

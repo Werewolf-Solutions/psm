@@ -4387,49 +4387,79 @@ function connectAi(name) {
   es.onerror = () => {};
 }
 
-// recaps the user has dismissed this session, keyed by project name — so a
-// closed recap stays closed when you switch away and come back (until reload)
-const RECAP_DISMISSED = new Set();
+/*
+ * "Where we left off": open once, then remembered.
+ *
+ * Closing folds it into a one-line bar that opens again on a click. The choice
+ * is kept per conversation across tabs, project switches and reloads, and the
+ * recap only opens by itself again when it says something new — which the
+ * server only produces once the conversation itself has moved on.
+ */
+function recapStateKey(key) { return `psm.recap.folded.${key}`; }
+function recapDigest(summary) {
+  let hash = 5381;
+  for (let i = 0; i < summary.length; i++) hash = ((hash << 5) + hash + summary.charCodeAt(i)) | 0;
+  return String(hash >>> 0);
+}
+function recapFolded(summary, key) {
+  try { return localStorage.getItem(recapStateKey(key)) === recapDigest(summary); } catch { return false; }
+}
+function rememberRecapFolded(summary, key, folded) {
+  try {
+    if (folded) localStorage.setItem(recapStateKey(key), recapDigest(summary));
+    else localStorage.removeItem(recapStateKey(key));
+  } catch {}
+}
 
 function setRecap(summary) {
   const banner = $("#ws-ai-recap");
   banner.classList.remove("loading");
-  if (!summary || RECAP_DISMISSED.has(WS.name)) {
+  if (!summary) {
     banner.hidden = true;
     banner.innerHTML = "";
+    delete banner.dataset.summary;
     return;
   }
+  const key = conversationKey(); // pinned for the handlers below
+  const folded = recapFolded(summary, key);
+  // The stream and the fetch both deliver the recap; the same one twice is not a redraw.
+  if (!banner.hidden && banner.dataset.summary === summary && banner.dataset.folded === String(folded)) return;
+  banner.dataset.summary = summary;
+  banner.dataset.folded = String(folded);
   banner.innerHTML = "";
-  const name = WS.name; // pin it for the close handler
-  const close = el("button", "ai-recap-close", "&times;");
-  close.title = "Dismiss";
-  close.onclick = () => {
-    RECAP_DISMISSED.add(name);
-    banner.hidden = true;
-    banner.innerHTML = "";
-  };
-  const head = el("div", "ai-recap-head");
-  head.append(el("div", "ai-recap-title", "↩ Where we left off"), close);
-  const body = el("div", "ai-recap-body");
-  body.textContent = summary;
-  banner.append(head, body);
+  banner.classList.toggle("collapsed", folded);
+  const title = el("div", "ai-recap-title", "↩ Where we left off");
+  if (folded) {
+    const open = el("button", "ai-recap-toggle");
+    open.type = "button";
+    open.title = "Show where we left off";
+    open.setAttribute("aria-expanded", "false");
+    open.append(title, el("span", "ai-recap-chevron", "▸"));
+    open.onclick = () => { rememberRecapFolded(summary, key, false); setRecap(summary); };
+    banner.append(open);
+  } else {
+    const close = el("button", "ai-recap-close", "&times;");
+    close.type = "button";
+    close.title = "Fold away";
+    close.setAttribute("aria-expanded", "true");
+    close.onclick = () => { rememberRecapFolded(summary, key, true); setRecap(summary); };
+    const head = el("div", "ai-recap-head");
+    head.append(title, close);
+    const body = el("div", "ai-recap-body");
+    body.textContent = summary;
+    banner.append(head, body);
+  }
   banner.hidden = false;
 }
 
 async function fetchRecap() {
-  if (!WS.name || RECAP_DISMISSED.has(WS.name)) return;
-  const banner = $("#ws-ai-recap");
-  if (banner.hidden) {
-    banner.hidden = false;
-    banner.classList.add("loading");
-    banner.textContent = "Recalling where we left off…";
-  }
+  if (!WS.name) return;
+  // No placeholder: a saved recap arrives with the stream straight away, and a
+  // "Recalling…" line on every visit was the flash this replaced.
   try {
     const r = await agentApi(`${aiBase()}/ai/recap`);
     setRecap((await r.json()).summary);
-  } catch {
-    banner.classList.remove("loading");
-  }
+  } catch {}
 }
 
 /* ---- usage limit ---- */
