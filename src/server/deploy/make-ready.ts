@@ -1,3 +1,4 @@
+import { externalPreparationItems, externalPreparationMessage, repositoryRepairItems } from "./readiness.ts";
 import type { SourcePublicationController } from "./source-publication.ts";
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
@@ -23,7 +24,7 @@ export interface PreparationJob {
   planId: string | null;
   publicationId?: string | null;
   /** Why a blocked job is blocked, when psm can tell on its own that the cause has gone. */
-  blockedBy?: "capabilities" | "checkout" | null;
+  blockedBy?: "capabilities" | "checkout" | "external" | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -316,11 +317,24 @@ export class DeploymentPreparationController {
     const checked = await service.checkReadiness(projectId, environmentId, { preparationAvailable: true });
     if (!this.live(job)) return;
     const outstanding = checked.readiness.items.filter((item) => item.status !== "ready");
-    if (job.failure || outstanding.some((item) => item.action !== "prepare-artifact")) {
-      await this.repair(job, checked); return;
+    const sourceItems = repositoryRepairItems(checked.readiness);
+    const externalItems = externalPreparationItems(checked.readiness);
+    if (sourceItems.length || job.failure && job.phase === "build" && !externalItems.length) {
+      // A mixed report may contain useful local work. Send only that work to the
+      // single-project room; connection credentials and other projects stay out.
+      const repairItems = sourceItems.length ? sourceItems : outstanding.filter((item) => item.action === "prepare-artifact");
+      await this.repair(job, { ...checked, readiness: { ...checked.readiness, items: repairItems } }); return;
+    }
+    if (externalItems.length || job.failure) {
+      job.state = "blocked"; job.blockedBy = "external"; job.phase = "check";
+      job.message = externalItems.length ? externalPreparationMessage(externalItems) : `Infrastructure preparation failed: ${job.failure}. Review the run and its connections before resuming.`;
+      this.save(job); return;
     }
     if (outstanding.some((item) => item.action === "prepare-artifact")) {
-      if (!checked.readiness.canMakeReady) { await this.repair(job, checked); return; }
+      if (!checked.readiness.canMakeReady) {
+        job.state = "blocked"; job.phase = "check"; job.blockedBy = "external";
+        job.message = externalPreparationMessage(outstanding.filter((item) => item.action === "prepare-artifact")); this.save(job); return;
+      }
       const publication = await this.options.publisher?.review(projectId, environmentId);
       if (!this.live(job)) { if (publication) this.options.publisher?.cancel(publication.id); return; }
       if (publication) {
@@ -340,7 +354,8 @@ export class DeploymentPreparationController {
     const document = plan.document as unknown as DeploymentPlanDocument;
     if (plan.blocked) {
       job.failure = document.blockers.map((item) => item.message).join("; ");
-      await this.repair(job, checked); return;
+      job.state = "blocked"; job.phase = "check"; job.blockedBy = "external";
+      job.message = `Infrastructure needs attention: ${job.failure}. Review Deployment connections and the infrastructure plan, then resume.`; this.save(job); return;
     }
     if (!document.actions.some((action) => action.sideEffecting)) {
       job.state = "succeeded"; job.phase = "check"; job.message = "Ready to deploy. Source, dependencies, build and infrastructure have been checked.";

@@ -970,6 +970,8 @@ export class DeploymentStore {
   updateConnectionSecretStatus(input: {
     connectionId: string;
     expectedSecretGeneration: number;
+    /** Credential-cache refreshes must not overwrite a newer or invalid profile. */
+    expectedMetadataRevision?: number;
     secretGeneration: number;
     readiness: ConnectionReadiness;
     updatedAt: number;
@@ -980,7 +982,8 @@ export class DeploymentStore {
     const result = this.database
       .prepare(
         `UPDATE deployment_connections SET secret_generation = ?, readiness = ?, updated_at = ?
-         WHERE connection_id = ? AND secret_generation = ?`,
+         WHERE connection_id = ? AND secret_generation = ?
+           AND (? IS NULL OR (metadata_revision = ? AND readiness != 'invalid'))`,
       )
       .run(
         next,
@@ -988,6 +991,8 @@ export class DeploymentStore {
         integer(input.updatedAt, "connection secret update time"),
         text(input.connectionId, "connection id"),
         expected,
+        input.expectedMetadataRevision ?? null,
+        input.expectedMetadataRevision ?? null,
       );
     if (!result.changes) throw new DeploymentConflictError("connection secret generation changed");
     return this.getConnection(input.connectionId);

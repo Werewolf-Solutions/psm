@@ -567,3 +567,21 @@ test("source publication requires same-origin review, an authenticated policy ma
   assert.equal((await request("approve", { digest: publication.digest, intent: intent.intent })).status, 403);
   assert.equal(approved, 1);
 });
+
+test("external-only readiness does not ask for repository grants or checkout repairs", async (t) => {
+  const app = express(); app.use(express.json());
+  app.use(createDeploymentRouter({
+    service: {
+      resolveProject: () => ({ id: "project" }),
+      checkReadiness: async () => ({ readiness: { canMakeReady: true, items: [{ id: "upstream", status: "blocked", action: "resolve-dependency", detail: "expected HTTP 401, received 404", repairScope: "external" }] } }),
+    } as unknown as DeploymentService,
+    currentUser: async () => null, localRequest: () => true,
+    reviewCapabilities: () => { throw new Error("External setup does not need repository grants"); },
+    reviewCheckout: () => { throw new Error("External setup does not need a clean checkout"); },
+  }));
+  const server = app.listen(0, "127.0.0.1"); await new Promise<void>((resolve) => server.once("listening", resolve));
+  t.after(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/projects/project/deployments/staging/readiness`, { method: "POST" });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).readiness.items.length, 1);
+});

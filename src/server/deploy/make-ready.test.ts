@@ -76,15 +76,16 @@ test("source repair continues to build and verified readiness without another cl
   await h.advance(); assert.equal(h.current().state, "succeeded");
 });
 
-test("missing build prerequisites go to repairs instead of spending a CI run", async (t) => {
+test("missing build prerequisites pause without spending a repair or CI run", async (t) => {
   const h = harness(); t.after(h.close);
   h.blockers(["prepare-artifact"]); h.buildAvailable(false); h.start(); await h.advance();
-  assert.deepEqual(h.counts(), { repairs: 1, builds: 0, stops: 0 });
+  assert.deepEqual(h.counts(), { repairs: 0, builds: 0, stops: 0 });
+  assert.equal(h.current().blockedBy, "external");
 });
 
 test("questions pause preparation and answers resume it", async (t) => {
   const h = harness(); t.after(h.close);
-  h.blockers(["resolve-dependency"]); h.start(); await h.advance();
+  h.blockers(["review-source"]); h.start(); await h.advance();
   h.worker({ busy: false, question: true }); await h.advance();
   assert.equal(h.current().state, "waiting-input");
   h.worker({ busy: true }); await h.advance(); assert.equal(h.current().state, "running");
@@ -112,7 +113,7 @@ test("a failed build enters repairs instead of reporting ready", async (t) => {
 
 test("repair attempts are bounded and do not repeatedly launch unchanged work forever", async (t) => {
   const h = harness(); t.after(h.close);
-  h.blockers(["resolve-dependency"]); h.start();
+  h.blockers(["review-source"]); h.start();
   for (let i = 0; i < 4; i++) { h.worker({ busy: false }); await h.advance(); }
   assert.equal(h.counts().repairs, 3); assert.equal(h.current().state, "blocked");
 });
@@ -268,4 +269,42 @@ test("Stop reaches a preparation waiting on its checkout", async (t) => {
   checkout = null;
   assert.deepEqual(h.controller.recheckBlocked(), []);
   assert.equal(h.current().state, "cancelled", "fixing the checkout later does not revive it");
+});
+
+
+test("external dependencies and connection failures never spend repository repair attempts", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["resolve-dependency", "connect", "review-resource", "prepare-artifact"]);
+  h.start(); await h.advance();
+  assert.equal(h.current().state, "blocked"); assert.equal(h.current().blockedBy, "external");
+  assert.deepEqual(h.counts(), { repairs: 0, builds: 0, stops: 0 });
+  assert.match(h.current().message, /external setup/);
+  await h.advance(); assert.equal(h.counts().repairs, 0);
+});
+
+test("mixed blockers repair local source once, then pause on the external cause", async (t) => {
+  const h = harness(); t.after(h.close);
+  const repair = h.controller.options.repairs.start;
+  const received: string[][] = [];
+  h.controller.options.repairs.start = async (job, checked) => { received.push(checked.readiness.items.map((item) => item.action!)); return repair(job, checked); };
+  h.blockers(["review-source", "resolve-dependency", "connect"]); h.start(); await h.advance();
+  assert.deepEqual(received, [["review-source"]]);
+  h.worker({ busy: false }); h.blockers(["resolve-dependency", "connect"]); await h.advance();
+  assert.equal(h.counts().repairs, 1); assert.equal(h.current().blockedBy, "external");
+  h.blockers([]); h.start(); await h.advance(); assert.equal(h.current().state, "succeeded");
+});
+
+test("a failed build with a current connection failure pauses instead of repairing source", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+  Object.assign(h.runs[0], { terminal: true, state: "failed" }); h.blockers(["connect", "prepare-artifact"]);
+  await h.advance(); assert.equal(h.current().blockedBy, "external"); assert.equal(h.counts().repairs, 0);
+});
+
+test("resource drift goes to the reviewed infrastructure plan without a repair room", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.controller.options.service.checkReadiness = async () => ({ readiness: { items: [{ status: "blocked", action: "review-resource", repairScope: "infrastructure", code: "resource-drift" }], canMakeReady: false } }) as unknown as ReadinessResult;
+  h.infrastructure(); h.start(); await h.advance();
+  assert.equal(h.current().state, "awaiting-approval"); assert.equal(h.current().phase, "infrastructure");
+  assert.equal(h.counts().repairs, 0);
 });

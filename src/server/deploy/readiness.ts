@@ -1,3 +1,4 @@
+import { connectionDiagnostics } from "./connection-diagnostics.ts";
 import type { DeploymentPlanDocument, PlanBlocker } from "./planner.ts";
 
 export interface DeploymentReadinessItem {
@@ -9,6 +10,10 @@ export interface DeploymentReadinessItem {
   action: "review-capabilities" | "prepare-artifact" | "connect" | "review-source" | "resolve-dependency" | "review-resource" | "configure-provider" | "review-policy" | null;
   automatic: boolean;
   slot?: string;
+  connectionId?: string;
+  ownerProjectId?: string;
+  ownerProjectName?: string;
+  repairScope?: "repository" | "external" | "infrastructure" | "build";
 }
 
 export interface DeploymentReadiness {
@@ -29,11 +34,11 @@ export interface DeploymentReadinessOptions {
   preparationDetail?: string;
 }
 
-function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions): DeploymentReadinessItem {
+function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions, document: DeploymentPlanDocument): DeploymentReadinessItem {
   let action: DeploymentReadinessItem["action"] = "review-policy";
   let detail = blocker.message;
   let title = blocker.title;
-  const slot = blocker.ownerRef?.startsWith("connection:") ? blocker.ownerRef.slice("connection:".length) : undefined;
+  let slot = blocker.ownerRef?.startsWith("connection:") ? blocker.ownerRef.slice("connection:".length) : undefined;
   if (blocker.code === "connection-missing") {
     action = "connect";
     title = `Connect ${slot ?? "deployment provider"}`;
@@ -58,8 +63,24 @@ function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions)
     action = "configure-provider";
     title = blocker.code === "monitor-stale" ? "Restore fresh external monitoring" : "Configure the deployment provider";
   }
+  const environment = document.manifest.environments.find((entry) => entry.id === document.environmentId);
+  const resourceId = /^resource:([^/#]+)/.exec(blocker.ownerRef ?? "")?.[1];
+  const resource = environment?.resources.find((entry) => entry.id === resourceId);
+  slot ??= resource?.connection;
+  const dependencyId = /^dependency:(.+)$/.exec(blocker.ownerRef ?? "")?.[1];
+  const dependency = environment?.dependencies.find((entry) => entry.id === dependencyId);
+  const ownerProjectId = dependency && "projectId" in dependency ? dependency.projectId : undefined;
+  const connectionId = document.connections.find((entry) => entry.slot === slot)?.connectionId;
+  if (resource && blocker.code === "resource-observation-failed") {
+    const diagnostic = connectionDiagnostics({ ready: true, detail: "", resources: [{ id: resource.id, state: "blocked", detail }] })[0];
+    if (diagnostic && diagnostic.code !== "connection-check-failed") {
+      action = "connect"; title = `Connect ${slot}`; detail = diagnostic.detail;
+    }
+  }
+  const repairScope: DeploymentReadinessItem["repairScope"] = action === "review-source" ? "repository"
+    : action === "prepare-artifact" ? "build" : blocker.code === "resource-drift" ? "infrastructure" : "external";
   const automatic = action === "prepare-artifact" && options.canPrepare;
-  return { id: blocker.id, code: blocker.code, title, detail, status: automatic ? "action-required" : "blocked", action, automatic, ...(slot ? { slot } : {}) };
+  return { id: blocker.id, code: blocker.code, title, detail, status: automatic ? "action-required" : "blocked", action, automatic, ...(slot ? { slot } : {}), ...(connectionId ? { connectionId } : {}), ...(ownerProjectId ? { ownerProjectId } : {}), repairScope };
 }
 
 /** A readiness report is derived from the same fresh plan the deploy button approves. */
@@ -67,7 +88,7 @@ export function deploymentReadiness(document: DeploymentPlanDocument, options: D
   const preparing = options.preparing ?? false;
   const blockers = document.blockers.filter((item) => item.code !== "action-blocked"
     || !document.blockers.some((other) => other.code !== "action-blocked" && other.ownerRef === item.ownerRef));
-  const items = blockers.map((item) => requiredItem(item, options));
+  const items = blockers.map((item) => requiredItem(item, options, document));
   for (const connection of document.connections.filter((item) => item.ready)) {
     items.push({ id: `connection:${connection.slot}`, code: "connection-ready", title: `${connection.slot} connected`, detail: `${connection.profile}: credentials present and permitted for this environment.`, status: "ready", action: null, automatic: false, slot: connection.slot });
   }
@@ -93,4 +114,25 @@ export function deploymentReadiness(document: DeploymentPlanDocument, options: D
     artifactId: document.artifact?.artifactId ?? null,
     items,
   };
+}
+
+/** Only source defects belong to a repository repair room. Runtime dependency
+ * failures do not prove the manifest is wrong and must not invite weaker checks. */
+export function repositoryRepairItems(readiness: DeploymentReadiness): DeploymentReadinessItem[] {
+  return readiness.items.filter((item) => item.status !== "ready" && (item.repairScope === "repository" || !item.repairScope && item.action === "review-source"));
+}
+export function externalPreparationItems(readiness: DeploymentReadiness): DeploymentReadinessItem[] {
+  return readiness.items.filter((item) => item.status !== "ready" && item.repairScope !== "repository" && item.repairScope !== "infrastructure" && item.action !== "review-source" && item.action !== "prepare-artifact");
+}
+export function externalPreparationMessage(items: DeploymentReadinessItem[]): string {
+  const groups = new Map<string, DeploymentReadinessItem[]>();
+  for (const item of items) {
+    const key = item.ownerProjectId ? `Project ${item.ownerProjectName ?? item.ownerProjectId}` : item.connectionId ? `Connection ${item.slot ?? item.connectionId} (${item.connectionId})` : item.title;
+    const group = groups.get(key) ?? []; group.push(item); groups.set(key, group);
+  }
+  const lines = [...groups].map(([name, group]) => {
+    const diagnostics = connectionDiagnostics({ ready: true, detail: "", resources: group.map((item) => ({ id: item.title, state: "blocked", detail: item.detail })) });
+    return `${name}: ${diagnostics.map((item) => item.detail.trim()).join("; ")}`;
+  });
+  return `Preparation needs external setup. These checks will not use a repository repair attempt. ${lines.join("\n")}\nResolve these in the owning project or Deployment connections, then resume preparation.`;
 }

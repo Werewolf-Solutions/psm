@@ -297,3 +297,26 @@ test("a bound GitHub connection with no reviewed release workflow blocks the pla
   const pinned = (await kit.service.environmentView(DAPP, "production")).blockers as { code: string }[];
   assert.ok(!pinned.some((item) => item.code === "release-controller-unpinned"));
 });
+
+test("live credential presence reconciles stale runtime readiness without overriding invalid profiles", async () => {
+  const kit = workspace();
+  const record = kit.store.createConnection({
+    connectionId: "con_cached_dns", kind: "digitalocean-api@1", label: "DNS", secretGeneration: 0, readiness: "missing-secret", createdAt: Date.now(),
+    metadata: { publicMetadata: {}, requiredSecretSlots: ["apiToken"] },
+    constraints: { allowedProjectIds: [DAPP], allowedEnvironmentIds: ["production"], maximumAuthorizedRisk: "production", allowedZones: ["example.com"] },
+  });
+  await kit.service.bindConnection(DAPP, "production", "dns", record.connectionId, null);
+  await kit.service.secretBroker.put(record.connectionId, "apiToken", "fixture-token");
+  await kit.service.environmentView(DAPP, "production");
+  assert.equal(kit.store.getConnection(record.connectionId).readiness, "ready");
+  await kit.service.secretBroker.delete(record.connectionId, "apiToken");
+  await kit.service.environmentView(DAPP, "production");
+  assert.equal(kit.store.getConnection(record.connectionId).readiness, "missing-secret");
+  await kit.service.secretBroker.put(record.connectionId, "apiToken", "fixture-token");
+  kit.store.updateConnection({ connectionId: record.connectionId, expectedMetadataRevision: 1, label: record.label, readiness: "invalid", metadata: record.metadata, constraints: record.constraints, secretGeneration: 0, updatedAt: Date.now() });
+  const view = await kit.service.environmentView(DAPP, "production");
+  assert.equal(kit.store.getConnection(record.connectionId).readiness, "invalid");
+  assert.equal((view.connections as { slot: string; ready: boolean }[]).find((connection) => connection.slot === "dns")?.ready, false);
+  assert.throws(() => kit.store.updateConnectionSecretStatus({ connectionId: record.connectionId, expectedSecretGeneration: 0, expectedMetadataRevision: 1, secretGeneration: 0, readiness: "ready", updatedAt: Date.now() }), /changed/);
+  assert.throws(() => kit.store.updateConnectionSecretStatus({ connectionId: record.connectionId, expectedSecretGeneration: 0, expectedMetadataRevision: 2, secretGeneration: 0, readiness: "ready", updatedAt: Date.now() }), /changed/);
+});

@@ -1,3 +1,4 @@
+import { repositoryRepairItems } from "./readiness.ts";
 import { isPermissionOperatorRequest } from "../agent-permissions.ts";
 import type { SourcePublicationController } from "./source-publication.ts";
 import express, { type Request, type Response } from "express";
@@ -146,7 +147,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
   const streamTickets = options.streamTickets ?? new DeploymentStreamTicketRegistry();
   const preparationRequests = new Map<string, Promise<Record<string, unknown>>>();
   const addCapabilityReview = (checked: Awaited<ReturnType<DeploymentService["checkReadiness"]>>, projectId: string, engine: string | null, workroomId?: string | null) => {
-    const needsRepair = checked.readiness.items.some((item) => item.status !== "ready" && (item.action !== "prepare-artifact" || !checked.readiness.canMakeReady));
+    const needsRepair = repositoryRepairItems(checked.readiness).length > 0;
     const gap = needsRepair ? options.reviewCapabilities?.(projectId, engine, workroomId) : null;
     if (gap) checked.readiness.items.unshift({ id: "review-capabilities", code: "capabilities-missing", title: "Review capabilities", detail: gap, status: "blocked", action: "review-capabilities", automatic: false });
     // A checkout problem is listed as source work — it opens Changes, not Capabilities —

@@ -289,6 +289,15 @@ export class DeploymentService {
           } else throw error;
         }
         const readiness = await connectionReadinessView(profile, this.secretBroker);
+        // Imported or externally provisioned credentials can leave the cached
+        // missing-secret flag behind. Runtime adapters and the cockpit must
+        // agree on the broker's current presence/generation, without overriding
+        // an invalid profile or racing a metadata/credential change.
+        const credentialState = readiness.ready ? "ready" : "missing-secret";
+        if (record.readiness !== "invalid" && (record.readiness !== credentialState || record.secretGeneration !== readiness.secretGeneration)) {
+          this.store.updateConnectionSecretStatus({ connectionId: record.connectionId, expectedSecretGeneration: record.secretGeneration,
+            expectedMetadataRevision: record.metadataRevision, secretGeneration: readiness.secretGeneration, readiness: credentialState, updatedAt: Date.now() });
+        }
         const ready = readiness.ready && issues.length === 0 && record.readiness !== "invalid";
         connections.push({
           slot,
@@ -596,14 +605,15 @@ export class DeploymentService {
       preparationDetail = "This environment has several deployment units; psm prepares a build for one unit at a time.";
     }
     const activePreparation = this.store.listRuns(context.project.id, environmentId).some((run) => run.runKind === "prepare" && !runTerminal(run.state));
-    return {
-      ...result,
-      readiness: deploymentReadiness(document, {
-        canPrepare,
-        preparing: options.preparing || activePreparation,
-        ...(preparationDetail ? { preparationDetail } : {}),
-      }),
-    };
+    const readiness = deploymentReadiness(document, {
+      canPrepare,
+      preparing: options.preparing || activePreparation,
+      ...(preparationDetail ? { preparationDetail } : {}),
+    });
+    for (const item of readiness.items) {
+      if (item.ownerProjectId) item.ownerProjectName = this.#projects().find((project) => project.id === item.ownerProjectId)?.name;
+    }
+    return { ...result, readiness };
   }
 
   async artifactPreparationContext(

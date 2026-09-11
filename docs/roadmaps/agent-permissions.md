@@ -45,6 +45,16 @@ configuration. Publication and infrastructure require separate operator reviews.
 - [x] Pause Make ready for publication approval, then continue the build and
   infrastructure preparation automatically. Cancellation invalidates pending
   publication reviews; failures require a fresh review.
+- [x] Resume permission/checkout-blocked preparation when its prerequisites are
+  satisfied, while retaining the distinction between Git checkout problems and grants.
+- [x] Route source defects to repository repair and external dependencies,
+  credentials, provider setup and policy decisions to an explicit setup pause.
+  Preserve upstream project/connection ownership, group shared connection causes,
+  and spend no repair attempts on external-only failures. Mixed reports repair
+  local source first. Resource drift uses the infrastructure approval path.
+- [x] Reconcile stale cached credential-presence flags with the secret broker
+  before runtime observation, with metadata/generation checks that preserve
+  invalid profiles. Presence still does not assert successful provider authentication.
 - [x] Show grant provenance, MCP call reviews and grouped deployment-connection
   diagnostics in Capabilities. Preserve the existing Attached tools surface.
 - [x] Test grant forgery, stale revisions, revocation, protected files, real Git

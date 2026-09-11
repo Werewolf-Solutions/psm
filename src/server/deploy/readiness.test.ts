@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDeploymentPlan, type BuildDeploymentPlanInput } from "./planner.ts";
-import { deploymentReadiness } from "./readiness.ts";
+import { deploymentReadiness, externalPreparationMessage, repositoryRepairItems } from "./readiness.ts";
 
 /**
  * Readiness is read off a real plan, never a hand-built shape: the whole point
@@ -147,4 +147,25 @@ test("when psm knows why it cannot build, it says that instead of a shrug", () =
   assert.equal(item.detail, "deployment inputs differ from committed HEAD");
   assert.equal(item.action, "prepare-artifact");
   assert.equal(item.automatic, false);
+});
+
+
+test("readiness preserves upstream ownership and groups a failing host connection", () => {
+  const document = plan();
+  document.manifest.environments[0].dependencies = [{ id: "todo-api", kind: "http-status@1", projectId: "prj_upstream", request: { url: "https://example.com/todo", method: "GET", timeoutMs: 1000 }, expect: { status: 401 } }];
+  document.manifest.environments[0].resources = ["directory", "ingress", "certificate"].map((id) => ({ id, connection: "host" })) as never;
+  document.blocked = true;
+  document.blockers = [
+    { id: "dependency", code: "dependency-failed", title: "API", message: "expected HTTP 401, received 404", ownerRef: "dependency:todo-api" },
+    ...["directory", "ingress", "certificate"].map((id) => ({ id, code: "resource-observation-failed", title: id, message: `SSH helper: Load key "/tmp/${id}/identity": error in libcrypto`, ownerRef: `resource:${id}` })),
+  ];
+  const readiness = deploymentReadiness(document, { canPrepare: false });
+  const items = readiness.items.filter((item) => item.status !== "ready");
+  assert.equal(items[0].ownerProjectId, "prj_upstream");
+  assert.equal(items[0].repairScope, "external");
+  assert.ok(items.slice(1).every((item) => item.action === "connect" && item.slot === "host" && item.connectionId === "con_host"));
+  assert.deepEqual(repositoryRepairItems(readiness), []);
+  const message = externalPreparationMessage(items);
+  assert.equal(message.match(/error in libcrypto/g)?.length, 1);
+  assert.match(message, /Project prj_upstream/); assert.match(message, /Connection host/);
 });
