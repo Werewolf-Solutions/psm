@@ -78,3 +78,21 @@ test("permission mutation requires browser origin metadata and ignores caller-su
   assert.notEqual(body.grants["repo.read"].actor, "attacker");
   assert.deepEqual(changed, [project.id]);
 });
+
+test("a grant change can say what it resumed, alongside the updated grants", async (t) => {
+  const { store, project } = fixture(t);
+  const app = express(); app.use(express.json());
+  app.use(agentPermissionRouter({ store, project: () => project, changed: () => ({ resumedPreparations: ["staging"] }) }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  t.after(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const response = await fetch(`${origin}/api/projects/test/agent-permissions`, {
+    method: "POST", headers: { "Content-Type": "application/json", Origin: origin, "Sec-Fetch-Site": "same-origin" },
+    body: JSON.stringify({ permission: "git.commit", granted: true, revision: 0 }),
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.resumedPreparations, ["staging"]);
+  assert.equal(body.grants["git.commit"].granted, true, "the notice is added to the view, not instead of it");
+});

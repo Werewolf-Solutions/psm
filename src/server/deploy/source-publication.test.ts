@@ -7,18 +7,18 @@ import type { SecretBroker } from "./connections.ts";
 
 function harness(t: test.TestContext) {
   const database = openDatabase(":memory:"); t.after(() => database.close());
-  let remote = "a".repeat(40), commit = "b".repeat(40), generation = 1, pushes = 0;
+  let remote = "a".repeat(40), commit = "b".repeat(40), generation = 1, pushes = 0, remoteCalls = 0;
   const context = () => ({ project: { id: "prj_test", path: "/checkout" }, source: { checkoutId: "checkout", commit, manifestDigest: "manifest", identityDigest: "identity", subject: "repair" }, unit: { id: "web", executor: { sourceRepository: "owner/repo" } }, environment: { releasePolicy: { allowedBranch: "main" } }, connection: { connectionId: "github", metadataRevision: 1 }, policy: { planTtlSeconds: 600, approval: "local-operator" } });
   const service = { sourcePublicationContext: async () => context() } as unknown as DeploymentService;
   const broker = { status: async () => ({ generation, missingSlots: [] }), withLease: async (_id: string, _slots: string[], action: any) => action({ useUtf8: (_slot: string, callback: any) => callback("secret-token") }) } as unknown as SecretBroker;
   const transport: PublicationTransport = {
-    remote: async () => remote,
+    remote: async () => { remoteCalls++; return remote; },
     contains: (_root, ancestor, descendant) => ancestor === "a".repeat(40) && descendant === "b".repeat(40),
     describe: () => ({ changes: "app.ts | 2 +-", commits: "bbbbbbb repair" }),
     push: async (_context, plan) => { assert.equal(plan.previousCommit, remote); remote = plan.commit; pushes++; },
   };
   const publisher = new SourcePublicationController(service, broker, () => database, transport);
-  return { publisher, pushes: () => pushes, remote: (value: string) => { remote = value; }, source: (value: string) => { commit = value; }, rotate: () => { generation++; }, database };
+  return { publisher, pushes: () => pushes, remoteCalls: () => remoteCalls, remote: (value: string) => { remote = value; }, source: (value: string) => { commit = value; }, rotate: () => { generation++; }, database };
 }
 test("publication reviews exact source, requires approval, persists audit, and cannot replay", async (t) => {
   const h = harness(t); const plan = (await h.publisher.review("prj_test", "staging"))!;
@@ -46,4 +46,28 @@ test("expired, cancelled and concurrent publication approvals fail closed", asyn
   const other = harness(t); const expired = (await other.publisher.review("prj_test", "staging"))!;
   expired.expiresAt = 0; other.database.prepare("UPDATE source_publication_plans SET document=? WHERE id=?").run(JSON.stringify(expired), expired.id);
   await assert.rejects(other.publisher.approve(expired.id, expired.digest, "operator"), /stale/); assert.equal(other.pushes(), 0);
+});
+
+test("checking whether source needs publication records no review", async (t) => {
+  const h = harness(t);
+  assert.equal(await h.publisher.needsPublication("prj_test", "staging"), true);
+  const { count } = h.database.prepare("SELECT COUNT(*) AS count FROM source_publication_plans").get() as { count: number };
+  assert.equal(count, 0, "a refused build must not leave a pending review that nothing will show");
+});
+test("a remote just verified to hold the source is not fetched again", async (t) => {
+  const h = harness(t);
+  h.remote("b".repeat(40)); // GitHub already has the local commit
+  assert.equal(await h.publisher.review("prj_test", "staging"), null);
+  assert.equal(await h.publisher.needsPublication("prj_test", "staging"), false);
+  assert.equal(h.remoteCalls(), 1, "make ready's check and the build's check share one GitHub round trip");
+  h.source("c".repeat(40)); // a new commit is a new question
+  await h.publisher.needsPublication("prj_test", "staging").catch(() => {});
+  assert.equal(h.remoteCalls(), 2);
+});
+test("the build after an approved publication does not ask GitHub again", async (t) => {
+  const h = harness(t); const plan = (await h.publisher.review("prj_test", "staging"))!;
+  assert.equal((await h.publisher.approve(plan.id, plan.digest, "operator")).state, "succeeded");
+  const before = h.remoteCalls();
+  assert.equal(await h.publisher.needsPublication("prj_test", "staging"), false);
+  assert.equal(h.remoteCalls(), before);
 });

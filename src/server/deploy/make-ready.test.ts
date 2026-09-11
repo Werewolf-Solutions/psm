@@ -160,3 +160,49 @@ test("publication pauses before a GitHub build and resumes after verified operat
   published = true; plan.state = "succeeded"; await h.advance();
   assert.equal(h.current().phase, "build"); assert.equal(h.counts().builds, 1);
 });
+
+test("granting the missing capabilities resumes a blocked preparation without another click", async (t) => {
+  let gap: string | null = "Review capabilities — todo-app requires repo.read, repo.edit, git.commit; project grants: none.";
+  const h = harness(() => gap); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  assert.equal(h.current().state, "blocked"); assert.equal(h.current().blockedBy, "capabilities");
+  const id = h.current().id;
+
+  // One grant of three: still waiting, and the banner names what is left.
+  gap = "Review capabilities — todo-app requires repo.edit, git.commit; project grants: repo.read.";
+  assert.deepEqual(h.controller.capabilitiesChanged("project"), []);
+  assert.equal(h.current().state, "blocked");
+  assert.match(h.current().message, /requires repo.edit, git.commit/);
+
+  gap = null;
+  assert.equal(h.controller.capabilitiesChanged("project").length, 1);
+  assert.equal(h.current().id, id, "the same preparation continues, not a new one");
+  assert.equal(h.current().state, "running");
+  assert.equal(h.current().blockedBy, null);
+  assert.match(h.current().message, /Capabilities granted/);
+  await h.advance();
+  assert.equal(h.counts().repairs, 1, "and it goes straight on to the repair it was stopped before");
+});
+
+test("grant changes only resume preparations that were waiting on grants", async (t) => {
+  const h = harness(() => null); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  h.controller.recover();
+  assert.equal(h.current().state, "blocked");
+  assert.deepEqual(h.controller.capabilitiesChanged("project"), []);
+  assert.equal(h.current().state, "blocked", "an agent restart still waits for the button");
+  assert.deepEqual(h.controller.capabilitiesChanged("another-project"), []);
+});
+
+test("a preparation stopped while waiting for grants stays stopped when they arrive", async (t) => {
+  let gap: string | null = "Review capabilities — requires git.commit; project grants: none.";
+  const h = harness(() => gap); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  assert.equal(h.current().blockedBy, "capabilities");
+  await h.controller.cancel("project", "staging");
+  assert.equal(h.current().state, "cancelled", "waiting on grants is armed, so Stop has to reach it");
+  gap = null;
+  assert.deepEqual(h.controller.capabilitiesChanged("project"), []);
+  assert.equal(h.current().state, "cancelled");
+  assert.equal(h.counts().repairs, 0);
+});

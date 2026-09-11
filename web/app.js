@@ -5258,7 +5258,10 @@ async function pollDeploymentPreparation(scope) {
   if (body.run) renderDeploymentRun(body.run);
   renderDeploymentPreparation();
   renderDeploymentReadiness();
+  // A job waiting only on grants resumes on the server the moment they are given,
+  // so keep watching it: the banner should move without another click.
   if (job?.active) scheduleDeploymentPreparationPoll();
+  else if (job?.state === "blocked" && job.blockedBy === "capabilities") scheduleDeploymentPreparationPoll(3000);
   if (moved) await checkDeploymentReadiness();
 }
 
@@ -5338,8 +5341,10 @@ function renderDeploymentPreparation() {
   section.hidden = !job;
   if (!job) return;
   section.dataset.state = job.state;
+  const waitingForGrants = job.state === "blocked" && job.blockedBy === "capabilities";
   $("#dep-prep-title").textContent = job.state === "succeeded" ? "This deployment is ready"
     : job.state === "cancelled" ? "Preparation stopped"
+    : waitingForGrants ? "Grant capabilities to continue"
     : job.state === "blocked" ? "Preparation needs you"
     : `${PREPARATION_PHASES[job.phase] || "Preparing"} this deployment`;
   // Name the AI on the panel: when a run stops on a usage limit, the provider
@@ -5347,7 +5352,10 @@ function renderDeploymentPreparation() {
   $("#dep-prep-state").textContent = job.engine
     ? `${String(job.state).replace(/-/g, " ")} · ${job.engine}`
     : String(job.state).replace(/-/g, " ");
-  $("#dep-prep-message").textContent = job.message || "";
+  $("#dep-prep-message").textContent = waitingForGrants
+    ? `${job.message || ""} Preparation resumes on its own once they are granted.`
+    : job.message || "";
+  $("#dep-prep-capabilities").hidden = !waitingForGrants;
   $("#dep-prep-failure").hidden = !job.failure;
   $("#dep-prep-failure").textContent = job.failure || "";
   const plan = job.state === "awaiting-approval" ? state.preparationPlan : null;
@@ -5370,7 +5378,8 @@ function renderDeploymentPreparation() {
     $("#dep-prep-approve").textContent = "Approve source publication";
   }
   $("#dep-prep-open").hidden = !job.workroomId;
-  $("#dep-prep-stop").hidden = !job.active;
+  // Waiting on grants is armed, not idle: granting restarts it, so it can be stopped.
+  $("#dep-prep-stop").hidden = !job.active && !waitingForGrants;
 }
 
 async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
@@ -5737,6 +5746,7 @@ $("#dep-prep-ai").onchange = (event) => {
   renderDeploymentReadiness();
 };
 $("#dep-prep-stop").onclick = stopDeploymentPreparation;
+$("#dep-prep-capabilities").onclick = () => switchPane("capabilities");
 $("#dep-prep-approve").onclick = approvePreparationInfrastructure;
 $("#dep-prep-open").onclick = () => {
   const roomId = WS.managedDeploy.preparation?.workroomId;

@@ -52,7 +52,13 @@
             list.querySelectorAll("button").forEach((item) => { item.disabled = true; });
             try {
               const updated = await request(api, `${base}/agent-permissions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ permission: permission.id, granted, revision: data.revision }) });
-              if (current()) { status.textContent = granted ? "Grant saved. Start a new turn or resume preparation." : "Revoked. Affected turns and queued messages were stopped."; show(updated); }
+              if (current()) {
+                const resumed = Array.isArray(updated.resumedPreparations) ? updated.resumedPreparations : [];
+                status.textContent = !granted ? "Revoked. Affected turns and queued messages were stopped."
+                  : resumed.length ? `Grant saved. Deployment preparation resumed for ${resumed.join(", ")}.`
+                  : "Grant saved. A preparation waiting on grants continues once every required one is in place.";
+                show(updated);
+              }
             } catch (error) { if (current()) status.textContent = error.message; }
             finally { pending = false; if (current()) list.querySelectorAll("button").forEach((item) => { item.disabled = false; }); }
           };

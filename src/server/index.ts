@@ -2132,7 +2132,17 @@ configureManagedAgents((scope) => {
   const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
   return { store: agentPermissions, snapshots, mcp: managedMcp, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
 });
-local.use(agentPermissionRouter({ store: agentPermissions, mcp: managedMcp, project: permissionProject, changed: (project) => stopProjectAgents(project.path) }));
+local.use(agentPermissionRouter({
+  store: agentPermissions, mcp: managedMcp, project: permissionProject,
+  changed: (project) => {
+    stopProjectAgents(project.path);
+    // A preparation stopped only for this project's grants continues as soon as
+    // they are enough. `deploymentPreparation` is declared below; this callback
+    // runs per request, long after startup.
+    const resumed = deploymentPreparation.capabilitiesChanged(project.id);
+    return resumed.length ? { resumedPreparations: resumed.map((job) => job.environmentId) } : undefined;
+  },
+}));
 
 const deploymentPreparation = new DeploymentPreparationController({
   reviewCapabilities: preparationPermissionGap,

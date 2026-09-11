@@ -74,7 +74,10 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
   }
 
   async prepare(input: { projectId: string; environmentId: string; unitId?: string }): Promise<{ runId: string }> {
-    if (await this.#publisher?.review(input.projectId, input.environmentId, input.unitId)) throw new Error("Source needs publication approval. Use Make ready to deploy to review the exact commit and branch before building.");
+    // Ask, don't record: refusing here must not leave a pending publication review
+    // that nothing will show. Make ready records the review itself before it gets
+    // this far, and a remote it just verified is not fetched a second time.
+    if (await this.#publisher?.needsPublication(input.projectId, input.environmentId, input.unitId)) throw new Error("Source needs publication approval. Use Make ready to deploy to review the exact commit and branch before building.");
     const context = await this.#service.artifactPreparationContext(input.projectId, input.environmentId, input.unitId);
     const run = this.#store.createPreparationRun({ projectId: context.project.id, environmentId: context.environment.id, createdAt: Date.now() });
     const psmArtifactId = `artifact_${randomUUID().replaceAll("-", "").slice(0, 24)}`;

@@ -22,6 +22,8 @@ export interface PreparationJob {
   runId: string | null;
   planId: string | null;
   publicationId?: string | null;
+  /** Why a blocked job is blocked, when psm can tell on its own that the cause has gone. */
+  blockedBy?: "capabilities" | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -45,6 +47,10 @@ export class PreparationRepository {
     this.database().prepare("INSERT INTO deployment_preparations VALUES (?, ?, ?) ON CONFLICT(project_id, environment_id) DO UPDATE SET document = excluded.document")
       .run(job.projectId, job.environmentId, JSON.stringify(job));
   }
+  forProject(projectId: string): PreparationJob[] {
+    return (this.database().prepare("SELECT document FROM deployment_preparations WHERE project_id = ?").all(projectId) as { document: string }[])
+      .map((row) => JSON.parse(row.document) as PreparationJob);
+  }
   active(): PreparationJob[] {
     return (this.database().prepare("SELECT document FROM deployment_preparations").all() as { document: string }[])
       .map((row) => JSON.parse(row.document) as PreparationJob).filter(preparationActive);
@@ -67,6 +73,7 @@ export function preparationView(job: PreparationJob | null): Record<string, unkn
     runId: job.runId,
     planId: job.planId,
     publicationId: job.publicationId ?? null,
+    blockedBy: job.blockedBy ?? null,
     failure: job.failure,
     engine: job.engine,
     model: job.model,
@@ -112,7 +119,7 @@ export class DeploymentPreparationController {
       id: `prep_${randomUUID()}`, projectId, environmentId,
       state: "running", phase: "check", message: "Checking and preparing this deployment…",
       createdAt: now, updatedAt: now, workroomId: previous?.workroomId ?? null,
-      waitingForRepair: false, repairs: 0, runId: null, planId: null, failure: null,
+      waitingForRepair: false, repairs: 0, runId: null, planId: null, failure: null, blockedBy: null,
       engine: ai.engine ?? previous?.engine ?? null,
       model: ai.model ?? (ai.engine ? null : previous?.model ?? null),
       effort: ai.effort ?? (ai.engine ? null : previous?.effort ?? null),
@@ -126,11 +133,44 @@ export class DeploymentPreparationController {
       this.repository.save(job);
     }
   }
+  /**
+   * A project's agent grants changed: continue the preparations that stopped
+   * only for them.
+   *
+   * A job blocked this way is waiting on nothing but a grant, and granting is
+   * itself an operator action in the local cockpit, so there is no second
+   * question to ask. Each job is rechecked against the requirement that stopped
+   * it. One still short keeps waiting, with a message naming what is left; one
+   * now covered continues where it stopped. The attempt budget carries over. The
+   * two-hour window restarts, because time spent waiting for a grant is not
+   * unattended work. An agent restart never comes through here — that still
+   * waits for the button.
+   */
+  capabilitiesChanged(projectId: string): PreparationJob[] {
+    const resumed: PreparationJob[] = [];
+    for (const job of this.repository.forProject(projectId)) {
+      if (job.state !== "blocked" || job.blockedBy !== "capabilities") continue;
+      let gap: string | null;
+      try { gap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId) ?? null; }
+      catch (error) { gap = error instanceof Error ? error.message : "Review capabilities before resuming preparation."; }
+      if (gap) {
+        if (gap !== job.message) { job.message = gap; this.save(job); }
+        continue;
+      }
+      job.blockedBy = null; job.state = "running"; job.phase = "check"; job.createdAt = Date.now();
+      job.message = "Capabilities granted. Resuming preparation…";
+      this.save(job); this.schedule(job); resumed.push(job);
+    }
+    return resumed;
+  }
   close(): void { this.stopped = true; for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); }
   async cancel(projectId: string, environmentId: string): Promise<PreparationJob | null> {
     const job = this.current(projectId, environmentId);
-    if (!job || !preparationActive(job)) return job;
-    job.state = "cancelled"; job.message = "Preparation stopped.";
+    // A job waiting on grants is not active, but it is armed: granting would start
+    // it again. Stopping has to reach it, or the only way to decline is to never
+    // grant anything.
+    if (!job || !(preparationActive(job) || job.blockedBy === "capabilities")) return job;
+    job.state = "cancelled"; job.blockedBy = null; job.message = "Preparation stopped.";
     this.save(job);
     if (job.publicationId) this.options.publisher?.cancel(job.publicationId);
     if (job.workroomId) this.options.repairs.stop(job.workroomId);
@@ -178,7 +218,7 @@ export class DeploymentPreparationController {
     if (!this.live(job)) return;
     const permissionGap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId);
     if (permissionGap) {
-      job.state = "blocked"; job.phase = "check"; job.message = permissionGap;
+      job.state = "blocked"; job.phase = "check"; job.blockedBy = "capabilities"; job.message = permissionGap;
       this.save(job); return;
     }
     if (job.repairs >= 3) {

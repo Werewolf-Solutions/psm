@@ -62,7 +62,16 @@ export const githubPublicationTransport: PublicationTransport = {
   },
 };
 
+/** How long a remote branch confirmed to hold the local commit is trusted without asking GitHub again. */
+const REMOTE_VERIFIED_MS = 60_000;
+
 export class SourcePublicationController {
+  // Context digests (commit, connection, credential generation, policy, repository,
+  // branch) whose source GitHub already holds. Make ready checks publication and
+  // then dispatches a build that checks again; without this, every build made two
+  // identical GitHub round trips. Any change to the source or its authority
+  // produces a different digest, so a stale entry can only ever miss.
+  private readonly verified = new Map<string, number>();
   constructor(private readonly service: DeploymentService, private readonly broker: SecretBroker,
     private readonly database: () => DatabaseSync = db, private readonly transport: PublicationTransport = githubPublicationTransport) {}
   private async context(projectId: string, environmentId: string, unitId?: string) {
@@ -80,10 +89,21 @@ export class SourcePublicationController {
     const row = this.database().prepare("SELECT document FROM source_publication_plans WHERE id=?").get(id) as { document: string } | undefined;
     if (!row) throw new Error("Source publication review not found."); return JSON.parse(row.document);
   }
-  async review(projectId: string, environmentId: string, unitId?: string): Promise<PublicationPlan | null> {
+  private remember(digest: string): void {
+    const now = Date.now();
+    for (const [key, at] of this.verified) if (now - at >= REMOTE_VERIFIED_MS) this.verified.delete(key);
+    this.verified.set(digest, now);
+  }
+  /** The publication this source would need, built but not recorded. Null when GitHub already has it. */
+  private async draft(projectId: string, environmentId: string, unitId?: string): Promise<PublicationPlan | null> {
     const { context, digest } = await this.context(projectId, environmentId, unitId);
+    const verifiedAt = this.verified.get(digest);
+    if (verifiedAt !== undefined && Date.now() - verifiedAt < REMOTE_VERIFIED_MS) return null;
     const previousCommit = await this.broker.withLease(context.connection.connectionId, ["apiToken"], (lease) => lease.useUtf8("apiToken", (token) => this.transport.remote(context, token)));
-    if (previousCommit === context.source.commit || this.transport.contains(context.project.path, context.source.commit, previousCommit)) return null;
+    if (previousCommit === context.source.commit || this.transport.contains(context.project.path, context.source.commit, previousCommit)) {
+      this.remember(digest);
+      return null;
+    }
     if (!this.transport.contains(context.project.path, previousCommit, context.source.commit)) throw new Error("The local source does not fast-forward the GitHub branch. Fetch and reconcile the branch, then review publication again.");
     const now = Date.now();
     const plan = {
@@ -94,8 +114,23 @@ export class SourcePublicationController {
       contextDigest: digest, policy: context.policy, expiresAt: now + Math.min(context.policy.planTtlSeconds ?? 600, 600) * 1000,
       state: "pending" as const, events: [{ at: now, actor: "psm", state: "pending", message: "Publication prepared for operator review." }],
     };
-    const complete = { ...plan, digest: canonicalDigest("psm-source-publication-plan:v1", plan) };
-    this.save(complete); return complete;
+    return { ...plan, digest: canonicalDigest("psm-source-publication-plan:v1", plan) };
+  }
+  /**
+   * Whether the local commit must be published before GitHub can build it.
+   *
+   * Records nothing. A caller that only needs the answer — the Prepare artifact
+   * button refusing to build unpublished source — must not leave a pending review
+   * behind that no screen will ever show.
+   */
+  async needsPublication(projectId: string, environmentId: string, unitId?: string): Promise<boolean> {
+    return (await this.draft(projectId, environmentId, unitId)) !== null;
+  }
+  /** Records a reviewable publication when one is needed. */
+  async review(projectId: string, environmentId: string, unitId?: string): Promise<PublicationPlan | null> {
+    const plan = await this.draft(projectId, environmentId, unitId);
+    if (plan) this.save(plan);
+    return plan;
   }
   cancel(id: string): void {
     const plan = this.get(id);
@@ -116,6 +151,7 @@ export class SourcePublicationController {
         await this.transport.push(current.context, plan, token);
         if (await this.transport.remote(current.context, token) !== plan.commit) throw new Error("Publication could not be verified. Inspect the remote branch before another review.");
       }));
+      this.remember(current.digest);
       plan.state = "succeeded"; plan.events.push({ at: Date.now(), actor, state: plan.state, message: "The exact source commit is published and verified on GitHub." });
     } catch (error) {
       plan.state = "failed"; plan.events.push({ at: Date.now(), actor, state: plan.state, message: error instanceof Error && !("stderr" in error) ? error.message : "Publication failed. Review source and GitHub access before retrying." });

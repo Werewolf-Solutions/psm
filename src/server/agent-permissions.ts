@@ -86,7 +86,8 @@ export function isPermissionOperatorRequest(req: express.Request): boolean {
 export function agentPermissionRouter(options: {
   store: AgentPermissionStore;
   project: (id: string) => PermissionProject;
-  changed: (project: PermissionProject) => void;
+  /** Runs after a grant change; an object it returns is merged into the response. */
+  changed: (project: PermissionProject) => unknown;
   mcp?: ManagedMcpTools;
 }): express.Router {
   const router = express.Router();
@@ -100,8 +101,8 @@ export function agentPermissionRouter(options: {
     try {
       const project = options.project(req.params.id);
       options.store.change(project, req.body?.permission, req.body?.granted, req.body?.revision, `local:${userInfo().username}`);
-      options.changed(project);
-      res.json(view(project));
+      const notice = options.changed(project);
+      res.json({ ...view(project), ...(notice && typeof notice === "object" ? notice : {}) });
     } catch (error) { res.status(error instanceof PermissionError ? 409 : 400).json({ error: (error as Error).message }); }
   });
   router.get("/api/projects/:id/agent-tool-requests", (req, res) => {
