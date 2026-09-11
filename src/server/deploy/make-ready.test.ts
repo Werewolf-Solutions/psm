@@ -4,7 +4,7 @@ import { openDatabase } from "../db.ts";
 import { DeploymentPreparationController, PreparationRepository, type ReadinessResult } from "./make-ready.ts";
 import type { DeploymentService } from "./service.ts";
 
-function harness(reviewCapabilities?: () => string | null) {
+function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () => string | null) {
   const database = openDatabase(":memory:");
   const repository = new PreparationRepository(() => database);
   let outstanding: { action: string; status: string; detail: string }[] = [];
@@ -31,7 +31,7 @@ function harness(reviewCapabilities?: () => string | null) {
     },
   } as unknown as DeploymentService;
   const controller = new DeploymentPreparationController({
-    service, repository, background: false, reviewCapabilities,
+    service, repository, background: false, reviewCapabilities, reviewCheckout,
     preparer: { prepare: async () => {
       builds++;
       const run = { runId: `build-${builds}`, runKind: "prepare", planId: null, terminal: false, state: "running" };
@@ -179,7 +179,7 @@ test("granting the missing capabilities resumes a blocked preparation without an
   assert.equal(h.current().id, id, "the same preparation continues, not a new one");
   assert.equal(h.current().state, "running");
   assert.equal(h.current().blockedBy, null);
-  assert.match(h.current().message, /Capabilities granted/);
+  assert.match(h.current().message, /Resuming preparation/);
   await h.advance();
   assert.equal(h.counts().repairs, 1, "and it goes straight on to the repair it was stopped before");
 });
@@ -205,4 +205,67 @@ test("a preparation stopped while waiting for grants stays stopped when they arr
   assert.deepEqual(h.controller.capabilitiesChanged("project"), []);
   assert.equal(h.current().state, "cancelled");
   assert.equal(h.counts().repairs, 0);
+});
+
+test("a checkout problem is not mistaken for missing grants", async (t) => {
+  let checkout: string | null = "Check the Git checkout — The index contains previously staged work.";
+  const h = harness(() => null, () => checkout); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  assert.equal(h.current().state, "blocked");
+  assert.equal(h.current().blockedBy, "checkout", "no grant fixes this, so a grant is not what it waits for");
+  assert.match(h.current().message, /previously staged work/);
+  assert.equal(h.counts().repairs, 0);
+  assert.deepEqual(h.controller.capabilitiesChanged("project"), [], "and a grant change does not resume it");
+  checkout = null; h.start(); await h.advance();
+  assert.equal(h.counts().repairs, 1, "resuming after the checkout is fixed carries on");
+});
+
+test("grants arriving onto a checkout problem report that problem instead of a resume", async (t) => {
+  let grants: string | null = "Review capabilities — todo-app requires git.commit; project grants: repo.read, repo.edit.";
+  const checkout = "Check the Git checkout — Managed Git requires an ordinary checkout; linked worktrees are not supported.";
+  const h = harness(() => grants, () => checkout); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  assert.equal(h.current().blockedBy, "capabilities", "grants are checked first");
+  grants = null;
+  assert.deepEqual(h.controller.capabilitiesChanged("project"), []);
+  assert.equal(h.current().state, "blocked");
+  assert.equal(h.current().blockedBy, "checkout");
+  assert.equal(h.current().message, checkout);
+});
+
+test("a job saved under an older rule is corrected by the first recheck", async (t) => {
+  const h = harness(() => null, () => null); t.after(h.close);
+  h.blockers(["review-source"]); h.start();
+  h.repository.save({ ...h.current(), state: "blocked", blockedBy: "capabilities", message: "Review capabilities — Configure Git user.name and user.email before a managed commit." });
+  assert.equal(h.controller.recheckBlocked().length, 1, "nothing blocks it any more");
+  assert.equal(h.current().state, "running");
+  assert.equal(h.current().blockedBy, null);
+  assert.doesNotMatch(h.current().message, /user\.name/);
+  await h.advance();
+  assert.equal(h.counts().repairs, 1);
+});
+
+test("a checkout fixed outside psm resumes preparation on the next recheck", async (t) => {
+  let checkout: string | null = "Check the Git checkout — The index contains previously staged work.";
+  const h = harness(() => null, () => checkout); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  assert.equal(h.current().blockedBy, "checkout");
+  const updatedAt = h.current().updatedAt;
+  assert.deepEqual(h.controller.recheckBlocked(), []);
+  assert.equal(h.current().updatedAt, updatedAt, "a recheck that finds nothing new writes nothing");
+  checkout = null;
+  assert.equal(h.controller.recheckBlocked().length, 1);
+  await h.advance();
+  assert.equal(h.counts().repairs, 1);
+});
+
+test("Stop reaches a preparation waiting on its checkout", async (t) => {
+  let checkout: string | null = "Check the Git checkout — HEAD is not on a branch.";
+  const h = harness(() => null, () => checkout); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  await h.controller.cancel("project", "staging");
+  assert.equal(h.current().state, "cancelled");
+  checkout = null;
+  assert.deepEqual(h.controller.recheckBlocked(), []);
+  assert.equal(h.current().state, "cancelled", "fixing the checkout later does not revive it");
 });

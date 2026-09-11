@@ -2099,14 +2099,23 @@ function permissionProject(id: string): PermissionProject {
   if (!project.id) throw new PermissionError("Assign a project identity before granting agent permissions.");
   return { id: project.id, name: project.name, path: fs.realpathSync(project.path) };
 }
+/** Grants a preparation room needs. These, and only these, are answered in Capabilities. */
 function preparationPermissionGap(projectId: string, engine: string | null, workroomId?: string | null): string | null {
+  const snapshot = agentPermissions.snapshot(permissionProject(projectId));
+  return reviewAgentPermissions([snapshot], engine ?? (workroomId ? workSessions.get(workroomId).engine : null) ?? getProjects().find((item) => item.id === projectId)?.aiEngine ?? "claude", PREPARATION_OPERATIONS.map((entry) => entry.permission));
+}
+/**
+ * Whether this checkout can take a managed commit at all.
+ *
+ * No grant fixes what this finds — staged operator work, a detached HEAD, a
+ * linked worktree, no identity Git would commit with — so it is reported as a
+ * checkout problem and never as a capability to grant.
+ */
+function preparationCheckoutGap(projectId: string): string | null {
   const project = permissionProject(projectId);
-  if (project.path === psmCodeRoot) return "Review capabilities — PSM cannot modify its own running permission broker. Use a separate development checkout.";
-  const snapshot = agentPermissions.snapshot(project);
-  const gap = reviewAgentPermissions([snapshot], engine ?? (workroomId ? workSessions.get(workroomId).engine : null) ?? getProjects().find((item) => item.id === projectId)?.aiEngine ?? "claude", PREPARATION_OPERATIONS.map((entry) => entry.permission));
-  if (gap) return gap;
-  try { new RepositoryTools(snapshot, agentPermissions, [psmCodeRoot]).preflightCommit(); }
-  catch (error) { return `Review capabilities — ${error instanceof PermissionError ? error.message : "Managed Git needs an ordinary checkout with an existing commit, an attached branch and a configured Git author."}`; }
+  if (project.path === psmCodeRoot) return "Check the Git checkout — PSM cannot modify its own running permission broker. Use a separate development checkout.";
+  try { new RepositoryTools(agentPermissions.snapshot(project), agentPermissions, [psmCodeRoot]).preflightCommit(); }
+  catch (error) { return `Check the Git checkout — ${error instanceof PermissionError ? error.message : "Managed Git needs an ordinary checkout with an existing commit and an attached branch."}`; }
   return null;
 }
 const managedMcp = new ManagedMcpTools(agentPermissions, (snapshot) => {
@@ -2146,6 +2155,7 @@ local.use(agentPermissionRouter({
 
 const deploymentPreparation = new DeploymentPreparationController({
   reviewCapabilities: preparationPermissionGap,
+  reviewCheckout: preparationCheckoutGap,
   service: deploymentEngine.service,
   preparer: deploymentArtifactPreparer,
   publisher: sourcePublisher,
@@ -2205,9 +2215,14 @@ const deploymentPreparation = new DeploymentPreparationController({
 // A restarted agent has no in-flight turns to resume, so every job that was
 // running when it stopped waits for the operator to press the button again.
 deploymentPreparation.recover();
+// A job blocked on grants or its checkout is rechecked now and every few seconds.
+// The first pass corrects a job saved before this start — including one blocked
+// under an older rule — and later passes notice a checkout fixed outside psm.
+deploymentPreparation.watchBlocked();
 
 local.use(createDeploymentRouter({
   reviewCapabilities: preparationPermissionGap,
+  reviewCheckout: preparationCheckoutGap,
   service: deploymentEngine.service,
   currentUser,
   localRequest,

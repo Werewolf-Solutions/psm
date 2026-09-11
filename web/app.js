@@ -5258,10 +5258,10 @@ async function pollDeploymentPreparation(scope) {
   if (body.run) renderDeploymentRun(body.run);
   renderDeploymentPreparation();
   renderDeploymentReadiness();
-  // A job waiting only on grants resumes on the server the moment they are given,
-  // so keep watching it: the banner should move without another click.
+  // A job waiting on grants or on its checkout resumes on the server once that is
+  // fixed, so keep watching it: the banner should move without another click.
   if (job?.active) scheduleDeploymentPreparationPoll();
-  else if (job?.state === "blocked" && job.blockedBy === "capabilities") scheduleDeploymentPreparationPoll(3000);
+  else if (job?.state === "blocked" && (job.blockedBy === "capabilities" || job.blockedBy === "checkout")) scheduleDeploymentPreparationPoll(3000);
   if (moved) await checkDeploymentReadiness();
 }
 
@@ -5342,9 +5342,11 @@ function renderDeploymentPreparation() {
   if (!job) return;
   section.dataset.state = job.state;
   const waitingForGrants = job.state === "blocked" && job.blockedBy === "capabilities";
+  const waitingForCheckout = job.state === "blocked" && job.blockedBy === "checkout";
   $("#dep-prep-title").textContent = job.state === "succeeded" ? "This deployment is ready"
     : job.state === "cancelled" ? "Preparation stopped"
     : waitingForGrants ? "Grant capabilities to continue"
+    : waitingForCheckout ? "Fix the Git checkout to continue"
     : job.state === "blocked" ? "Preparation needs you"
     : `${PREPARATION_PHASES[job.phase] || "Preparing"} this deployment`;
   // Name the AI on the panel: when a run stops on a usage limit, the provider
@@ -5354,7 +5356,9 @@ function renderDeploymentPreparation() {
     : String(job.state).replace(/-/g, " ");
   $("#dep-prep-message").textContent = waitingForGrants
     ? `${job.message || ""} Preparation resumes on its own once they are granted.`
-    : job.message || "";
+    : waitingForCheckout
+      ? `${job.message || ""} Preparation resumes on its own once it is fixed.`
+      : job.message || "";
   $("#dep-prep-capabilities").hidden = !waitingForGrants;
   $("#dep-prep-failure").hidden = !job.failure;
   $("#dep-prep-failure").textContent = job.failure || "";
@@ -5378,8 +5382,8 @@ function renderDeploymentPreparation() {
     $("#dep-prep-approve").textContent = "Approve source publication";
   }
   $("#dep-prep-open").hidden = !job.workroomId;
-  // Waiting on grants is armed, not idle: granting restarts it, so it can be stopped.
-  $("#dep-prep-stop").hidden = !job.active && !waitingForGrants;
+  // Waiting on grants or the checkout is armed, not idle: fixing either restarts it, so it can be stopped.
+  $("#dep-prep-stop").hidden = !job.active && !waitingForGrants && !waitingForCheckout;
 }
 
 async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {

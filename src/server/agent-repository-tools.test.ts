@@ -141,3 +141,37 @@ test("a parent checkout's grant cannot cross into a nested repository", (t) => {
   assert.throws(() => tools.write("nested/app.txt", "unauthorized"), /Nested repositories/);
   assert.ok(!tools.list().includes("nested/app.txt"));
 });
+
+/**
+ * Commit identity is resolved the way Git resolves it. A machine with no
+ * user.name/user.email configured still commits by hand, from GIT_AUTHOR_* or
+ * Git's own detection, and preparation must not be stricter than Git.
+ */
+function isolatedIdentity(t: test.TestContext, env: Record<string, string>) {
+  const keys = ["HOME", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "psm-identity-home-"));
+  for (const key of keys) delete process.env[key];
+  Object.assign(process.env, { HOME: home, ...env });
+  t.after(() => {
+    for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key]; }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+}
+
+test("a checkout with no configured Git identity commits as whoever Git would", (t) => {
+  const { tools, git } = fixture(t);
+  git("config", "--unset", "user.name"); git("config", "--unset", "user.email");
+  isolatedIdentity(t, { GIT_AUTHOR_NAME: "Operator", GIT_AUTHOR_EMAIL: "operator@example.invalid", GIT_COMMITTER_NAME: "Operator", GIT_COMMITTER_EMAIL: "operator@example.invalid" });
+  tools.preflightCommit();
+  tools.write("app.txt", "repair\n"); tools.stage(["app.txt"]); tools.commit("repair without a configured identity");
+  assert.equal(git("log", "-1", "--format=%an <%ae> | %cn <%ce>").trim(), "Operator <operator@example.invalid> | Operator <operator@example.invalid>");
+});
+
+test("when Git itself cannot name a committer, the checkout says what to set", (t) => {
+  const { tools, git } = fixture(t);
+  git("config", "--unset", "user.name"); git("config", "--unset", "user.email");
+  git("config", "user.useConfigOnly", "true");
+  isolatedIdentity(t, {});
+  assert.throws(() => tools.preflightCommit(), /cannot tell who to commit as.*user\.name and user\.email/);
+});

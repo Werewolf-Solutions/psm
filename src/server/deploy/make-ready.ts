@@ -23,7 +23,7 @@ export interface PreparationJob {
   planId: string | null;
   publicationId?: string | null;
   /** Why a blocked job is blocked, when psm can tell on its own that the cause has gone. */
-  blockedBy?: "capabilities" | null;
+  blockedBy?: "capabilities" | "checkout" | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -49,6 +49,10 @@ export class PreparationRepository {
   }
   forProject(projectId: string): PreparationJob[] {
     return (this.database().prepare("SELECT document FROM deployment_preparations WHERE project_id = ?").all(projectId) as { document: string }[])
+      .map((row) => JSON.parse(row.document) as PreparationJob);
+  }
+  all(): PreparationJob[] {
+    return (this.database().prepare("SELECT document FROM deployment_preparations").all() as { document: string }[])
       .map((row) => JSON.parse(row.document) as PreparationJob);
   }
   active(): PreparationJob[] {
@@ -89,6 +93,7 @@ export class DeploymentPreparationController {
   private readonly advancing = new Map<string, Promise<void>>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private stopped = false;
+  private sweep: ReturnType<typeof setInterval> | null = null;
   readonly repository: PreparationRepository;
   constructor(readonly options: {
     service: DeploymentService;
@@ -98,6 +103,8 @@ export class DeploymentPreparationController {
     repairs: PreparationRepairer;
     repository?: PreparationRepository;
     reviewCapabilities?: (projectId: string, engine: string | null, workroomId?: string | null) => string | null;
+    /** Checkout problems no grant can fix: staged operator work, a detached HEAD, no usable Git identity. */
+    reviewCheckout?: (projectId: string) => string | null;
     repairConnections?: (projectId: string, environmentId: string) => Promise<void>;
     background?: boolean;
   }) { this.repository = options.repository ?? new PreparationRepository(); }
@@ -134,42 +141,70 @@ export class DeploymentPreparationController {
     }
   }
   /**
-   * A project's agent grants changed: continue the preparations that stopped
-   * only for them.
+   * Continue the preparations that stopped only because their grants or their
+   * checkout were not ready, once they are.
    *
-   * A job blocked this way is waiting on nothing but a grant, and granting is
-   * itself an operator action in the local cockpit, so there is no second
-   * question to ask. Each job is rechecked against the requirement that stopped
-   * it. One still short keeps waiting, with a message naming what is left; one
-   * now covered continues where it stopped. The attempt budget carries over. The
-   * two-hour window restarts, because time spent waiting for a grant is not
-   * unattended work. An agent restart never comes through here — that still
-   * waits for the button.
+   * A job blocked this way waits on a condition, not a decision: grants given in
+   * the local cockpit, or a checkout fixed by hand (unstaged work, an attached
+   * branch, an identity Git can commit with). Each job is rechecked in the order a
+   * repair checks it — grants, then the checkout — so the banner names the problem
+   * that is actually left, including for a job saved under an older rule. One now
+   * clear continues where it stopped: the attempt budget carries over, and the
+   * two-hour window restarts because waiting on the operator is not unattended
+   * work. A job interrupted mid-work by an agent restart is not blocked this way,
+   * so it still waits for the button.
    */
-  capabilitiesChanged(projectId: string): PreparationJob[] {
+  recheckBlocked(projectId?: string): PreparationJob[] {
     const resumed: PreparationJob[] = [];
-    for (const job of this.repository.forProject(projectId)) {
-      if (job.state !== "blocked" || job.blockedBy !== "capabilities") continue;
+    for (const job of projectId ? this.repository.forProject(projectId) : this.repository.all()) {
+      if (job.state !== "blocked" || (job.blockedBy !== "capabilities" && job.blockedBy !== "checkout")) continue;
+      let blockedBy: "capabilities" | "checkout" = job.blockedBy;
       let gap: string | null;
-      try { gap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId) ?? null; }
-      catch (error) { gap = error instanceof Error ? error.message : "Review capabilities before resuming preparation."; }
+      try {
+        gap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId) ?? null;
+        if (gap) blockedBy = "capabilities";
+        else {
+          gap = this.options.reviewCheckout?.(job.projectId) ?? null;
+          if (gap) blockedBy = "checkout";
+        }
+      } catch (error) {
+        gap = error instanceof Error ? error.message : "Check this project before resuming preparation.";
+      }
       if (gap) {
-        if (gap !== job.message) { job.message = gap; this.save(job); }
+        // Only a real change is written, so a periodic recheck does not churn the job.
+        if (gap !== job.message || blockedBy !== job.blockedBy) { job.message = gap; job.blockedBy = blockedBy; this.save(job); }
         continue;
       }
       job.blockedBy = null; job.state = "running"; job.phase = "check"; job.createdAt = Date.now();
-      job.message = "Capabilities granted. Resuming preparation…";
+      job.message = "Grants and checkout are ready. Resuming preparation…";
       this.save(job); this.schedule(job); resumed.push(job);
     }
     return resumed;
   }
-  close(): void { this.stopped = true; for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); }
+  /** A grant change is one recheck, scoped to the project whose grants moved. */
+  capabilitiesChanged(projectId: string): PreparationJob[] { return this.recheckBlocked(projectId); }
+  /**
+   * Recheck blocked jobs now, then every `intervalMs`. The first pass corrects a
+   * job saved before this process started; later passes notice a checkout fixed
+   * outside psm, which raises no event psm could hear.
+   */
+  watchBlocked(intervalMs = 10_000): void {
+    if (this.stopped || this.options.background === false || this.sweep) return;
+    const tick = () => { try { this.recheckBlocked(); } catch { /* the next pass tries again */ } };
+    tick();
+    this.sweep = setInterval(tick, intervalMs);
+    this.sweep.unref();
+  }
+  close(): void {
+    this.stopped = true; for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear();
+    if (this.sweep) clearInterval(this.sweep); this.sweep = null;
+  }
   async cancel(projectId: string, environmentId: string): Promise<PreparationJob | null> {
     const job = this.current(projectId, environmentId);
-    // A job waiting on grants is not active, but it is armed: granting would start
-    // it again. Stopping has to reach it, or the only way to decline is to never
-    // grant anything.
-    if (!job || !(preparationActive(job) || job.blockedBy === "capabilities")) return job;
+    // A job waiting on grants or its checkout is not active, but it is armed:
+    // fixing either would start it again. Stopping has to reach it, or the only
+    // way to decline is to leave the problem unfixed.
+    if (!job || !(preparationActive(job) || job.blockedBy === "capabilities" || job.blockedBy === "checkout")) return job;
     job.state = "cancelled"; job.blockedBy = null; job.message = "Preparation stopped.";
     this.save(job);
     if (job.publicationId) this.options.publisher?.cancel(job.publicationId);
@@ -219,6 +254,14 @@ export class DeploymentPreparationController {
     const permissionGap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId);
     if (permissionGap) {
       job.state = "blocked"; job.phase = "check"; job.blockedBy = "capabilities"; job.message = permissionGap;
+      this.save(job); return;
+    }
+    // Asked only once grants are in place: the preflight reads the checkout with
+    // them. No grant fixes what it finds, so the job waits on the checkout
+    // instead, and the recheck resumes it once someone fixes it.
+    const checkoutGap = this.options.reviewCheckout?.(job.projectId);
+    if (checkoutGap) {
+      job.state = "blocked"; job.phase = "check"; job.blockedBy = "checkout"; job.message = checkoutGap;
       this.save(job); return;
     }
     if (job.repairs >= 3) {

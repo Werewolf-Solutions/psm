@@ -37,6 +37,7 @@ export interface ArtifactPreparationController {
 export interface DeploymentApiOptions {
   service: DeploymentService;
   reviewCapabilities?: (projectId: string, engine: string | null, workroomId?: string | null) => string | null;
+  reviewCheckout?: (projectId: string) => string | null;
   currentUser: () => Promise<PsmSessionUser | null>;
   localRequest: (request: Request) => boolean;
   runner?: DeploymentRunController;
@@ -148,6 +149,10 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     const needsRepair = checked.readiness.items.some((item) => item.status !== "ready" && (item.action !== "prepare-artifact" || !checked.readiness.canMakeReady));
     const gap = needsRepair ? options.reviewCapabilities?.(projectId, engine, workroomId) : null;
     if (gap) checked.readiness.items.unshift({ id: "review-capabilities", code: "capabilities-missing", title: "Review capabilities", detail: gap, status: "blocked", action: "review-capabilities", automatic: false });
+    // A checkout problem is listed as source work — it opens Changes, not Capabilities —
+    // and only once grants are in place, since the preflight reads with them.
+    const checkout = needsRepair && !gap ? options.reviewCheckout?.(projectId) : null;
+    if (checkout) checked.readiness.items.unshift({ id: "review-checkout", code: "checkout-not-ready", title: "Prepare the Git checkout", detail: checkout, status: "blocked", action: "review-source", automatic: false });
     return checked;
   };
 

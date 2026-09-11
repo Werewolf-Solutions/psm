@@ -119,15 +119,28 @@ export class RepositoryTools {
     try { keys = execFileSync("/usr/bin/git", [...base, "config", "--null", "--name-only", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], { cwd: root, env, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], maxBuffer: MAX_FILE, timeout: 5000 }); }
     catch (error) { if ((error as { status?: number }).status !== 1) throw error; }
     const filters = keys.split("\0").filter(Boolean).flatMap((key) => ["-c", `${key}=${key.endsWith(".required") ? "false" : ""}`]);
-    const identity = (key: string): string => {
-      try { return execFileSync("/usr/bin/git", [...base, "config", "--get", key], { cwd: root, env: { ...env, HOME: homedir(), GIT_CONFIG_GLOBAL: undefined }, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 }).trim(); }
-      catch { return ""; }
+    // Commit as whoever Git on this machine would commit as: repository, global
+    // and system config, the GIT_AUTHOR_*/GIT_COMMITTER_* environment, and, when
+    // none of those name anyone, Git's own detection from the account name and
+    // host. Asking `git var` instead of reading user.name/user.email is the point:
+    // a machine with no configured identity still commits fine by hand, and
+    // refusing it there made psm stricter than Git. The lookup reads identity
+    // only; the command below still runs with global config, hooks, filters and
+    // signing disabled.
+    const identity = (kind: "AUTHOR" | "COMMITTER"): { name: string; email: string } => {
+      const lookup: NodeJS.ProcessEnv = { PATH: env.PATH, HOME: homedir(), LANG: env.LANG, GIT_TERMINAL_PROMPT: "0" };
+      for (const key of ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"]) if (process.env[key]) lookup[key] = process.env[key];
+      let ident = "";
+      try { ident = execFileSync("/usr/bin/git", [...base, "var", `GIT_${kind}_IDENT`], { cwd: root, env: lookup, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5000 }).trim(); }
+      catch { /* Git itself has no identity it would commit with */ }
+      const match = /^(.+?) <([^<>]+)> \d+ [+-]\d{4}$/.exec(ident);
+      if (!match) throw new PermissionError("Git cannot tell who to commit as in this checkout. Set user.name and user.email (for example git config --global user.name \"Your Name\"), then resume preparation.");
+      return { name: match[1], email: match[2] };
     };
     if (args.includes("commit") || args[0] === "var") {
-      const name = identity("user.name"), email = identity("user.email");
-      if (!name || !email) throw new PermissionError("Configure Git user.name and user.email before a managed commit.");
-      env.GIT_AUTHOR_NAME = env.GIT_COMMITTER_NAME = name;
-      env.GIT_AUTHOR_EMAIL = env.GIT_COMMITTER_EMAIL = email;
+      const author = identity("AUTHOR"), committer = identity("COMMITTER");
+      env.GIT_AUTHOR_NAME = author.name; env.GIT_AUTHOR_EMAIL = author.email;
+      env.GIT_COMMITTER_NAME = committer.name; env.GIT_COMMITTER_EMAIL = committer.email;
     }
     return execFileSync("/usr/bin/git", ["--git-dir", dotGit, "--work-tree", root, "--no-pager", ...filters, "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "core.splitIndex=false", "-c", "core.untrackedCache=false", ...args], { cwd: root, env, input, encoding: "utf8", maxBuffer: 2 * MAX_FILE, timeout: 15_000, stdio: ["pipe", "pipe", "pipe"] });
   }
