@@ -36,6 +36,8 @@ export interface PreparedArtifactIdentity {
   producerRunId: string;
   sourceRepository: string;
   commitSha: string;
+  /** The host helper refuses a release without one, so it is approved, not looked up later. */
+  version: string;
   payloadAlgorithm: typeof STATIC_PAYLOAD_ALGORITHM;
   payloadLimits: StaticPayloadLimits;
   payloadDigest: string;
@@ -264,6 +266,12 @@ export function validateProviderId(value: unknown, field: string): string {
   return output;
 }
 
+function releaseVersion(value: unknown, field: string): string {
+  const output = text(value, field, 64);
+  if (!VERSION_RE.test(output)) fail(field, "must be X.Y.Z");
+  return output;
+}
+
 function timestamp(value: unknown, field: string): string {
   const output = text(value, field, 40);
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(output) || !Number.isFinite(Date.parse(output))) {
@@ -316,6 +324,7 @@ function parseArtifactIdentity(value: unknown, field: string): PreparedArtifactI
     "producerRunId",
     "sourceRepository",
     "commitSha",
+    "version",
     "payloadAlgorithm",
     "payloadLimits",
     "payloadDigest",
@@ -330,6 +339,7 @@ function parseArtifactIdentity(value: unknown, field: string): PreparedArtifactI
     producerRunId: validateProviderId(input.producerRunId, `${field}.producerRunId`),
     sourceRepository: validateRepository(input.sourceRepository, `${field}.sourceRepository`),
     commitSha: validateCommitSha(input.commitSha, `${field}.commitSha`),
+    version: releaseVersion(input.version, `${field}.version`),
     payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
     payloadLimits: parsePayloadLimits(input.payloadLimits, `${field}.payloadLimits`),
     payloadDigest: validateDigest(input.payloadDigest, `${field}.payloadDigest`),
@@ -574,6 +584,7 @@ export function releaseDispatchInputs(input: ReleaseControllerDispatch): Record<
     payload_digest: artifact.payloadDigest,
     archive_digest: artifact.archiveDigest,
     commit_sha: artifact.commitSha,
+    version: artifact.version,
     plan_digest: input.planDigest,
     plan_expires_at: input.planExpiresAt,
     release_id: input.releaseId,
@@ -597,8 +608,7 @@ export function parsePrepareArtifactResult(value: unknown): PrepareArtifactResul
   if (input.payload_algorithm !== STATIC_PAYLOAD_ALGORITHM) {
     fail("result.payload_algorithm", `must be ${STATIC_PAYLOAD_ALGORITHM}`);
   }
-  const version = text(input.version, "result.version", 64);
-  if (!VERSION_RE.test(version)) fail("result.version", "must be X.Y.Z");
+  const version = releaseVersion(input.version, "result.version");
   return {
     schema: PREPARE_ARTIFACT_RESULT_SCHEMA,
     psmRunId: id(input.psm_run_id, "result.psm_run_id"),

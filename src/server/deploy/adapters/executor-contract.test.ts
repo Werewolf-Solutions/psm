@@ -34,6 +34,7 @@ function artifactIdentity(): PreparedArtifactIdentity {
     producerRunId: "112233",
     sourceRepository: "Werewolf-Solutions/todo-app",
     commitSha: COMMIT,
+    version: "1.2.3",
     payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
     payloadLimits: { maxFiles: 5_000, maxPathBytes: 1_024, maxFileBytes: 20_000_000, maxUnpackedBytes: 200_000_000 },
     payloadDigest: PAYLOAD,
@@ -106,7 +107,7 @@ test("the execution contract digest is stable and covers every field", () => {
   // A golden vector. This identity is written into a plan, a helper receipt and
   // a release result, so changing it silently rebinds all three; a new
   // canonical form needs a new schema ID, not a new expected value here.
-  const baseline = "sha256:349ef867b8822d097ab959a6fa45f5c4b5b46a5810c0c2ce6e195e2c4218fa56";
+  const baseline = "sha256:826dca46e4b1b12d94ca47dadac04aa879cafdb8d971eac7f525be7788a30f9c";
   assert.equal(releaseExecutionContractDigest(contract), baseline);
   assert.equal(releaseExecutionContractDigest(parseStaticReleaseExecutionContract(contract)), baseline);
   // Key order is not identity; the canonical form is.
@@ -119,6 +120,7 @@ test("the execution contract digest is stable and covers every field", () => {
     (value: StaticReleaseExecutionContract) => { value.operation = "rollback"; },
     (value: StaticReleaseExecutionContract) => { value.target.id = "werewolf:todo-staging-web"; },
     (value: StaticReleaseExecutionContract) => { value.artifact.payloadDigest = digest("6"); },
+    (value: StaticReleaseExecutionContract) => { value.artifact.version = "9.9.9"; },
     (value: StaticReleaseExecutionContract) => { value.intendedRelease.releaseId = "rel_0003"; },
     (value: StaticReleaseExecutionContract) => { value.probes[0] = { ...value.probes[0], id: "front-page" }; },
   ]) {
@@ -214,6 +216,25 @@ test("release dispatch refuses a contract whose digest does not match its own by
 
   assert.throws(
     () => releaseDispatchInputs({ ...dispatch, executionContractDigest: digest("9") }),
+    ExecutorContractError,
+  );
+
+  // The target helper refuses a release without a version, so it travels inside the
+  // approved contract rather than being read from a producer-owned file at release time.
+  assert.equal(inputs.version, dispatch.artifact.version);
+  assert.ok(Object.keys(inputs).length <= 25, "workflow_dispatch accepts at most 25 inputs");
+  for (const invalid of ["", "1.2", "v1.2.3", "1.2.3-rc1", "latest"]) {
+    const contract = { ...dispatch.executionContract, artifact: { ...dispatch.artifact, version: invalid } };
+    assert.throws(
+      () => parseStaticReleaseExecutionContract(contract),
+      ExecutorContractError,
+      `version ${JSON.stringify(invalid)} must be refused`,
+    );
+  }
+  // A contract with no version at all is refused rather than defaulted.
+  const { version: _dropped, ...withoutVersion } = dispatch.artifact;
+  assert.throws(
+    () => parseStaticReleaseExecutionContract({ ...dispatch.executionContract, artifact: withoutVersion }),
     ExecutorContractError,
   );
 });

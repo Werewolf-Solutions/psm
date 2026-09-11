@@ -261,6 +261,7 @@ export class DeploymentRuntimeAdapters {
       producerRunId: artifact.producerRunId,
       sourceRepository: artifact.sourceRepository,
       commitSha: artifact.commitSha,
+      version: artifact.version,
       payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
       payloadLimits: limits,
       payloadDigest: artifact.payloadDigest,

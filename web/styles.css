@@ -776,6 +776,22 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
 .dep-toolbar-copy { flex: 1; color: var(--muted); font-size: 12px; }
 .dep-destination { margin: 8px 22px 12px; color: var(--muted); font-size: 12px; }
 .dep-error { margin: 12px 22px 0; padding: 10px 12px; color: #f85149; border: 1px solid currentColor; border-radius: 8px; }
+.dep-prep-ai { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.dep-prep-ai select { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.dep-prep {
+  margin: 12px 22px 0; padding: 12px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--bg-soft);
+}
+.dep-prep[data-state="blocked"] { border-color: #f0883e; }
+.dep-prep[data-state="waiting-input"], .dep-prep[data-state="awaiting-approval"] { border-color: #d29922; }
+.dep-prep[data-state="succeeded"] { border-color: #3fb950; }
+.dep-prep[data-state="cancelled"] { border-color: var(--line); }
+.dep-prep-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.dep-prep-head h3 { margin: 0; font-size: 13px; }
+.dep-prep-state { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.dep-prep-message { margin: 6px 0 0; color: var(--text); font-size: 12px; }
+.dep-prep-failure { margin: 6px 0 0; color: #f0883e; font-size: 11.5px; }
+.dep-prep #dep-prep-plan { margin-top: 10px; }
+.dep-prep-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .dep-build-options { margin: 10px 22px 0; color: var(--muted); font-size: 12px; }
 .dep-build-options summary { cursor: pointer; }
 .dep-build-options .dep-toolbar { position: static; padding: 10px 0; background: transparent; }
@@ -1810,3 +1826,25 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
   margin-top: 8px;
   align-self: flex-start;
 }
+
+/* Operator grants and shared deployment diagnostics in Capabilities. */
+.ws-capabilities { overflow-y: auto; }
+.agent-permissions { padding: 20px; border-bottom: 1px solid var(--line); }
+.agent-permissions h2 { margin: 0 0 8px; }
+.cap-section-description, .permission-row p, .permission-row small, .permission-connection small { color: var(--muted); }
+.permission-row { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.permission-row > div { flex: 1; min-width: 0; }
+.permission-row h3, .permission-connection h3 { margin: 0 0 6px; font-size: 14px; }
+.permission-row p { margin: 0 0 6px; }
+.permission-row .btn { flex-shrink: 0; }
+.permission-status { color: var(--accent); }
+.permission-audit { margin-top: 16px; }
+.permission-audit p { font-size: 12px; }
+.permission-connection { padding: 16px 0; border-bottom: 1px solid var(--line); }
+.permission-cause { margin-top: 12px; padding: 12px; background: var(--bg-soft); border-radius: 6px; }
+.permission-cause pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+@media (max-width: 640px) { .permission-row { flex-wrap: wrap; } .permission-row > div { flex-basis: 100%; } }
+
+.ws-capabilities > .agent-permissions, .ws-capabilities > .cap-toolbar { flex-shrink: 0; }
+.ws-capabilities > .cap-body { flex: none; min-height: 240px; }
+.ws-capabilities .cap-list { overflow-y: visible; }

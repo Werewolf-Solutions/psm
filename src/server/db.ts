@@ -377,6 +377,29 @@ const MIGRATIONS: readonly string[] = [
    );
    CREATE INDEX deployment_watch_snapshots_by_project
      ON deployment_watch_snapshots (project_id, environment_id, unit_id);`,
+  // Tracks automatic preparation across page reloads and agent restarts.
+  `CREATE TABLE deployment_preparations (
+     project_id TEXT NOT NULL,
+     environment_id TEXT NOT NULL,
+     document TEXT NOT NULL,
+     PRIMARY KEY (project_id, environment_id)
+   );`,
+  // Project permissions are local operator authority, never repository metadata.
+  `CREATE TABLE agent_permissions (
+     project_id TEXT NOT NULL, checkout TEXT NOT NULL,
+     revision INTEGER NOT NULL, grants TEXT NOT NULL CHECK(json_valid(grants)),
+     PRIMARY KEY(project_id, checkout)
+   );
+   CREATE TABLE agent_permission_events (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     project_id TEXT NOT NULL, checkout TEXT NOT NULL, revision INTEGER NOT NULL,
+     permission TEXT NOT NULL, granted INTEGER NOT NULL CHECK(granted IN (0,1)),
+     actor TEXT NOT NULL, at INTEGER NOT NULL
+   );
+   CREATE INDEX agent_permission_events_project ON agent_permission_events(project_id, checkout, revision);`,
+  `ALTER TABLE work_sessions ADD COLUMN permission_profile TEXT;
+   UPDATE work_sessions SET permission_profile = 'deployment-preparation'
+     WHERE id IN (SELECT json_extract(document, '$.workroomId') FROM deployment_preparations);`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

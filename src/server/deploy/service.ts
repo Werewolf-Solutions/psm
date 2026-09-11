@@ -1,3 +1,4 @@
+import { connectionDiagnostics, sameObservedConnection } from "./connection-diagnostics.ts";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import type { Project } from "../../types.ts";
@@ -397,6 +398,8 @@ export class DeploymentService {
     const runs = this.store.listRuns(context.project.id, environment.id);
     const latestPlan = plans[0];
     const planDocument = latestPlan?.document as unknown as DeploymentPlanDocument | undefined;
+    const hasCurrentObservation = (connection: typeof connections[number]) => planDocument?.manifestDigest === context.source.manifestDigest
+      && planDocument.connections.some((observed) => sameObservedConnection(connection, observed));
     const dependencies = planDocument?.observations?.dependencies ?? environment.dependencies.map((item) => ({ id: item.id, kind: item.kind, state: "unknown", title: item.id, detail: "Choose Discover changes" }));
     const resources = planDocument?.observations?.resources ?? environment.resources.map((item) => ({ id: item.id, kind: item.kind, state: "unknown", title: item.id, detail: "Choose Discover changes" }));
     const firstUnit = environment.units[0];
@@ -445,6 +448,12 @@ export class DeploymentService {
         slot: item.slot, kind: item.kind, connectionId: item.connectionId,
         bindingRevision: item.bindingRevision, metadataRevision: item.metadataRevision,
         ready: item.ready, profile: item.profile, principal: item.principal, detail: item.detail,
+        observedAt: hasCurrentObservation(item) ? planDocument?.createdAt ?? null : null,
+        observationsExpireAt: hasCurrentObservation(item) ? planDocument?.expiresAt ?? null : null,
+        diagnostics: connectionDiagnostics({
+          ready: item.ready, detail: item.detail,
+          resources: hasCurrentObservation(item) ? resources.filter((resource) => environment.resources.some((definition) => definition.id === resource.id && definition.connection === item.slot)) : [],
+        }),
         // Public suggestions only: creating a profile still requires an explicit local action.
         setup: {
           defaults: defaults.get(item.slot),

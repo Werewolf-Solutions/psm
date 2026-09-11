@@ -1,0 +1,22 @@
+{
+  "schema": "psm.werewolf.solutions/host-target/v1",
+  "revision": "controller-v0.1.0",
+  "targetId": "werewolf:psm-production-web",
+  "projectId": "prj_b59f38f33cea066492d8",
+  "environmentId": "production",
+  "unitId": "web",
+  "canonicalRoot": "/var/www/psm.werewolf.solutions",
+  "allowedRootPrefix": "/var/www",
+  "hostname": "psm.werewolf.solutions",
+  "deployUid": 1001,
+  "deployGid": 1001,
+  "infrastructureUids": [1001],
+  "releaseUids": [1002],
+  "certbotEmail": "ops@werewolf.solutions",
+  "pm2User": "oznerol",
+  "pm2Home": "/home/oznerol/.pm2",
+  "retainReleases": 5,
+  "nginxAvailableDir": "/etc/nginx/sites-available",
+  "nginxEnabledDir": "/etc/nginx/sites-enabled",
+  "acmeWebroot": "/var/www/certbot"
+}

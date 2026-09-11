@@ -1,0 +1,12 @@
+{
+  "schema": "psm.werewolf.solutions/control-target/v1",
+  "targetId": "werewolf:psm-production-web",
+  "contractRevision": "REPLACE_WITH_ENROLLED_CONTRACT_REVISION",
+  "githubEnvironment": "psm-production-web",
+  "sshHost": "REPLACE_WITH_DROPLET_HOSTNAME",
+  "sshUser": "REPLACE_WITH_ENROLLED_DEPLOY_ACCOUNT",
+  "sshPort": 22,
+  "hostKeyFingerprint": "SHA256:REPLACE_WITH_VERIFIED_HOST_KEY_FINGERPRINT",
+  "canonicalRoot": "/var/www/psm.werewolf.solutions",
+  "helperProtocol": "psm.werewolf.solutions/host-helper-request/v1"
+}

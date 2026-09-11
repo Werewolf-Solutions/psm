@@ -6,6 +6,7 @@ import test from "node:test";
 import { openDatabase } from "../db.ts";
 import type { PsmSessionUser } from "../session.ts";
 import { createDeploymentRouter } from "./api.ts";
+import { DeploymentPreparationController, PreparationRepository } from "./make-ready.ts";
 import { SecretBroker } from "./connections.ts";
 import { DeploymentService } from "./service.ts";
 import { DeploymentStore } from "./store.ts";
@@ -366,3 +367,180 @@ test("two clicks on make ready are one build, not two", async (t) => {
 function asRun(body: Record<string, unknown>): { id?: string } {
   return (body.run ?? {}) as { id?: string };
 }
+
+/**
+ * The whole "Make ready to deploy" flow, behind the one route the button calls.
+ *
+ * The coordinator is real here — only what it drives is stubbed — because the
+ * things worth protecting are its boundaries: one job per deployment however
+ * many times the button is pressed, a status read that costs nothing, and a
+ * stop that only the local cockpit can ask for.
+ */
+async function preparationHarness(options: { local?: boolean } = {}) {
+  const database = openDatabase(":memory:");
+  const store = new DeploymentStore(database);
+  let items: { title: string; detail: string; status: string; action: string | null }[] = [
+    { title: "Commit deployment inputs", detail: "inputs differ from committed HEAD", status: "blocked", action: "review-source" },
+  ];
+  const briefs: string[] = [];
+  const builds: string[] = [];
+  const engines: (string | null)[] = [];
+  let stopped = 0;
+  let refuse: string | null = null;
+  const service = {
+    resolveProject: () => ({ id: "prj_todo", name: "todo-app", path: "/nonexistent/todo-app" }),
+    store,
+    checkReadiness: async () => ({
+      readiness: { ready: !items.length, canMakeReady: false, items, artifactId: null },
+      plan: {}, environment: {},
+    }),
+    runView: (runId: string) => ({ id: runId, terminal: false, state: "running" }),
+  } as unknown as DeploymentService;
+
+  const preparation = new DeploymentPreparationController({
+    service,
+    background: false, // the test drives the steps; no wall clock in here
+    repository: new PreparationRepository(() => database),
+    preparer: { prepare: async () => { builds.push("build"); return { runId: "run_build" }; } },
+    runner: { enqueue: () => { throw new Error("preparation must not queue infrastructure"); }, cancel: async () => {} },
+    repairs: {
+      start: async (job, checked) => {
+        engines.push(job.engine);
+        if (refuse) throw new Error(refuse);
+        briefs.push(checked.readiness.items.map((item) => item.title).join(", "));
+        return "wrk_room";
+      },
+      status: () => ({ busy: true, question: false }),
+      stop: () => { stopped++; },
+    },
+  });
+
+  const app = express();
+  app.use(express.json());
+  app.use(createDeploymentRouter({
+    service,
+    currentUser: async () => OPERATOR,
+    localRequest: () => options.local ?? true,
+    preparation,
+  }));
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/projects/prj_todo/deployments/staging`;
+  const call = (path: string, method = "POST", payload: unknown = {}) => fetch(`${base}${path}`, {
+    method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
+  }).then(async (response) => ({ status: response.status, body: await response.json() as Record<string, unknown> }));
+  return {
+    briefs, builds, engines,
+    counts: () => ({ briefs: briefs.length, builds: builds.length, stopped }),
+    ready: () => { items = []; },
+    refuse: (message: string | null) => { refuse = message; },
+    makeReady: (payload: unknown = {}) => call("/make-ready", "POST", payload),
+    status: () => call("/preparation", "GET"),
+    cancel: () => call("/preparation/cancel"),
+    close: () => new Promise((resolve) => { server.close(resolve); database.close(); }),
+  };
+}
+
+const asJob = (body: Record<string, unknown>) => body.preparation as Record<string, unknown>;
+
+test("make ready starts the whole preparation, not just a build", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  const response = await kit.makeReady();
+  assert.equal(response.status, 202, "preparation is still running when the request answers");
+  assert.equal(asJob(response.body).state, "running");
+  assert.equal(asJob(response.body).phase, "repair");
+  assert.equal(asJob(response.body).workroomId, "wrk_room");
+  assert.deepEqual(kit.counts(), { briefs: 1, builds: 0, stopped: 0 },
+    "committed source is the operator's repository to fix, and no reason to spend a build");
+  assert.deepEqual(kit.briefs, ["Commit deployment inputs"]);
+});
+
+test("pressing make ready twice continues one preparation", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  const first = await kit.makeReady();
+  const second = await kit.makeReady();
+  assert.equal(asJob(second.body).id, asJob(first.body).id);
+  assert.equal(kit.counts().briefs, 1, "the second click joins the room the first one opened");
+});
+
+test("preparation status answers without rebuilding anything", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  const before = await kit.status();
+  assert.equal(before.status, 200);
+  assert.equal(before.body.preparation, null, "nothing has been started yet");
+
+  const started = await kit.makeReady();
+  const after = await kit.status();
+  assert.equal(asJob(after.body).id, asJob(started.body).id);
+  assert.equal(asJob(after.body).active, true);
+  assert.equal(kit.counts().briefs, 1, "reading the status is not a step");
+});
+
+test("stopping preparation stops the session it opened", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  await kit.makeReady();
+  const cancelled = await kit.cancel();
+  assert.equal(cancelled.status, 200);
+  assert.equal(asJob(cancelled.body).state, "cancelled");
+  assert.equal(asJob(cancelled.body).active, false);
+  assert.equal(kit.counts().stopped, 1, "the AI keeps working unless it is told to stop");
+
+  const after = await kit.status();
+  assert.equal(asJob(after.body).state, "cancelled");
+});
+
+test("a paired browser cannot start or stop preparation on this machine", async (t) => {
+  const kit = await preparationHarness({ local: false });
+  t.after(kit.close);
+
+  assert.equal((await kit.makeReady()).status, 403);
+  assert.equal((await kit.cancel()).status, 403);
+  assert.deepEqual(kit.counts(), { briefs: 0, builds: 0, stopped: 0 });
+});
+
+/**
+ * The provider a preparation runs on is a choice, remade on every press.
+ *
+ * Reported from a real run: preparation was opened on codex, codex hit its usage
+ * window, and there was no way to move it to claude — the room's engine was
+ * fixed at creation and the button re-used the room as it was.
+ */
+test("a preparation stopped by a usage limit resumes on the other provider", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  kit.refuse("codex: You've hit your usage limit. Choose a different AI for preparation, then resume.");
+  const limited = await kit.makeReady({ engine: "codex" });
+  assert.equal(asJob(limited.body).state, "blocked");
+  assert.match(String(asJob(limited.body).message), /usage limit/);
+  assert.equal(asJob(limited.body).engine, "codex", "the panel can name the provider that refused");
+
+  // The operator picks the other one and presses again.
+  kit.refuse(null);
+  const resumed = await kit.makeReady({ engine: "claude" });
+  assert.equal(resumed.status, 202);
+  assert.equal(asJob(resumed.body).state, "running");
+  assert.equal(asJob(resumed.body).engine, "claude");
+  assert.deepEqual(kit.engines, ["codex", "claude"], "the repair is attempted on what was chosen, not on what it opened with");
+  assert.equal(kit.counts().briefs, 1);
+});
+
+test("a resumed preparation keeps the room and the engine it was last given", async (t) => {
+  const kit = await preparationHarness();
+  t.after(kit.close);
+
+  await kit.makeReady({ engine: "claude" });
+  await kit.cancel();
+  // No engine this time: the last choice stands rather than silently reverting.
+  const again = await kit.makeReady();
+  assert.equal(asJob(again.body).engine, "claude");
+  assert.equal(asJob(again.body).workroomId, "wrk_room", "the transcript carries across the stop");
+});

@@ -42,6 +42,7 @@ export interface WorkSession {
   createdAt: number;
   updatedAt: number;
   archivedAt: number | null;
+  permissionProfile?: "deployment-preparation" | null;
 }
 
 const MAX_TITLE = 200;
@@ -76,7 +77,7 @@ function parseTitle(value: unknown, fallback: string): string {
  * the first member is where the AI starts — so duplicates collapse toward their
  * first mention rather than being sorted away.
  */
-function parseProjects(value: unknown, known: ReadonlySet<string>): string[] {
+function parseProjects(value: unknown, known: ReadonlySet<string>, minimum = MIN_PROJECTS): string[] {
   const raw = Array.isArray(value) ? value : [];
   const names: string[] = [];
   for (const entry of raw) {
@@ -87,7 +88,7 @@ function parseProjects(value: unknown, known: ReadonlySet<string>): string[] {
     }
     names.push(name);
   }
-  if (names.length < MIN_PROJECTS) {
+  if (names.length < minimum) {
     throw new WorkSessionValidationError("a workroom needs at least two projects");
   }
   if (names.length > MAX_PROJECTS) {
@@ -107,10 +108,11 @@ interface WorkSessionRow {
   created_at: number;
   updated_at: number;
   archived_at: number | null;
+  permission_profile: "deployment-preparation" | null;
 }
 
 const SELECT =
-  "SELECT id, title, objective, primary_project, engine, model, effort, created_at, updated_at, archived_at FROM work_sessions";
+  "SELECT id, title, objective, primary_project, engine, model, effort, created_at, updated_at, archived_at, permission_profile FROM work_sessions";
 
 export class WorkSessionStore {
   #db: DatabaseSync | null;
@@ -144,6 +146,7 @@ export class WorkSessionStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       archivedAt: row.archived_at,
+      permissionProfile: row.permission_profile,
     };
   }
 
@@ -164,10 +167,10 @@ export class WorkSessionStore {
     return this.hydrate(row);
   }
 
-  create(value: unknown, known: ReadonlySet<string>): WorkSession {
+  create(value: unknown, known: ReadonlySet<string>, options: { preparation?: boolean } = {}): WorkSession {
     const raw = (value ?? {}) as Record<string, unknown>;
     // Validate before writing, so a rejected room leaves nothing behind.
-    const projects = parseProjects(raw.projects, known);
+    const projects = parseProjects(raw.projects, known, options.preparation ? 1 : MIN_PROJECTS);
     const title = parseTitle(raw.title, projects.join(" ↔ "));
     const objective = String(raw.objective ?? "").trim().slice(0, MAX_OBJECTIVE);
     const engine = raw.engine === "codex" ? "codex" : "claude";
@@ -192,6 +195,7 @@ export class WorkSessionStore {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
         )
         .run(id, title, objective, projects[0], engine, model, effort, now, now);
+      if (options.preparation) this.database.prepare("UPDATE work_sessions SET permission_profile = ? WHERE id = ?").run("deployment-preparation", id);
       const member = this.database.prepare(
         "INSERT INTO work_session_projects (session_id, project, position) VALUES (?, ?, ?)",
       );
@@ -232,6 +236,45 @@ export class WorkSessionStore {
       this.database.exec("ROLLBACK");
       throw err;
     }
+    return this.get(session.id);
+  }
+
+  /**
+   * Change which AI runs in this room.
+   *
+   * A room's engine was fixed at creation, which is wrong for a conversation
+   * that outlives one provider's usage window: the room is the work, and the
+   * model is a tool it picks up. Switching engines starts a fresh provider
+   * thread (see `getSession` in ai.ts) — the transcript stays, the resumed
+   * thread id does not, which is the honest behaviour when the other side has
+   * never seen this conversation.
+   *
+   * Each field is optional and only what is given changes, so setting an engine
+   * does not silently reset a model the caller never mentioned. Changing the
+   * engine does clear the model and effort, because both name things that only
+   * the previous engine has.
+   */
+  setEngine(id: string, value: { engine?: unknown; model?: unknown; effort?: unknown }): WorkSession {
+    const session = this.get(id);
+    const raw = value ?? {};
+    let engine = session.engine;
+    if (raw.engine !== undefined) {
+      const requested = String(raw.engine ?? "").trim().toLowerCase();
+      if (requested !== "claude" && requested !== "codex") {
+        throw new WorkSessionValidationError("an AI engine is either claude or codex");
+      }
+      engine = requested;
+    }
+    const switched = engine !== session.engine;
+    const model = raw.model !== undefined
+      ? String(raw.model ?? "").trim().slice(0, MAX_TITLE) || null
+      : switched ? null : session.model;
+    const effort = raw.effort !== undefined
+      ? String(raw.effort ?? "").trim().toLowerCase().slice(0, MAX_TITLE) || null
+      : switched ? null : session.effort;
+    this.database
+      .prepare("UPDATE work_sessions SET engine = ?, model = ?, effort = ?, updated_at = ? WHERE id = ?")
+      .run(engine, model, effort, Date.now(), session.id);
     return this.get(session.id);
   }
 

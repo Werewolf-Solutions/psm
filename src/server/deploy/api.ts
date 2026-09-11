@@ -21,6 +21,7 @@ import {
   type JsonValue,
 } from "./store.ts";
 import { authorizeDeploymentAction, composeDeploymentPolicy, type DeploymentPolicyLayer, type EffectiveDeploymentPolicy } from "./policy.ts";
+import { preparationActive, preparationView, type DeploymentPreparationController } from "./make-ready.ts";
 
 export interface DeploymentRunController {
   enqueue(runId: string): void | Promise<void>;
@@ -33,10 +34,13 @@ export interface ArtifactPreparationController {
 
 export interface DeploymentApiOptions {
   service: DeploymentService;
+  reviewCapabilities?: (projectId: string, engine: string | null, workroomId?: string | null) => string | null;
   currentUser: () => Promise<PsmSessionUser | null>;
   localRequest: (request: Request) => boolean;
   runner?: DeploymentRunController;
   preparer?: ArtifactPreparationController;
+  /** When configured, "make ready" runs the whole preparation flow instead of one build. */
+  preparation?: DeploymentPreparationController;
   intents?: ApprovalIntentRegistry;
   streamTickets?: DeploymentStreamTicketRegistry;
   /** Rotates when the long-lived pairing token rotates, invalidating outstanding stream tickets. */
@@ -137,6 +141,12 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
   const intents = options.intents ?? new ApprovalIntentRegistry();
   const streamTickets = options.streamTickets ?? new DeploymentStreamTicketRegistry();
   const preparationRequests = new Map<string, Promise<Record<string, unknown>>>();
+  const addCapabilityReview = (checked: Awaited<ReturnType<DeploymentService["checkReadiness"]>>, projectId: string, engine: string | null, workroomId?: string | null) => {
+    const needsRepair = checked.readiness.items.some((item) => item.status !== "ready" && (item.action !== "prepare-artifact" || !checked.readiness.canMakeReady));
+    const gap = needsRepair ? options.reviewCapabilities?.(projectId, engine, workroomId) : null;
+    if (gap) checked.readiness.items.unshift({ id: "review-capabilities", code: "capabilities-missing", title: "Review capabilities", detail: gap, status: "blocked", action: "review-capabilities", automatic: false });
+    return checked;
+  };
 
   router.get("/api/projects/:id/deployments", async (req, res) => {
     try { res.json(await service.overview(req.params.id)); } catch (error) { apiError(res, error); }
@@ -148,10 +158,11 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
 
   router.post("/api/projects/:id/deployments/:environment/readiness", async (req, res) => {
     try {
-      res.json(await service.checkReadiness(req.params.id, req.params.environment, {
+      const checked = await service.checkReadiness(req.params.id, req.params.environment, {
         artifactId: req.body?.artifactId == null ? null : String(req.body.artifactId),
         preparationAvailable: !!options.preparer,
-      }));
+      });
+      res.json(addCapabilityReview(checked, service.resolveProject(req.params.id).id, req.body?.engine == null ? null : String(req.body.engine)));
     } catch (error) { apiError(res, error); }
   });
 
@@ -160,6 +171,31 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     try {
       const project = service.resolveProject(req.params.id);
       const environmentId = req.params.environment;
+      if (options.preparation) {
+        const coordinator = options.preparation;
+        // One click both starts the flow and takes its first step, so the answer
+        // the operator gets back is this deployment's real state rather than
+        // "starting…" — and a second click joins the same job instead of
+        // starting a second one.
+        // The AI is chosen per press, so a preparation stopped by one provider's
+        // usage limit resumes on the other without losing its room or progress.
+        coordinator.start(project.id, environmentId, {
+          ...(req.body?.engine == null ? {} : { engine: String(req.body.engine) }),
+          ...(req.body?.model == null ? {} : { model: String(req.body.model) }),
+          ...(req.body?.effort == null ? {} : { effort: String(req.body.effort) }),
+        });
+        await coordinator.advance(project.id, environmentId);
+        const job = coordinator.current(project.id, environmentId);
+        const checked = await service.checkReadiness(project.id, environmentId, {
+          artifactId: req.body?.artifactId == null ? null : String(req.body.artifactId),
+          preparationAvailable: !!options.preparer,
+        });
+        return res.status(job && preparationActive(job) ? 202 : 200).json({
+          ...addCapabilityReview(checked, project.id, job?.engine ?? null, job?.workroomId),
+          preparation: preparationView(job),
+          ...(job?.runId ? { run: service.runView(job.runId) } : {}),
+        });
+      }
       const key = `${project.id}/${environmentId}`;
       let pending = preparationRequests.get(key);
       if (!pending) {
@@ -186,6 +222,45 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       const result = await pending;
       const run = asObject(result.run);
       res.status(run.id && !run.terminal ? 202 : 200).json(result);
+    } catch (error) { apiError(res, error); }
+  });
+
+  /**
+   * Where preparation has got to.
+   *
+   * Deliberately cheap: it reads the job psm already wrote and nothing else, so
+   * an open cockpit can poll it every couple of seconds without rebuilding a
+   * plan on every tick. The plan comes back only while preparation is actually
+   * waiting on an approval, which is the one moment the page needs to show it.
+   */
+  router.get("/api/projects/:id/deployments/:environment/preparation", (req, res) => {
+    try {
+      const project = service.resolveProject(req.params.id);
+      const job = options.preparation?.current(project.id, req.params.environment) ?? null;
+      let plan: Record<string, unknown> | null = null;
+      if (job?.planId && job.state === "awaiting-approval") {
+        try {
+          const stored = service.store.getPlan(job.planId);
+          plan = { id: stored.planId, revision: stored.revision, digest: stored.digest, ...asObject(stored.document) };
+        } catch { plan = null; }
+      }
+      res.json({
+        preparation: preparationView(job),
+        ...(plan ? { plan } : {}),
+        ...(job?.runId ? { run: service.runView(job.runId) } : {}),
+      });
+    } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/projects/:id/deployments/:environment/preparation/cancel", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      if (!options.preparation) {
+        return res.status(409).json({ error: "automatic preparation is not configured", code: "deployment-conflict" });
+      }
+      const project = service.resolveProject(req.params.id);
+      const job = await options.preparation.cancel(project.id, req.params.environment);
+      res.json({ ok: true, preparation: preparationView(job) });
     } catch (error) { apiError(res, error); }
   });
 

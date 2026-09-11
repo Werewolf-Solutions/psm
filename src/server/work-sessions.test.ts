@@ -153,3 +153,52 @@ test("a project psm cannot see cannot be added either", () => {
   );
   assert.deepEqual(s.get(room.id).projects, ["todo-app", "werewolf-dapp"]);
 });
+
+/**
+ * Which AI a room runs.
+ *
+ * This is a setting, not a fact about the moment the room was created: a
+ * conversation outlives any one provider's usage window, and being stuck on the
+ * engine that was current at creation is how a room becomes unusable for hours.
+ */
+test("a room can be moved to the other engine", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "psm"], engine: "codex", model: "gpt-5", effort: "high" }, known);
+  const moved = s.setEngine(room.id, { engine: "claude" });
+  assert.equal(moved.engine, "claude");
+  assert.equal(moved.model, null, "a model names something only the previous engine has");
+  assert.equal(moved.effort, null);
+});
+
+test("changing the model alone leaves the engine where it was", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "psm"], engine: "codex", model: "gpt-5", effort: "high" }, known);
+  const tuned = s.setEngine(room.id, { model: "gpt-5-codex" });
+  assert.equal(tuned.engine, "codex");
+  assert.equal(tuned.model, "gpt-5-codex");
+  assert.equal(tuned.effort, "high", "an effort the caller never mentioned is not theirs to reset");
+});
+
+test("a room cannot be pointed at an engine psm does not run", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "psm"], engine: "claude" }, known);
+  assert.throws(() => s.setEngine(room.id, { engine: "gpt-4" }), WorkSessionValidationError);
+  assert.equal(s.get(room.id).engine, "claude", "and the room is unchanged");
+});
+
+test("re-selecting the engine a room already runs keeps its model", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app", "psm"], engine: "claude", model: "opus", effort: "high" }, known);
+  const same = s.setEngine(room.id, { engine: "claude" });
+  assert.equal(same.model, "opus", "this is not a switch, so nothing it named is stale");
+  assert.equal(same.effort, "high");
+});
+
+test("preparation requirements persist through engine changes and cannot be set by room input", () => {
+  const s = store();
+  const room = s.create({ projects: ["todo-app"], engine: "claude" }, known, { preparation: true });
+  assert.equal(room.permissionProfile, "deployment-preparation");
+  assert.equal(s.setEngine(room.id, { engine: "codex" }).permissionProfile, "deployment-preparation");
+  const ordinary = s.create({ projects: ["todo-app", "psm"], permissionProfile: "deployment-preparation" }, known);
+  assert.equal(ordinary.permissionProfile, null);
+});

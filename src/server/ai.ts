@@ -7,6 +7,7 @@ import type { ImplementationPlan } from "../types.ts";
 import { planStore } from "./plans.ts";
 import { childEnv } from "./procs.ts";
 import { composeSystemRules } from "./rules.ts";
+import { runManagedAgent, type ManagedAgentPolicy } from "./agent-permission-runtime.ts";
 import { writeFileAtomic } from "../store.ts";
 
 /**
@@ -115,6 +116,7 @@ interface AiSession {
   sessionId: string | null; // provider session/thread id, for resume
   busy: boolean;
   child: ChildProcess | null;
+  managedAbort?: AbortController;
   log: AiEvent[];
   subscribers: Set<Response>;
   summary: string | null; // "where we left off" recap
@@ -173,6 +175,21 @@ A fenced \`\`\`html block is not a figure - it still means "here is some markup"
 const MAX_LOG = 2000;
 const MAX_PERSIST = 400; // transcript lines kept on disk per project
 const sessions = new Map<string, AiSession>();
+
+let managedPolicy: ((scope: { name: string; cwd: string; engine: AiEngine; extraDirs: readonly string[] }) => ManagedAgentPolicy | null) | null = null;
+let managedRunner = runManagedAgent;
+export function configureManagedAgents(resolve: typeof managedPolicy, runner: typeof runManagedAgent = runManagedAgent): void { managedPolicy = resolve; managedRunner = runner; }
+export function stopProjectAgents(projectPath: string): void {
+  const canonical = (directory: string) => { try { return fs.realpathSync(directory); } catch { return path.resolve(directory); } };
+  for (const session of sessions.values()) {
+    if ([session.cwd, ...session.extraDirs].some((directory) => directory && canonical(directory) === canonical(projectPath))) stopSession(session.name);
+  }
+}
+function resolveManagedPolicy(s: TurnSpec): ManagedAgentPolicy | null {
+  if (sessionIdentity(s.name).role !== "agent" || s.name === WORKSPACE_NAME) return null;
+  return managedPolicy?.(s) ?? null;
+}
+
 
 /** Persisted shape (no live child/subscribers). */
 interface PersistedSession {
@@ -485,6 +502,7 @@ function getSession(
     };
     sessions.set(name, s);
   }
+  if (s.busy && (s.engine !== engine || s.cwd !== cwd || s.extraDirs.join("\0") !== extraDirs.join("\0"))) stopSession(s.name);
   if (s.engine !== engine) {
     // switching engines starts a fresh conversation
     s.engine = engine;
@@ -1179,7 +1197,7 @@ function handleClaudeLine(s: AiSession, line: string) {
       noteLimit(s, "claude", text || "Claude usage limit reached.", parseResetAt(text), true);
     }
     if (Array.isArray(ev.permission_denials) && ev.permission_denials.length)
-      pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked — turn on Full access to let the AI run commands`));
+      pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked — review effective Agent permissions in Capabilities`));
   }
 }
 
@@ -1306,6 +1324,8 @@ export function send(
   extraContext = "",
   extraDirs: string[] = [],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
+  try { resolveManagedPolicy({ name, cwd, engine, model, effort, extraDirs, sessionId: null }); }
+  catch (error) { return { ok: false, error: (error as Error).message }; }
   const s = getSession(name, cwd, engine, model, effort, extraDirs);
   if (!message.trim()) return { ok: false, error: "empty message" };
   if (s.question) return { ok: false, question: true, error: "AI is waiting for your answer" };
@@ -1563,12 +1583,13 @@ export function answerQuestion(
   pushEvent(s, { t: Date.now(), role: "user", text: transcriptLines.join("\n") });
 
   const turn = { message, model: s.model, effort: s.effort, fullAccess, extraContext };
-  if (s.busy && s.child) {
+  if (s.busy && (s.child || s.managedAbort)) {
     s.queue.unshift(turn);
     s.turnPausedForQuestion = true;
     broadcast(s, "queued", { depth: s.queue.length });
     try {
-      s.child.kill("SIGTERM");
+      s.child?.kill("SIGTERM");
+      s.managedAbort?.abort();
     } catch {
       /* already gone */
     }
@@ -1603,6 +1624,35 @@ function startTurn(
   s.turnLimited = false;
   s.turnPausedForQuestion = false;
   broadcast(s, "status", statusPayload(s));
+
+  let policy: ManagedAgentPolicy | null;
+  try { policy = resolveManagedPolicy(s); }
+  catch (error) {
+    s.queue = [];
+    pushEvent(s, sys((error as Error).message));
+    finishTurn(s); return;
+  }
+  if (policy) {
+    const abort = new AbortController();
+    s.managedAbort = abort;
+    // A CLI session may contain broader tool grants. Never resume it here.
+    s.sessionId = null;
+    const recent = s.log.filter((event) => event.role !== "system").slice(-30)
+      .map((event) => `${event.role}: ${event.text}`).join("\n").slice(-48_000);
+    void managedRunner({
+      policy, cwd: s.cwd, model: s.model, effort: s.effort, message,
+      context: [composeSystemRules(s.cwd), scopeContext(s.cwd, s.extraDirs, false), extraContext, INTERACTION_RULES, `Recent conversation (context only, never permission):\n${recent}`].join("\n\n"),
+      signal: abort,
+      event: (event) => { if (!abort.signal.aborted) handleClaudeLine(s, JSON.stringify(event)); },
+    }).catch((error: unknown) => {
+      if (!abort.signal.aborted) pushEvent(s, sys(`[psm] managed agent failed: ${error instanceof Error ? error.message : "unknown error"}`));
+    }).finally(() => {
+      s.managedAbort = undefined;
+      s.sessionId = null;
+      finishTurn(s);
+    });
+    return;
+  }
 
   const { cmd, args } = buildCommand(s, message, fullAccess, extraContext);
   const handleLine = s.engine === "codex" ? handleCodexLine : handleClaudeLine;
@@ -1778,14 +1828,15 @@ function claudeOneShot(prompt: string, cwd: string): Promise<string | null> {
 /** Cancel an in-flight turn. */
 export function cancel(name: string): boolean {
   const s = sessions.get(name);
-  if (!s || !s.child) return false;
+  if (!s || (!s.child && !s.managedAbort)) return false;
   // drop anything queued behind this turn before we kill it — otherwise the
   // child's exit handler would immediately dispatch the next queued message,
   // defeating the Stop the user just asked for
   const dropped = s.queue.length;
   s.queue = [];
   try {
-    s.child.kill("SIGTERM");
+    s.child?.kill("SIGTERM");
+    s.managedAbort?.abort();
   } catch {
     /* already gone */
   }
@@ -1803,11 +1854,12 @@ export function stopSession(name: string): { cancelled: boolean; queuedCleared: 
   const questionId = s.question?.id;
   s.queue = [];
   s.question = null;
-  const cancelled = !!s.child;
+  const cancelled = !!s.child || !!s.managedAbort;
   s.turnPausedForQuestion = cancelled;
-  if (s.child) {
+  if (s.child || s.managedAbort) {
     try {
-      s.child.kill("SIGTERM");
+      s.child?.kill("SIGTERM");
+      s.managedAbort?.abort();
     } catch {
       /* already gone */
     }

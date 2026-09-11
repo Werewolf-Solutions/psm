@@ -177,7 +177,7 @@
           </select>
         </label>
         <label class="check">
-          <input type="checkbox" id="d-full" /> AI full access (run commands, not just edit)
+          <input type="checkbox" id="d-full" /> Access managed in Capabilities → Agent permissions
         </label>
         <!-- Other repositories this project's AI may work in. Chosen by project,
              never by path: psm looks the paths up itself before every turn. -->
@@ -353,10 +353,12 @@
           </section>
         </div>
         <div class="ws-capabilities" id="ws-capabilities" data-pane="capabilities" hidden>
+          <section id="agent-permissions" class="agent-permissions" aria-label="Agent permissions"></section>
+          <section id="cap-deployment-connections" class="agent-permissions" aria-label="Deployment connections"></section>
           <div class="cap-toolbar">
             <div>
-              <h2>Capabilities</h2>
-              <p>Attach workspace tools to this project. psm writes project config; Claude or Codex runs the tool.</p>
+              <h2>Attached tools</h2>
+              <p>Attach workspace tools to project configuration. Managed permission sessions use only the PSM repository tools; attached integrations keep their own access rules.</p>
             </div>
             <div class="cap-toolbar-actions">
               <button class="btn" id="cap-refresh">Refresh catalog</button>
@@ -483,10 +485,31 @@
             <div class="dep-toolbar">
               <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
               <button class="btn" id="dep-discover">Check readiness</button>
+              <label class="dep-prep-ai" id="dep-prep-ai-wrap" hidden>
+                <span>Preparation AI</span>
+                <select id="dep-prep-ai">
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
+                </select>
+              </label>
               <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
               <button class="btn btn-primary" id="dep-approve" disabled>Deploy</button>
             </div>
             <div class="dep-error" id="dep-error" role="alert" hidden></div>
+            <section class="dep-prep" id="dep-preparation" hidden>
+              <div class="dep-prep-head">
+                <h3 id="dep-prep-title">Preparing this deployment</h3>
+                <span class="dep-prep-state" id="dep-prep-state"></span>
+              </div>
+              <p class="dep-prep-message" id="dep-prep-message"></p>
+              <p class="dep-prep-failure" id="dep-prep-failure" hidden></p>
+              <div class="dep-plan" id="dep-prep-plan" hidden></div>
+              <div class="dep-prep-actions">
+                <button class="btn btn-primary" id="dep-prep-approve" hidden>Approve infrastructure plan</button>
+                <button class="btn" id="dep-prep-open" hidden>Open preparation session</button>
+                <button class="btn" id="dep-prep-stop" hidden>Stop preparation</button>
+              </div>
+            </section>
             <details class="dep-build-options">
               <summary>Build and release options</summary>
               <div class="dep-toolbar">
@@ -843,6 +866,7 @@
     <script src="/auth.js"></script>
     <script src="/agent.js"></script>
     <script src="/deployment-connections.js"></script>
+    <script src="/agent-permissions.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>
   </body>

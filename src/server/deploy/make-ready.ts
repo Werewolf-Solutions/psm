@@ -1,0 +1,253 @@
+import { randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
+import { db } from "../db.ts";
+import type { ArtifactPreparationController, DeploymentRunController } from "./api.ts";
+import type { DeploymentService } from "./service.ts";
+import type { DeploymentPlanDocument } from "./planner.ts";
+
+export type PreparationState = "running" | "waiting-input" | "awaiting-approval" | "blocked" | "succeeded" | "cancelled";
+export interface PreparationJob {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  state: PreparationState;
+  phase: "check" | "repair" | "build" | "infrastructure";
+  message: string;
+  createdAt: number;
+  updatedAt: number;
+  workroomId: string | null;
+  waitingForRepair: boolean;
+  repairs: number;
+  runId: string | null;
+  planId: string | null;
+  failure: string | null;
+  /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
+  engine: string | null;
+  model: string | null;
+  effort: string | null;
+}
+export type ReadinessResult = Awaited<ReturnType<DeploymentService["checkReadiness"]>>;
+export interface PreparationRepairer {
+  start(job: PreparationJob, checked: ReadinessResult): Promise<string>;
+  status(roomId: string): { busy: boolean; question: boolean };
+  stop(roomId: string): void;
+}
+
+export class PreparationRepository {
+  constructor(private readonly database: () => DatabaseSync = db) {}
+  get(projectId: string, environmentId: string): PreparationJob | null {
+    const row = this.database().prepare("SELECT document FROM deployment_preparations WHERE project_id = ? AND environment_id = ?").get(projectId, environmentId) as { document: string } | undefined;
+    return row ? JSON.parse(row.document) as PreparationJob : null;
+  }
+  save(job: PreparationJob): void {
+    this.database().prepare("INSERT INTO deployment_preparations VALUES (?, ?, ?) ON CONFLICT(project_id, environment_id) DO UPDATE SET document = excluded.document")
+      .run(job.projectId, job.environmentId, JSON.stringify(job));
+  }
+  active(): PreparationJob[] {
+    return (this.database().prepare("SELECT document FROM deployment_preparations").all() as { document: string }[])
+      .map((row) => JSON.parse(row.document) as PreparationJob).filter(preparationActive);
+  }
+}
+export function preparationActive(job: PreparationJob): boolean {
+  return ["running", "waiting-input", "awaiting-approval"].includes(job.state);
+}
+
+/** What the cockpit polls: the job's own state, with nothing the page cannot act on. */
+export function preparationView(job: PreparationJob | null): Record<string, unknown> | null {
+  if (!job) return null;
+  return {
+    id: job.id,
+    state: job.state,
+    phase: job.phase,
+    message: job.message,
+    active: preparationActive(job),
+    workroomId: job.workroomId,
+    runId: job.runId,
+    planId: job.planId,
+    failure: job.failure,
+    engine: job.engine,
+    model: job.model,
+    effort: job.effort,
+    repairs: job.repairs,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+/** Coordinates existing work sessions/builds. Infrastructure ALWAYS uses the existing reviewed approval API. */
+export class DeploymentPreparationController {
+  private readonly advancing = new Map<string, Promise<void>>();
+  private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private stopped = false;
+  readonly repository: PreparationRepository;
+  constructor(readonly options: {
+    service: DeploymentService;
+    preparer: ArtifactPreparationController;
+    runner: DeploymentRunController;
+    repairs: PreparationRepairer;
+    repository?: PreparationRepository;
+    reviewCapabilities?: (projectId: string, engine: string | null, workroomId?: string | null) => string | null;
+    repairConnections?: (projectId: string, environmentId: string) => Promise<void>;
+    background?: boolean;
+  }) { this.repository = options.repository ?? new PreparationRepository(); }
+  private key(projectId: string, environmentId: string): string { return `${projectId}/${environmentId}`; }
+  current(projectId: string, environmentId: string): PreparationJob | null { return this.repository.get(projectId, environmentId); }
+  /**
+   * Start, or rejoin, this deployment's preparation.
+   *
+   * `ai` is how a stalled preparation gets moving again on a different provider:
+   * a room whose engine has hit its usage window is not a reason to abandon the
+   * work, so the choice is re-read on every press and applied to the room the
+   * next repair uses.
+   */
+  start(projectId: string, environmentId: string, ai: { engine?: string | null; model?: string | null; effort?: string | null } = {}): PreparationJob {
+    const previous = this.current(projectId, environmentId);
+    if (previous && preparationActive(previous)) { this.schedule(previous); return previous; }
+    const now = Date.now();
+    const job: PreparationJob = {
+      id: `prep_${randomUUID()}`, projectId, environmentId,
+      state: "running", phase: "check", message: "Checking and preparing this deployment…",
+      createdAt: now, updatedAt: now, workroomId: previous?.workroomId ?? null,
+      waitingForRepair: false, repairs: 0, runId: null, planId: null, failure: null,
+      engine: ai.engine ?? previous?.engine ?? null,
+      model: ai.model ?? (ai.engine ? null : previous?.model ?? null),
+      effort: ai.effort ?? (ai.engine ? null : previous?.effort ?? null),
+    };
+    this.repository.save(job); this.schedule(job); return job;
+  }
+  /** Restart does not silently resume mutation authority; the user resumes with the button. */
+  recover(): void {
+    for (const job of this.repository.active()) {
+      job.state = "blocked"; job.message = "The agent restarted. Resume preparation to recheck its current state.";
+      this.repository.save(job);
+    }
+  }
+  close(): void { this.stopped = true; for (const timer of this.timers.values()) clearTimeout(timer); this.timers.clear(); }
+  async cancel(projectId: string, environmentId: string): Promise<PreparationJob | null> {
+    const job = this.current(projectId, environmentId);
+    if (!job || !preparationActive(job)) return job;
+    job.state = "cancelled"; job.message = "Preparation stopped.";
+    this.save(job);
+    if (job.workroomId) this.options.repairs.stop(job.workroomId);
+    if (job.runId) await this.options.runner.cancel(job.runId);
+    return job;
+  }
+  private save(job: PreparationJob): void {
+    const current = this.current(job.projectId, job.environmentId);
+    if (current && (current.id !== job.id || current.state === "cancelled")) return;
+    job.updatedAt = Date.now(); this.repository.save(job);
+  }
+  private schedule(job: PreparationJob): void {
+    if (this.stopped || this.options.background === false || !preparationActive(job)) return;
+    const key = this.key(job.projectId, job.environmentId);
+    if (this.timers.has(key)) return;
+    const timer = setTimeout(() => {
+      this.timers.delete(key);
+      void this.advance(job.projectId, job.environmentId).finally(() => {
+        const current = this.current(job.projectId, job.environmentId);
+        if (current) this.schedule(current);
+      });
+    }, 1500);
+    timer.unref(); this.timers.set(key, timer);
+  }
+  async advance(projectId: string, environmentId: string): Promise<void> {
+    const key = this.key(projectId, environmentId);
+    const pending = this.advancing.get(key);
+    if (pending) return pending;
+    const work = this.step(projectId, environmentId).catch((error: unknown) => {
+      const job = this.current(projectId, environmentId);
+      if (job && preparationActive(job)) {
+        job.state = "blocked";
+        job.message = error instanceof Error ? error.message : "Preparation failed. Check the preparation session.";
+        this.save(job);
+      }
+    });
+    this.advancing.set(key, work);
+    try { await work; } finally { this.advancing.delete(key); }
+  }
+  private live(job: PreparationJob): boolean {
+    const current = this.current(job.projectId, job.environmentId);
+    return !this.stopped && !!current && current.id === job.id && preparationActive(current);
+  }
+  private async repair(job: PreparationJob, checked: ReadinessResult): Promise<void> {
+    if (!this.live(job)) return;
+    const permissionGap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId);
+    if (permissionGap) {
+      job.state = "blocked"; job.phase = "check"; job.message = permissionGap;
+      this.save(job); return;
+    }
+    if (job.repairs >= 3) {
+      job.state = "blocked"; job.message = "Preparation needs more information. Open its session to review the remaining problem, then retry.";
+      this.save(job); return;
+    }
+    job.phase = "repair"; job.state = "running"; job.repairs++;
+    job.message = "Fixing deployment inputs and prerequisites in the preparation session…";
+    this.save(job);
+    job.workroomId = await this.options.repairs.start(job, checked);
+    job.waitingForRepair = true; job.failure = null; this.save(job);
+    if (!this.live(job)) this.options.repairs.stop(job.workroomId);
+  }
+  private async step(projectId: string, environmentId: string): Promise<void> {
+    const job = this.current(projectId, environmentId);
+    if (!job || !this.live(job)) return;
+    if (Date.now() - job.createdAt > 2 * 60 * 60_000) {
+      job.state = "blocked"; job.message = "Preparation paused after two hours. Review its session and resume when ready.";
+      this.save(job); if (job.workroomId) this.options.repairs.stop(job.workroomId); return;
+    }
+    if (job.waitingForRepair && job.workroomId) {
+      const state = this.options.repairs.status(job.workroomId);
+      if (state.busy || state.question) {
+        job.state = state.question ? "waiting-input" : "running";
+        job.message = state.question ? "Answer the question in the preparation session; preparation will continue automatically." : "Fixing deployment prerequisites…";
+        this.save(job); return;
+      }
+      job.waitingForRepair = false; job.state = "running";
+    }
+    const { service, preparer } = this.options;
+    if (job.planId && !job.runId) {
+      const approved = service.store.listRuns(projectId, environmentId).find((run) => run.planId === job.planId);
+      if (approved) job.runId = approved.runId;
+      else if (service.store.getPlan(job.planId).expiresAt > Date.now()) return;
+      else job.planId = null;
+    }
+    if (job.runId) {
+      const run = service.runView(job.runId);
+      if (!run.terminal) { this.save(job); return; }
+      if (run.state !== "succeeded") job.failure = `${job.phase === "build" ? "Build" : "Infrastructure preparation"} run ${job.runId} ended ${String(run.state)}. Inspect its events and repair the cause.`;
+      job.runId = null; job.planId = null; job.state = "running";
+    }
+    await this.options.repairConnections?.(projectId, environmentId);
+    const checked = await service.checkReadiness(projectId, environmentId, { preparationAvailable: true });
+    if (!this.live(job)) return;
+    const outstanding = checked.readiness.items.filter((item) => item.status !== "ready");
+    if (job.failure || outstanding.some((item) => item.action !== "prepare-artifact")) {
+      await this.repair(job, checked); return;
+    }
+    if (outstanding.some((item) => item.action === "prepare-artifact")) {
+      if (!checked.readiness.canMakeReady) { await this.repair(job, checked); return; }
+      job.phase = "build"; job.message = "Building and verifying the committed deployment artifact…"; this.save(job);
+      const existing = service.store.listRuns(projectId, environmentId).find((run) => run.runKind === "prepare" && !service.runView(run.runId).terminal);
+      const prepared = existing ? { runId: existing.runId } : await preparer.prepare({ projectId, environmentId });
+      job.runId = prepared.runId; this.save(job);
+      if (!this.live(job)) await this.options.runner.cancel(prepared.runId);
+      return;
+    }
+    const result = await service.createPlan(projectId, { environment: environmentId, operation: "reconcile" });
+    if (!this.live(job)) return;
+    const plan = service.store.getPlan(String(result.plan.id));
+    const document = plan.document as unknown as DeploymentPlanDocument;
+    if (plan.blocked) {
+      job.failure = document.blockers.map((item) => item.message).join("; ");
+      await this.repair(job, checked); return;
+    }
+    if (!document.actions.some((action) => action.sideEffecting)) {
+      job.state = "succeeded"; job.phase = "check"; job.message = "Ready to deploy. Source, dependencies, build and infrastructure have been checked.";
+      this.save(job); return;
+    }
+    // Deliberately never approves or queues infrastructure. The existing API binds the
+    // operator's review to this exact plan, then the coordinator follows that run.
+    job.phase = "infrastructure"; job.planId = plan.planId;
+    job.state = "awaiting-approval"; job.message = "Review and approve the infrastructure plan below; preparation will continue afterward.";
+    this.save(job);
+  }
+}

@@ -780,7 +780,9 @@ function openDrawer(p) {
     effort: $("#d-effort").value,
   }), $("#d-effort"));
 
-  $("#d-full").checked = !!p.aiFullAccess;
+  $("#d-full").checked = false;
+  $("#d-full").disabled = true;
+  $("#d-full").closest("label").title = "Project agent access is controlled in Capabilities → Agent permissions.";
   renderScopePicker(p);
   $("#d-deploy-staging").value = p.deployStaging || "";
   $("#d-deploy-production").value = p.deployProduction || "";
@@ -922,6 +924,11 @@ function emptyManagedDeploymentState() {
     error: null,
     run: null,
     poll: null,
+    preparation: null,
+    preparationPlan: null,
+    preparationPoll: null,
+    preparationSignature: "",
+    preparationEngine: null,
   };
 }
 
@@ -1234,6 +1241,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   WS.depTarget = "staging";
   WS.depArmed = false;
   clearDeploymentPoll();
+  clearPreparationPoll();
   WS.managedDeploy = emptyManagedDeploymentState();
   WS.pending = [];
   WS.sessionState = null;
@@ -1646,6 +1654,7 @@ function switchPane(pane) {
   WS.pane = pane;
   if (pane !== "deploy") {
     clearDeploymentPoll();
+    clearPreparationPoll();
     if (WS.depEs) {
       WS.depEs.close();
       WS.depEs = null;
@@ -2053,6 +2062,7 @@ function closeWorkspace(fromRoute = false) {
   disconnectPlanner();
   if (WS.depEs) WS.depEs.close();
   clearDeploymentPoll();
+  clearPreparationPoll();
   WS = {
     name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
     engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
@@ -2432,6 +2442,9 @@ function renderNotes() {
 }
 
 async function loadCapabilities(force = false) {
+  if (WS.name && !WS.chatOnly) void PsmAgentPermissions.render(document.querySelector("#agent-permissions"), document.querySelector("#cap-deployment-connections"), {
+    api: agentApi, project: currentProject(), onDeploy: () => switchPane("deploy"),
+  });
   if (!WS.name || WS.chatOnly || CAPS.loading || (!force && CAPS.catalog.length)) return;
   CAPS.loading = true;
   renderCapabilities();
@@ -3906,7 +3919,10 @@ function syncAiControls() {
     $(set.engine).value = WS.engine;
     $(set.model).value = WS.model;
     renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort, WS.name);
-    $(set.full).checked = WS.fullAccess;
+    const managed = WS.name !== "__workspace__";
+    $(set.full).checked = managed ? false : WS.fullAccess;
+    $(set.full).disabled = managed;
+    $(set.full).closest("label").title = managed ? "Access is controlled by project grants in Capabilities → Agent permissions." : "Workspace chat uses its separate access setting.";
   }
   renderScopeChip();
   renderAiModel();
@@ -3921,6 +3937,36 @@ function refreshAiModels() {
   );
 }
 
+/**
+ * Remember an AI selection where this conversation actually lives.
+ *
+ * A project keeps it in its overrides; a workroom keeps it on the room. Sending
+ * a room id to the project endpoint is how this used to fail silently — the
+ * PATCH 404s, the catch swallows it, and the picker springs back on reload with
+ * no sign anything went wrong.
+ */
+function rememberAiChoice({ engine, model, effort, fullAccess } = {}) {
+  if (WS.kind === "work" && WS.id) {
+    const body = {};
+    if (engine !== undefined) body.engine = engine;
+    if (model !== undefined) body.model = model;
+    if (effort !== undefined) body.effort = effort;
+    // A workroom is never handed the sandbox-off flag, so there is nothing to save.
+    if (!Object.keys(body).length) return Promise.resolve(false);
+    return agentApi(`/api/work-sessions/${encodeURIComponent(WS.id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((r) => r.ok).catch(() => false);
+  }
+  const body = {};
+  if (engine !== undefined) body.aiEngine = engine;
+  if (model !== undefined) body.aiModel = model;
+  if (effort !== undefined) body.aiEffort = effort;
+  if (fullAccess !== undefined) body.aiFullAccess = fullAccess;
+  return patchProject(WS.name, body);
+}
+
 function applyEngine(engine) {
   WS.engine = engine;
   WS.model = "";
@@ -3929,7 +3975,7 @@ function applyEngine(engine) {
   syncAiControls();
   refreshAiModels();
   usageSelectionChanged();
-  patchProject(WS.name, { aiEngine: WS.engine, aiModel: "", aiEffort: "" }); // remember per project
+  rememberAiChoice({ engine: WS.engine, model: "", effort: "" }); // remember per project or room
   fetchLimit(); // limits are per engine — re-check for the newly selected one
   if (aiPaneOpen()) connectAi(WS.name);
   scheduleSessionRefresh();
@@ -3941,7 +3987,7 @@ function applyModel(model) {
   WS.actualModel = null;
   syncAiControls();
   usageSelectionChanged();
-  patchProject(WS.name, { aiModel: WS.model, aiEffort: "" }); // remember per project
+  rememberAiChoice({ model: WS.model, effort: "" }); // remember per project or room
   if (aiPaneOpen()) connectAi(WS.name);
   scheduleSessionRefresh();
 }
@@ -3949,7 +3995,7 @@ function applyModel(model) {
 function applyEffort(effort) {
   WS.effort = effort;
   syncAiControls();
-  patchProject(WS.name, { aiEffort: WS.effort });
+  rememberAiChoice({ effort: WS.effort });
   if (aiPaneOpen()) connectAi(WS.name);
   scheduleSessionRefresh();
 }
@@ -3957,7 +4003,7 @@ function applyEffort(effort) {
 function applyFullAccess(fullAccess) {
   WS.fullAccess = fullAccess;
   for (const node of aiControlNodes("full")) node.checked = fullAccess;
-  patchProject(WS.name, { aiFullAccess: WS.fullAccess }); // remember per project
+  rememberAiChoice({ fullAccess: WS.fullAccess }); // remember per project
 }
 
 function setAiActivity(text) {
@@ -4541,6 +4587,11 @@ function clearDeploymentPoll(state = WS.managedDeploy) {
   if (state) { state.poll = null; state.readinessTimer = null; }
 }
 
+function clearPreparationPoll(state = WS.managedDeploy) {
+  if (state?.preparationPoll) clearTimeout(state.preparationPoll);
+  if (state) state.preparationPoll = null;
+}
+
 function invalidateDeploymentReadiness(state = WS.managedDeploy) {
   state.readiness = null;
   state.readinessEnvironment = null;
@@ -4574,16 +4625,18 @@ function renderDeploymentReadiness() {
   const outstanding = rows.filter((item) => item.status !== "ready");
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
   for (const [index, item] of rows.entries()) {
-    if (item.status === "ready" || !["connect", "review-source"].includes(item.action)) continue;
-    const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : "Review changes");
+    if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
+    const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : item.action === "review-capabilities" ? "Review permissions" : "Review changes");
     button.type = "button";
     button.onclick = () => item.action === "connect"
       ? $("#dep-connections-section").scrollIntoView({ behavior: "smooth", block: "start" })
-      : switchPane("changes");
+      : switchPane(item.action === "review-capabilities" ? "capabilities" : "changes");
     $("#dep-readiness").children[index]?.append(button);
   }
   const expired = readiness && Number(readiness.expiresAt) <= Date.now();
-  $("#dep-status").textContent = state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
+  const preparing = !!state.preparation?.active;
+  $("#dep-status").textContent = preparing ? state.preparation.message
+    : state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
     : state.loading ? "Checking deployment readiness…"
     : state.error ? "The check could not finish. Resolve the error and check again."
     : expired ? "Readiness has expired. Check again before deploying."
@@ -4593,10 +4646,27 @@ function renderDeploymentReadiness() {
   const busy = state.loading || !!state.preparationRunId || !!(state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state));
   $("#dep-discover").disabled = busy;
   $("#dep-discover").textContent = readiness ? "Check again" : "Check readiness";
+  // The button is no longer offered only for the steps psm can run unattended:
+  // preparation repairs what it can and asks for the rest, so anything short of
+  // ready is something it has a next move on.
   $("#dep-make-ready").hidden = !readiness || readiness.ready;
-  $("#dep-make-ready").disabled = busy || !readiness?.canMakeReady;
-  $("#dep-make-ready").title = readiness?.canMakeReady ? "Run the available preparation steps, then check again"
-    : "Complete the listed connection or source steps to enable preparation";
+  $("#dep-make-ready").disabled = state.loading || preparing;
+  $("#dep-make-ready").textContent = state.preparation && !preparing && state.preparation.state !== "succeeded"
+    ? "Resume preparation"
+    : "Make ready to deploy";
+  $("#dep-make-ready").title = preparing
+    ? "Preparation is already running"
+    : "Fix what psm can fix, build the release, and check again";
+  // Which AI clears the steps psm cannot do alone. It is offered beside the
+  // button because that is where the choice is made — a provider that has hit
+  // its usage window is a reason to switch, not a reason to give up on the run.
+  const engineWrap = $("#dep-prep-ai-wrap");
+  engineWrap.hidden = $("#dep-make-ready").hidden;
+  $("#dep-prep-ai").value = preparationEngine();
+  $("#dep-prep-ai").disabled = state.loading || preparing;
+  engineWrap.title = preparing
+    ? "Stop preparation to change the AI it uses"
+    : "The AI that fixes what psm cannot fix alone";
   $("#dep-approve").disabled = !deploymentReadyToApprove();
   $("#dep-approve").textContent = state.plan?.operation === "rollback" ? "Deploy rollback" : "Deploy";
   $("#dep-error").hidden = !state.error;
@@ -4768,18 +4838,8 @@ function renderManagedReleases(environment) {
   }
 }
 
-function renderDeploymentPlan(plan) {
-  const changed = WS.managedDeploy.plan?.digest !== plan?.digest;
-  WS.managedDeploy.plan = plan || null;
-  WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
-  const section = $("#dep-plan-section");
-  section.hidden = !plan;
-  if (!plan) { $("#dep-approve").disabled = true; return; }
-  $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
-  $("#dep-plan-meta").textContent = plan.expiresAt
-    ? `Exact plan · expires ${new Date(plan.expiresAt).toLocaleTimeString()}`
-    : "Exact plan ready for review";
-  const target = $("#dep-plan");
+/** One exact plan's actions, grouped by phase. Shared by the deploy plan and the preparation plan. */
+function renderPlanActions(target, plan) {
   target.replaceChildren();
   const grouped = new Map();
   for (const action of plan.actions || []) {
@@ -4798,6 +4858,20 @@ function renderDeploymentPlan(plan) {
     target.append(group);
   }
   if (!grouped.size) target.append(depText("div", "dep-empty", "No mutations are required."));
+}
+
+function renderDeploymentPlan(plan) {
+  const changed = WS.managedDeploy.plan?.digest !== plan?.digest;
+  WS.managedDeploy.plan = plan || null;
+  WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
+  const section = $("#dep-plan-section");
+  section.hidden = !plan;
+  if (!plan) { $("#dep-approve").disabled = true; return; }
+  $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
+  $("#dep-plan-meta").textContent = plan.expiresAt
+    ? `Exact plan · expires ${new Date(plan.expiresAt).toLocaleTimeString()}`
+    : "Exact plan ready for review";
+  renderPlanActions($("#dep-plan"), plan);
   const acknowledgements = plan.acknowledgements || [];
   $("#dep-ack-wrap").hidden = !acknowledgements.length;
   $("#dep-ack-copy").textContent = acknowledgements.map((item) => item.label || item.message || item.id).join(" ") || "I reviewed this exact plan.";
@@ -4895,6 +4969,7 @@ function renderManagedDeploy() {
   renderDeploymentPlan(WS.managedDeploy.plan);
   renderDeploymentRun(WS.managedDeploy.run || environment.latestRun || null);
   $("#dep-prepare").disabled = WS.managedDeploy.loading || !environment.canPrepare;
+  renderDeploymentPreparation();
   renderDeploymentReadiness();
 }
 
@@ -4927,6 +5002,12 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       state.plan = environment?.latestPlan || null;
       state.planEnvironment = state.plan ? state.environment : null;
       state.run = environment?.latestRun || null;
+      // Preparation belongs to one environment. Carrying the last one's job
+      // across the switch would show this environment somebody else's progress.
+      state.preparation = null;
+      state.preparationPlan = null;
+      state.preparationSignature = "";
+      state.preparationEngine = null;
     } else if (!state.run && environment?.latestRun) {
       state.run = environment.latestRun;
     }
@@ -4937,6 +5018,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
     }
     renderManagedDeploy();
     loadDeploymentConnectionSetup();
+    scheduleDeploymentPreparationPoll(0);
     const run = state.run;
     if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
   } catch {
@@ -5078,7 +5160,9 @@ async function checkDeploymentReadiness(makeReady = false) {
     const action = makeReady ? "make-ready" : "readiness";
     const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/${action}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ artifactId }),
+      // The engine goes with the press, so resuming after a usage limit is one
+      // choice and one click rather than an edit somewhere else first.
+      body: JSON.stringify(makeReady ? { artifactId, engine: preparationEngine() } : { artifactId }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not check deployment readiness");
@@ -5086,6 +5170,14 @@ async function checkDeploymentReadiness(makeReady = false) {
     state.readiness = body.readiness;
     state.readinessEnvironment = scope.environmentId;
     state.artifactId = body.readiness?.artifactId || null;
+    // Only "make ready" reports a preparation job. A plain readiness check must
+    // not clear the one already running underneath it.
+    if (body.preparation !== undefined) {
+      state.preparation = body.preparation;
+      state.preparationPlan = null;
+      state.preparationSignature = preparationStep(body.preparation);
+      if (body.preparation?.active) scheduleDeploymentPreparationPoll();
+    }
     const index = state.data.environments.findIndex((item) => item.id === scope.environmentId);
     if (body.environment && index >= 0) state.data.environments[index] = body.environment;
     renderDeploymentPlan(body.plan);
@@ -5103,6 +5195,146 @@ async function checkDeploymentReadiness(makeReady = false) {
       loadDeploymentConnectionSetup();
     }
   }
+}
+
+/**
+ * "Make ready to deploy", watched from the page.
+ *
+ * The button hands the whole preparation to psm and then this polls one cheap
+ * endpoint until it stops moving. Only a real transition — a new state or a new
+ * phase — costs a fresh readiness check, so the checklist beside it keeps step
+ * with the flow without rebuilding a plan every two seconds.
+ */
+const PREPARATION_PHASES = {
+  check: "Checking",
+  repair: "Repairing",
+  build: "Building",
+  infrastructure: "Preparing infrastructure for",
+};
+
+/** The AI preparation would use next: the operator's pick, else what it last ran, else the project's. */
+function preparationEngine() {
+  const state = WS.managedDeploy;
+  return state.preparationEngine || state.preparation?.engine || WS.engine || "claude";
+}
+
+function preparationStep(job) {
+  return job ? `${job.state}:${job.phase}` : "";
+}
+
+function scheduleDeploymentPreparationPoll(delay = 2000) {
+  const state = WS.managedDeploy;
+  clearPreparationPoll(state);
+  if (!state || WS.pane !== "deploy") return;
+  const scope = deploymentRequestScope({ environment: true });
+  state.preparationPoll = setTimeout(() => { void pollDeploymentPreparation(scope); }, delay);
+}
+
+async function pollDeploymentPreparation(scope) {
+  const state = scope.state;
+  state.preparationPoll = null;
+  if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
+  let body;
+  try {
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/preparation`);
+    if (!response.ok) throw new Error("unavailable");
+    body = await response.json();
+  } catch {
+    // A status read that fails is not a preparation that stopped; back off and
+    // keep watching rather than telling the operator it is over.
+    scheduleDeploymentPreparationPoll(5000);
+    return;
+  }
+  if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
+  const job = body.preparation || null;
+  const moved = preparationStep(job) !== state.preparationSignature;
+  state.preparation = job;
+  state.preparationPlan = body.plan || null;
+  state.preparationSignature = preparationStep(job);
+  if (body.run) renderDeploymentRun(body.run);
+  renderDeploymentPreparation();
+  renderDeploymentReadiness();
+  if (job?.active) scheduleDeploymentPreparationPoll();
+  if (moved) await checkDeploymentReadiness();
+}
+
+async function stopDeploymentPreparation() {
+  const scope = deploymentRequestScope({ environment: true });
+  const state = scope.state;
+  if (!scope.environmentId) return;
+  clearPreparationPoll(state);
+  $("#dep-prep-stop").disabled = true;
+  try {
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/preparation/cancel`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Preparation could not be stopped");
+    if (!deploymentRequestIsCurrent(scope)) return;
+    state.preparation = body.preparation || null;
+    state.preparationPlan = null;
+    state.preparationSignature = preparationStep(state.preparation);
+  } catch (error) {
+    if (deploymentRequestIsCurrent(scope)) state.error = error.message || "Preparation could not be stopped";
+  } finally {
+    $("#dep-prep-stop").disabled = false;
+    if (deploymentRequestIsCurrent(scope)) renderManagedDeploy();
+  }
+}
+
+/**
+ * Approve the one thing preparation will not do for itself.
+ *
+ * psm never approves or queues an infrastructure change: it builds the exact
+ * plan, shows it here, and waits. Approval is bound to this digest, so what
+ * runs is what is on the screen.
+ */
+async function approvePreparationInfrastructure() {
+  const scope = deploymentRequestScope({ environment: true });
+  const state = scope.state;
+  const plan = state.preparationPlan;
+  if (!plan || plan.blocked) return;
+  $("#dep-prep-approve").disabled = true;
+  try {
+    const body = await submitPlanApproval(plan, (plan.acknowledgements || []).map((item) => item.id));
+    if (!deploymentRequestIsCurrent(scope)) return;
+    renderDeploymentRun(body.run);
+    scheduleDeploymentPoll();
+    scheduleDeploymentPreparationPoll(500);
+  } catch (error) {
+    if (deploymentRequestIsCurrent(scope)) {
+      state.error = error.message || "The infrastructure plan could not be approved";
+      renderManagedDeploy();
+    }
+  } finally {
+    if (deploymentRequestIsCurrent(scope)) renderDeploymentPreparation();
+  }
+}
+
+function renderDeploymentPreparation() {
+  const state = WS.managedDeploy;
+  const job = state.preparation;
+  const section = $("#dep-preparation");
+  section.hidden = !job;
+  if (!job) return;
+  section.dataset.state = job.state;
+  $("#dep-prep-title").textContent = job.state === "succeeded" ? "This deployment is ready"
+    : job.state === "cancelled" ? "Preparation stopped"
+    : job.state === "blocked" ? "Preparation needs you"
+    : `${PREPARATION_PHASES[job.phase] || "Preparing"} this deployment`;
+  // Name the AI on the panel: when a run stops on a usage limit, the provider
+  // that stopped it is the first thing the operator needs to know.
+  $("#dep-prep-state").textContent = job.engine
+    ? `${String(job.state).replace(/-/g, " ")} · ${job.engine}`
+    : String(job.state).replace(/-/g, " ");
+  $("#dep-prep-message").textContent = job.message || "";
+  $("#dep-prep-failure").hidden = !job.failure;
+  $("#dep-prep-failure").textContent = job.failure || "";
+  const plan = job.state === "awaiting-approval" ? state.preparationPlan : null;
+  $("#dep-prep-plan").hidden = !plan;
+  if (plan) renderPlanActions($("#dep-prep-plan"), plan);
+  $("#dep-prep-approve").hidden = !plan;
+  $("#dep-prep-approve").disabled = !plan || !!plan.blocked;
+  $("#dep-prep-open").hidden = !job.workroomId;
+  $("#dep-prep-stop").hidden = !job.active;
 }
 
 async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
@@ -5136,6 +5368,33 @@ async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
   }
 }
 
+/**
+ * Approve one exact plan.
+ *
+ * The intent is minted and spent against the same digest the page is showing,
+ * so an approval can only ever apply to the plan that was actually reviewed —
+ * which is why both the Deploy button and the preparation flow go through here
+ * rather than each assembling the pair themselves.
+ */
+async function submitPlanApproval(plan, acknowledgementIds) {
+  const intentResponse = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approval-intents`, { method: "POST" });
+  const intentBody = await intentResponse.json().catch(() => ({}));
+  if (!intentResponse.ok) throw new Error(intentBody.error || "Could not create an approval intent");
+  const response = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      revision: plan.revision,
+      digest: plan.digest,
+      intent: intentBody.intent,
+      acknowledgementIds,
+    }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || "The plan could not be approved");
+  return body;
+}
+
 async function approveDeploymentPlan() {
   if (!deploymentReadyToApprove()) return;
   const scope = deploymentRequestScope({ environment: true, plan: true, artifact: true });
@@ -5148,22 +5407,7 @@ async function approveDeploymentPlan() {
   state.error = null;
   renderDeploymentReadiness();
   try {
-    const intentResponse = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approval-intents`, { method: "POST" });
-    const intentBody = await intentResponse.json().catch(() => ({}));
-    if (!intentResponse.ok) throw new Error(intentBody.error || "Could not create an approval intent");
-    if (!deploymentRequestIsCurrent(scope)) return;
-    const response = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        revision: plan.revision,
-        digest: plan.digest,
-        intent: intentBody.intent,
-        acknowledgementIds: acknowledgements.map((item) => item.id),
-      }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || "The plan could not be approved");
+    const body = await submitPlanApproval(plan, acknowledgements.map((item) => item.id));
     if (!deploymentRequestIsCurrent(scope)) return;
     renderDeploymentRun(body.run);
     scheduleDeploymentPoll();
@@ -5430,6 +5674,7 @@ $("#dep-envs").onclick = (e) => {
   if (!button || button.dataset.environment === WS.managedDeploy.environment) return;
   if (WS.managedDeploy.loading || WS.managedDeploy.preparationRunId) return;
   clearDeploymentPoll();
+  clearPreparationPoll();
   invalidateDeploymentReadiness();
   WS.managedDeploy.environment = button.dataset.environment;
   WS.managedDeploy.error = null;
@@ -5450,6 +5695,16 @@ $("#dep-artifact").onchange = (event) => {
   WS.managedDeploy.artifactId = event.target.value || null;
   invalidateDeploymentReadiness();
   renderManagedDeploy();
+};
+$("#dep-prep-ai").onchange = (event) => {
+  WS.managedDeploy.preparationEngine = event.target.value;
+  renderDeploymentReadiness();
+};
+$("#dep-prep-stop").onclick = stopDeploymentPreparation;
+$("#dep-prep-approve").onclick = approvePreparationInfrastructure;
+$("#dep-prep-open").onclick = () => {
+  const roomId = WS.managedDeploy.preparation?.workroomId;
+  if (roomId) openWorkroom(roomId);
 };
 $("#dep-approve").onclick = approveDeploymentPlan;
 $("#dep-cancel").onclick = cancelDeploymentRun;

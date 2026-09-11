@@ -6,7 +6,7 @@ export interface DeploymentReadinessItem {
   title: string;
   detail: string;
   status: "ready" | "action-required" | "blocked" | "preparing";
-  action: "prepare-artifact" | "connect" | "review-source" | "resolve-dependency" | "review-resource" | "configure-provider" | "review-policy" | null;
+  action: "review-capabilities" | "prepare-artifact" | "connect" | "review-source" | "resolve-dependency" | "review-resource" | "configure-provider" | "review-policy" | null;
   automatic: boolean;
   slot?: string;
 }

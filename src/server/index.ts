@@ -1,3 +1,6 @@
+import { RepositoryTools } from "./agent-repository-tools.ts";
+import { databaseFile } from "./db.ts";
+import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
 import express from "express";
 import type { Request, Response } from "express";
 import fs from "node:fs";
@@ -17,6 +20,8 @@ import type { Attachment, Capability, Override, Project } from "../types.ts";
 import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, transcript, type ProcKind } from "./procs.ts";
 import {
   activeSessions,
+  configureManagedAgents,
+  stopProjectAgents,
   aiLimit,
   clearLimit,
   aiState,
@@ -119,6 +124,8 @@ import { SecretBroker } from "./deploy/connections.ts";
 import { createDeploymentEngine } from "./deploy/engine.ts";
 import { defaultDeploymentAdapters } from "./deploy/executors.ts";
 import { defaultDeploymentSecretBackend } from "./deploy/keyring.ts";
+import { DeploymentPreparationController } from "./deploy/make-ready.ts";
+import { WorkroomPreparationRepairer } from "./deploy/repair-sessions.ts";
 import { DeploymentRuntimeAdapters } from "./deploy/runtime-adapters.ts";
 import { deploymentFingerprintKey, DeploymentSecretGenerationStore } from "./deploy/secrets.ts";
 import { deploymentStore } from "./deploy/store.ts";
@@ -894,6 +901,7 @@ local.patch("/api/projects/:name", (req, res) => {
   if (Object.keys(current).length) all[name] = current;
   else delete all[name];
   saveOverrides(all);
+  if (req.body?.aiExtraProjects !== undefined || req.body?.aiEngine !== undefined) stopAiSession(name);
   res.json({ ok: true, override: all[name] || null });
 });
 
@@ -2010,13 +2018,22 @@ local.get("/api/work-sessions/:id", (req, res) => {
   }
 });
 
-// Change who is in the room. The AI notices on its next turn: the scope it was
-// given is part of what its conversation was started with, so a different one
-// forks the thread rather than resuming with stale authority.
+// Changing membership stops the old scope immediately and starts fresh next turn.
 local.patch("/api/work-sessions/:id", (req, res) => {
   try {
-    const known = new Set(getProjects().map((project) => project.name));
-    const room = workSessions.setProjects(req.params.id, req.body?.projects, known);
+    let room = workSessions.get(req.params.id);
+    if (req.body?.projects !== undefined) {
+      const known = new Set(getProjects().map((project) => project.name));
+      room = workSessions.setProjects(req.params.id, req.body.projects, known);
+      stopAiSession(workSessionKey(room.id));
+    }
+    // The AI a room runs is a setting on the room, not a fact about the moment
+    // it was created — a conversation outlives any one provider's usage window.
+    if (req.body?.engine !== undefined || req.body?.model !== undefined || req.body?.effort !== undefined) {
+      const previousEngine = room.engine;
+      room = workSessions.setEngine(req.params.id, req.body);
+      if (room.engine !== previousEngine) stopAiSession(workSessionKey(room.id));
+    }
     res.json({ ok: true, workSession: workroomView(room) });
   } catch (err) {
     workroomError(res, err);
@@ -2060,12 +2077,120 @@ const deploymentArtifactPreparer = new GitHubArtifactPreparer({
   store: deploymentStore,
   broker: deploymentSecretBroker,
 });
+/**
+ * "Make ready to deploy", end to end.
+ *
+ * The coordinator drives the parts psm can do on the operator's behalf — repair,
+ * build, recheck — through the machinery that already exists for each, so none
+ * of it gains authority by being called from here. Repairs are an ordinary
+ * workroom in the ordinary sandbox; the build is the same GitHub Actions
+ * preparer the Prepare artifact button uses; and infrastructure is not touched
+ * at all, only offered to the operator as the exact plan they already approve.
+ */
+const agentPermissions = new AgentPermissionStore();
+const psmCodeRoot = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."));
+function permissionProject(id: string): PermissionProject {
+  const project = getProjects().find((entry) => entry.id === id || entry.name === id);
+  if (!project) throw new PermissionError("Project is no longer registered.");
+  if (!project.id) throw new PermissionError("Assign a project identity before granting agent permissions.");
+  return { id: project.id, name: project.name, path: fs.realpathSync(project.path) };
+}
+function preparationPermissionGap(projectId: string, engine: string | null, workroomId?: string | null): string | null {
+  const project = permissionProject(projectId);
+  if (project.path === psmCodeRoot) return "Review capabilities — PSM cannot modify its own running permission broker. Use a separate development checkout.";
+  const snapshot = agentPermissions.snapshot(project);
+  const gap = reviewAgentPermissions([snapshot], engine ?? (workroomId ? workSessions.get(workroomId).engine : null) ?? getProjects().find((item) => item.id === projectId)?.aiEngine ?? "claude", PREPARATION_OPERATIONS.map((entry) => entry.permission));
+  if (gap) return gap;
+  try { new RepositoryTools(snapshot, agentPermissions, [psmCodeRoot]).preflightCommit(); }
+  catch (error) { return `Review capabilities — ${error instanceof PermissionError ? error.message : "Managed Git needs an ordinary checkout with an existing commit, an attached branch and a configured Git author."}`; }
+  return null;
+}
+configureManagedAgents((scope) => {
+  const projects = getProjects();
+  const snapshots = [scope.cwd, ...scope.extraDirs].map((directory) => {
+    const root = fs.realpathSync(directory);
+    if (root === psmCodeRoot) throw new PermissionError("PSM cannot modify its own running permission broker. Use a separate development checkout.");
+    const project = projects.find((entry) => fs.realpathSync(entry.path) === root);
+    if (!project) throw new PermissionError("Every managed agent directory must be a registered project.");
+    return agentPermissions.snapshot(permissionProject(project.name));
+  });
+  const preparation = scope.name.startsWith("__psm_work__:")
+    && workSessions.get(scope.name.slice("__psm_work__:".length)).permissionProfile === "deployment-preparation";
+  const gap = reviewAgentPermissions(snapshots, scope.engine, preparation ? PREPARATION_OPERATIONS.map((entry) => entry.permission) : ["repo.read"]);
+  if (gap) throw new PermissionError(gap);
+  return { store: agentPermissions, snapshots, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+});
+local.use(agentPermissionRouter({ store: agentPermissions, project: permissionProject, changed: (project) => stopProjectAgents(project.path) }));
+
+const deploymentPreparation = new DeploymentPreparationController({
+  reviewCapabilities: preparationPermissionGap,
+  service: deploymentEngine.service,
+  preparer: deploymentArtifactPreparer,
+  runner: deploymentEngine.controller,
+  repairs: new WorkroomPreparationRepairer({
+    open: ({ projectId, title, objective, ai }) => {
+      const projects = getProjects();
+      const project = projects.find((item) => item.id === projectId);
+      if (!project) throw new Error("psm can no longer see this project");
+      const known = new Set(projects.map((item) => item.name));
+      // One member, not two: the room exists to fix this project's own
+      // deployment, and `preparation` is what lets a room be that small.
+      // With no explicit choice it inherits the project's own engine, so the
+      // repair reads like the rest of that project's AI work.
+      return workSessions.create(
+        {
+          title,
+          objective,
+          projects: [project.name],
+          engine: ai.engine ?? project.aiEngine,
+          model: ai.engine ? ai.model ?? null : ai.model ?? project.aiModel,
+          effort: ai.engine ? ai.effort ?? null : ai.effort ?? project.aiEffort,
+        },
+        known,
+        { preparation: true },
+      ).id;
+    },
+    engine: (roomId) => {
+      try { return workSessions.get(roomId).engine; } catch { return null; }
+    },
+    useAi: (roomId, ai) => { workSessions.setEngine(roomId, ai); },
+    send: (roomId, message) => {
+      const conversation = workroomConversation(roomId);
+      const result = aiSend(
+        conversation.name,
+        conversation.path,
+        conversation.engine,
+        conversation.model,
+        conversation.effort,
+        message,
+        false, // a preparation room is never handed the sandbox-off flag
+        conversation.extraContext,
+        conversation.extraDirs,
+      );
+      if (result.ok) conversation.onTurn?.();
+      return result;
+    },
+    // A queued turn is still work in flight: preparation must not read the gap
+    // between two turns as "the repair finished".
+    state: (roomId) => {
+      const state = aiState(workSessionKey(roomId));
+      return { busy: !!state.busy || state.queueDepth > 0, question: !!state.question };
+    },
+    stop: (roomId) => { stopAiSession(workSessionKey(roomId)); },
+  }),
+});
+// A restarted agent has no in-flight turns to resume, so every job that was
+// running when it stopped waits for the operator to press the button again.
+deploymentPreparation.recover();
+
 local.use(createDeploymentRouter({
+  reviewCapabilities: preparationPermissionGap,
   service: deploymentEngine.service,
   currentUser,
   localRequest,
   runner: deploymentEngine.controller,
   preparer: deploymentArtifactPreparer,
+  preparation: deploymentPreparation,
   streamTickets: deploymentStreamTickets,
   agentGeneration: () => agentSecret().createdAt,
 }));
@@ -2135,6 +2260,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     if (stopping) return;
     stopping = true;
     server.close();
+    deploymentPreparation.close();
     deploymentEngine.shutdown().finally(() => process.exit(0));
   });
 }
