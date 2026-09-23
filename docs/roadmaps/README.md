@@ -1,0 +1,212 @@
+# PSM delivery index — start here
+
+Updated 2026-09-23. This is the single execution order for the PSM plans in this
+repository. Detailed specifications remain in their linked documents. Follow
+this index to avoid restarting completed work, following obsolete architecture,
+or treating every document as a separate project needing another kickoff.
+
+## Current position
+
+| Field | Value |
+| --- | --- |
+| Next phase | **P00 — Establish the current baseline** |
+| Execution state | Planned; aggregation is complete, implementation of this sequence has not started. |
+| Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
+| First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
+| First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
+| Resume action | Inspect current changes and verification evidence, map remaining work to P01–P11, then start the first incomplete eligible phase. |
+
+The server-specific script is a tested preflight/reference, not a shipped
+onboarding feature. `psm-infra`, `psm-release` and the helper exist on the first
+target; the proposed command account has not been created. Its sudo requirement
+is a runtime setup dependency to address through the new feature, not a reason
+to stop building the feature.
+
+## How to execute continuously
+
+1. Read the current-position table and the first incomplete phase. Read its
+   linked specification and applicable repository instructions before editing.
+2. Check code and recorded evidence first. Credit already implemented work; do
+   not replay an old checklist simply because its boxes were never updated.
+3. Complete the phase's remaining work, run the relevant checks and record the
+   evidence here or in its linked status record. Track **implemented**, **tested**,
+   **committed**, **published** and **deployed** separately.
+4. Advance directly to the next eligible phase within the authorized scope.
+   Finishing a phase does not require another “shall I continue?” exchange.
+5. When a specific action lacks access, a required decision or external service,
+   record the exact blocked step and continue independent work. Return to it as
+   soon as the prerequisite is satisfied. Never mark blocked work complete.
+6. Before a turn/session ends, update the current phase, last verified result,
+   pending blocker and exact next action. Resume there rather than replan.
+
+This index organizes work; it does not mint infrastructure permissions or expand
+the current read-only Werewolf capability. Reuse existing user authorization and
+standing grants. Ask only when genuinely required for the specific next action,
+after completing its reviewable preparation and all independent work. Never
+request a password in chat. Production deployment, purchases and live data
+changes are not implied by aggregating these plans.
+
+Status vocabulary: **next**, **pending**, **in progress**, **blocked**, **verified**.
+Only verified acceptance closes a phase. Historical “implemented” or passing
+mock tests alone cannot close a live-deployment or hosted-isolation gate.
+
+## Ordered delivery queue
+
+Phase IDs below are the execution order. Numbers inside source documents are
+local to those documents; they are not additional competing sequences.
+
+| ID / status | Deliverable | Depends on | Acceptance and source |
+| --- | --- | --- | --- |
+| **P00 · next** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
+| **P01 · pending** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
+| **P02 · pending** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
+| **P03 · pending** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
+| **P04 · pending** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
+| **P05 · pending** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
+| **P06 · pending** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
+| **P07 · pending** | First complete hosted-to-staging deployment | P04–P06 | Adopt/verify the selected host roles, resolve enrollment/controller/App/credential prerequisites through the product flows, publish the intended source, build off-host and deploy through the managed engine. Verify DNS/TLS, exact served version, staging login/workspaces and rollback. Laptop disconnected. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
+| **P08 · pending** | General application deployment and operations | P07 | Frontend + API + worker + database recipes, configuration, migrations, diagnostics, restart/scale, backups and recovery work for a representative app. Typed integrations plus custom API/MCP/CLI adapters cover extensibility. [Application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
+| **P09 · pending** | Unattended maintenance and SaaS operations | P08 | Scheduled/monitor-triggered tasks honor standing grants, recover from interruption, avoid duplicate external mutations, and expose usage/retention limits. Prove restore and credential rotation; optional local/user-hosted runners share the protocol. [Runner requirements](agent-access-and-operations.md#runners-and-saas-operation), [machine lifecycle](machine-onboarding.md#ongoing-machine-management). |
+| **P10 · pending** | Complete project governance and agent usage visibility | P05, P09 | Audit the older governance plan against current rules/profile/skills features, then complete only missing applicability/readiness UI, rule provenance and actually observable usage reporting. No duplicate rules system or incompatible metadata migration. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
+| **P11 · pending** | Capability marketplace and conversational scaffolding | P05, P10 | Resolve registry ownership/review/update policy and the new-project conversation contract; deliver the deferred capabilities after assessing current implementation. Preserve attach/detach ownership and scope-based tool policy. [Attach plan, deferred phases 3–4](../attach-plan.md#11-phases). |
+
+P01 starts machine work first as requested. P03 is an initial-release dependency,
+not a later optional hosted phase. P06 can be completed earlier if hosted
+provisioning is blocked; it must close before P07. The hosted-independent parts of
+P05 (see its row) are the other parallel track while P03 waits on a decision.
+P10/P11 do not delay the first useful SaaS deployment.
+
+```mermaid
+flowchart LR
+  P00[Baseline] --> P01[Machine bootstrap]
+  P01 --> P02[Access policies]
+  P02 --> P03[Hosted runners]
+  P03 --> P04[Web onboarding]
+  P04 --> P05[Agent capabilities]
+  P02 -. hosted-independent parts .-> P05
+  P00 --> P06[App release fixes]
+  P05 --> P07[Verified staging release]
+  P06 --> P07
+  P07 --> P08[General app operations]
+  P08 --> P09[Unattended maintenance]
+  P09 --> P10[Governance and visibility]
+  P05 --> P10
+  P10 --> P11[Marketplace and scaffolding]
+  P05 --> P11
+```
+
+## Open decisions
+
+These belong to the user and gate the phases shown. Raise them during P00 so a
+phase does not discover them halfway through. Record each answer here, dated,
+and move it to the resolved list below.
+
+| Decision | Gates | Current evidence |
+| --- | --- | --- |
+| Register PSM with production Werewolf: create the `psm-web` CloudApplication row and choose `PSM_BUSINESS_ID` (the business PSM bills under; needs Stripe Connect onboarding). | P03 workspace-authenticated APIs, P06/P07 hosted sign-in | Production answers `503 app_not_configured`; `PSM_BUSINESS_ID` is "a decision, not a lookup" ([registration](../werewolf-psm-registration.md)). |
+| Where the hosted runner fleet runs: provider, isolation technology (containers, microVMs) and monthly budget. | P03 | Only ruled out so far: the shared staging droplet and the loopback agent API. |
+| How hosted runners authenticate to model providers unattended (API accounts rather than local CLI logins) and the resulting cost model. | P03, P05 hosted parts | Local CLI logins and OS keyrings are not cloud credentials ([runners](agent-access-and-operations.md#runners-and-saas-operation)). |
+| Whether the first target host carries production workloads, and therefore how first mutations there are confirmed. | P01 live tests, P04, P07 | P00 confirms what runs on `werewolf-alpha`. Until then, treat its first mutations as production-adjacent: confirm each specific operation even when a standing grant covers it. |
+
+## Known decisions and conflicts already resolved
+
+- **Hosting:** the current static web page/local-agent implementation is a
+  baseline. The user selected PSM-hosted runners for the new SaaS. The old
+  `hosted-psm-plan.md` is explicitly superseded and must not block this choice or
+  be used as an implementation-ready multi-tenant design.
+- **Setup:** manual `scp`/`sudo` instructions and the Todo-specific script are
+  references. The product must generate and execute setup or provide the guided
+  copyable initial handoff; manual setup is not the P04/P07 acceptance path.
+- **Permissions:** keep the current broker, audit, scope and revocation mechanisms,
+  but replace fixed per-call review requirements with selected standing policies
+  where authorized. Do not continue advertising the present narrow tool list as
+  unrestricted full access.
+- **Sign-in:** use the current one-web-application PKCE/Origin contract in
+  `werewolf-psm-registration.md`; do not rebuild the superseded native-client SSO.
+- **Evidence:** old notes disagree about whether host enrollment exists or the
+  connection root is stale. Inability to read a root-owned contract does not prove
+  absence. Inspect through authorized operations and compare observed revisions.
+  The 2026-09-23 account/helper check did not prove target enrollment contents.
+- **Workspace work:** older plans say auth is blocked; later status sections
+  record local fixes. Reproduce current failures before doing more work. The
+  transfer lock-expiry race was still recorded as open; verify current code.
+- **Existing architecture:** retain product/service boundaries for this delivery.
+  The separate API/DAO extraction proposal below is not a prerequisite.
+- **Instructions in older task briefs:** preserve applicable task-specific user
+  choices, including the recorded Opus preference for the focused workspace
+  follow-up. They do not silently select the engine for every new PSM phase or
+  authorize unrelated live changes.
+
+## Complete source index
+
+| Document | Role in this sequence |
+| --- | --- |
+| [Agent access and operations](agent-access-and-operations.md) | Active overall product/architecture specification; P01–P09. |
+| [Machine onboarding](machine-onboarding.md) | Active reusable web feature; P01–P04 and P07. |
+| [Agent permissions](agent-permissions.md) | Implemented baseline and runtime limitations to audit/extend in P02/P05. |
+| [Ecosystem integration](ecosystem-integration.md) | P00 context and product boundaries; dated readiness observations require recheck. |
+| [Workspace completion](workspace-completion-plan.md) | Existing integration acceptance; unfinished portions feed P06/P07. |
+| [Focused workspace follow-up](workspace-focused-followup.md) | Specific regression/browser/staging requirements; P06/P07. |
+| [Workspace implementation status](workspace-implementation-status.md) | Dated evidence and outstanding findings, not a second execution queue. |
+| [Deployment system](../deploy/DEPLOYMENT-SYSTEM.md) | Existing engine/spec, reusable across P01–P09; old runtime-readiness claims need recheck. |
+| [Connections](../deploy/CONNECTIONS.md) | Existing connection UX/contracts to integrate with P04. |
+| [Todo staging](../deploy/TODO-STAGING.md) | Target history/readiness; P00/P07. |
+| [Todo setup helper](../deploy/TODO-STAGING-SETUP.md) | Manual/operator reference; automate its applicable steps in P04/P07. |
+| [First machine runbook](../deploy/machines/todo-staging/README.md) | Actual 2026-09-23 preparation evidence and bootstrap reference; not the new product UX. |
+| [Prepared Todo target](../deploy/host-targets/werewolf__todo-staging-web.json) | Example pending contract, not live truth or approved configuration; confirm guessed values and observed UIDs. |
+| [Release controller](../deploy/controller/README.md) | P07 controller/artifact/key prerequisites and contract. |
+| [Publishing a new app](../deploy/PUBLISHING-A-NEW-APP.md) | Historical/manual release reference; managed release is the acceptance path. |
+| [Deployment ADR index](../deploy/adrs/README.md) | Existing decisions: monitoring, keyring, Go helper, controller revisions and retention. Revisit explicitly where hosted execution needs a new implementation. |
+| [Host helper](../../host-helper/README.md) | Existing privileged executor contract and package/build instructions; P01/P04. |
+| [Current PSM registration](../werewolf-psm-registration.md) | Current SSO/registration contract and test evidence; P03/P06. |
+| [Old SSO design](../werewolf-sso-plan.md) | Superseded. Historical context only. |
+| [Old SSO implementation prompt](../werewolf-sso-dapp-prompt.md) | Historical companion to the old SSO plan; do not execute against the current auth design. |
+| [Old hosted design](../hosted-psm-plan.md) | Superseded. Prior constraints/context only; no fresh implementation queue. |
+| [Attach/marketplace plan](../attach-plan.md) | Existing attach and plan-UI baseline; deferred marketplace/scaffolding in P11. |
+| [Capability catalog](../workspace-capabilities.json) | Current integration declarations; context for P05/P11, never authority to expand a service's access. |
+| [Provider maintenance](../provider-maintenance.md) | Current provider discovery/validation contract; P03/P05 and later upgrades. |
+| [Preserved governance plan](archive/project-governance.plan.json) | Snapshot of local structured plan revision 3; audit remaining work in P10. |
+| [Preserved API/DAO split](archive/api-dao-split.plan.json) | Separate deferred architecture proposal; see below. |
+
+## Separate deferred track: API / DAO extraction
+
+The [July API/DAO split plan](archive/api-dao-split.plan.json) is preserved and
+indexed so it is not lost. It is **not queued after P11 automatically**: the more
+recent ecosystem direction retains the existing service boundaries for this
+rollout. The old plan also contains production cutovers, naming/ownership
+decisions and data/billing-related assumptions outside the current PSM delivery.
+
+If the user later activates this track, first revalidate its premises and current
+auth/data model. Its internal order is decisions/backups → additive API endpoint
+→ repository/pipeline extraction → dashboard cutover → DAO identity/read-only MCP
+→ capability registration → documentation. Do not treat its saved `ai-reviewed`
+state or unchecked steps as approval to perform those changes.
+
+## Evidence and handoff template
+
+Append one entry per completed increment; update the current-position table too.
+Keep the source specifications stable unless a design decision actually changes.
+
+```text
+Phase / step:
+State: in progress | blocked | verified
+Changed files / repositories:
+Verification: command or scenario, result, date, evidence path
+Delivery state: working tree | committed <id> | published <ref> | deployed <target/version>
+Remaining blocker: exact operation, missing input/access, owning service
+Independent next work:
+Next action: one concrete step, with path/command where useful
+```
+
+For source changes, follow the relevant repository's checks and version rules;
+PSM generally uses `npm run typecheck` and `npm test`, plus browser checks for
+changed UX and host-helper tests for changed Go code. Build/release verification
+must use the actual intended artifact. Documentation-only indexing requires link
+and content verification, not deployment or a product version bump.
+
+### 2026-09-23 — Index prepared
+
+All plans found in `docs/` and the two local `.psm-plans/` documents are mapped
+above. The local structured plans have been preserved as tracked-file candidates
+under `archive/`; their saved statuses are historical, not updated implementation
+evidence. No roadmap phase is marked implemented by this aggregation.

@@ -1,0 +1,349 @@
+{
+  "id": "plan_house_rules_project_governance_20260722",
+  "project": "psm",
+  "title": "Implement Project-Aware House Rules And Agent Usage Visibility",
+  "status": "ai-reviewed",
+  "revision": 3,
+  "phases": [
+    {
+      "id": "phase_1_confirm_existing_systems",
+      "title": "Confirm Existing Systems",
+      "summary": "Verify the current PSM implementation points before designing changes, and make later work depend on the live code paths rather than assumptions.",
+      "steps": [
+        {
+          "id": "step_1_1",
+          "text": "Inspect house-rules.md, src/server/ai.ts, and houseRules() so changes build on the live global rules source and existing claude/codex prompt delivery paths.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_1_2",
+          "text": "Inspect src/server/attach.ts, AGENTS.md managed markers, and .psm-attachments-state.json so any future AGENTS.md writes preserve the existing psm:attachments region and ledger behavior.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_1_3",
+          "text": "Inspect src/types.ts, src/classify.ts, src/scan.ts, src/render.ts, overrides.json, PROJECTS.md generation, psm.config.json, .psm-plans, .psm-sessions.json, and relevant cockpit UI/routes before adding metadata, readiness output, or feature flags.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_1_4",
+          "text": "Scan accessible sibling projects for real workspace patterns in docs, versioning, CI/CD, deployment, AGENTS.md, README, package metadata, and PSM dotfiles; do not require ../vps1777 because it is not present in the current workspace.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_1_5",
+          "text": "Check whether Noteblock or another notes source is available through installed connectors or local files; if unavailable, record it as unsupported and avoid depending on it.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_1_6",
+          "text": "Use external conventions only as reference material: AGENTS.md, CLAUDE.md scoped memory, GitHub community health files, CODEOWNERS, Backstage catalog-info.yaml, devcontainer.json, EditorConfig, and OpenSSF Scorecard-style checks.",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "phase_2_core_rules_increment",
+      "title": "Core Rules Increment",
+      "summary": "Ship the first independently reviewable increment: house-rules visibility, typed feature gating, and verified per-engine rule delivery semantics.",
+      "steps": [
+        {
+          "id": "step_2_1",
+          "text": "Treat house-rules.md as the canonical workspace-level rules source and keep src/server/ai.ts as the delivery path; add parsing, validation, and source metadata only where they improve visibility without changing prompt behavior unexpectedly.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_2",
+          "text": "Empirically verify per-engine delivery semantics for claude and codex: how house-rules.md is delivered, how project AGENTS.md or CLAUDE.md is auto-loaded by the CLI, and whether the effective order differs by engine.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_3",
+          "text": "Document rule authority as engine-specific delivery facts rather than one global linear precedence; show attachment summaries as untrusted contextual inputs, not as a rules layer that can override repository, user, system, or developer instructions.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_4",
+          "text": "Add a concrete feature flag, features.houseRulesGovernance, to psm.config.json; extend Config in src/types.ts, loadConfig() in src/scan.ts, and the server/UI read path so the flag is actually available where cockpit features are gated.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_5",
+          "text": "Add a workspace house-rules view or read-only endpoint that shows house-rules.md content, source path, delivery status per engine, validation warnings, and any verified engine-specific caveats.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_6",
+          "text": "Add focused tests for house-rules parsing/validation, config typing/loading, server/UI flag visibility, and prompt-delivery metadata; run npm run typecheck and relevant tests for this increment.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_2_7",
+          "text": "Document house-rules.md as the canonical global rules source, the feature flag, and the verified delivery caveats before considering this increment complete.",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "phase_3_readiness_increment",
+      "title": "Readiness Increment",
+      "summary": "Ship the second independently reviewable increment: project practice profiles and a read-only readiness scanner that avoids blanket requirements.",
+      "steps": [
+        {
+          "id": "step_3_1",
+          "text": "Keep existing Status as lifecycle state and existing classify.ts category as content/display classification; add practiceProfile only as an applicability axis for readiness, derived from existing category/status signals where possible.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_2",
+          "text": "Define practice profiles such as software app, library, infrastructure/devops, documentation/content, business/workflow, data/analytics, website, archived, and prototype, with explicit mappings from current categories and statuses.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_3",
+          "text": "Create an artifact applicability catalog for README, AGENTS.md, versioning/release notes, package metadata, docs, tests, CI, deployment config, security policy, CODEOWNERS, devcontainer, EditorConfig, env examples, and runbooks, marking each as required, recommended, optional, not applicable, or unknown per profile.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_4",
+          "text": "Extend scanning to detect common files and signals: package manifests, lockfiles, build scripts, README/docs, AGENTS.md/CLAUDE.md, CI workflows, deployment configs, Docker/devcontainer files, changelogs/tags, security files, env examples, and PSM metadata.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_5",
+          "text": "Generate a per-project readiness matrix with applicable artifacts, missing items, reason text, recommended action, confidence, and artifact policy mode; default missing artifacts to recommend-or-ask, never auto-create.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_6",
+          "text": "Preserve existing overrides behavior and add only minimal override fields needed for practiceProfile or artifact policy in existing PSM config/overrides.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_7",
+          "text": "Avoid PROJECTS.md bloat: surface full readiness detail in the cockpit UI or a separate generated readiness report, and keep PROJECTS.md limited to a compact summary only if useful.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_8",
+          "text": "Add fixture projects and tests for profile inference, applicability rules, recommendation generation, overrides, not-applicable artifacts, and generated output stability; run npm run typecheck, npm test, and npm run build:md for this increment.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_3_9",
+          "text": "Document practice profiles, artifact applicability, recommendation modes, and where full readiness output is surfaced.",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "phase_4_project_rules_experience",
+      "title": "Project Rules Experience",
+      "summary": "Ship the third independently reviewable increment: UI controls and optional project-specific rules without corrupting existing AGENTS.md attachment management.",
+      "steps": [
+        {
+          "id": "step_4_1",
+          "text": "Add a per-project practices view showing status, existing category, inferred practiceProfile, compact readiness state, missing items, and recommended actions.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_2",
+          "text": "Add artifact policy controls for ignore, recommend, ask, and explicitly enabled auto-add, storing choices in existing PSM config/overrides rather than creating project files by default.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_3",
+          "text": "Do not introduce mandatory per-project .psm/ folders. Keep workspace-owned state in existing PSM files first, and support project-local PSM metadata later only if discovery shows a real need, preferably following the existing .psm-* convention unless a folder is justified.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_4",
+          "text": "Prefer storing project-specific rules in PSM metadata/config first; only offer AGENTS.md export when the user explicitly wants agent-visible project rules committed to that project.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_5",
+          "text": "If AGENTS.md export is implemented, write project-specific rules only through a separate PSM-managed marker region that does not overlap the existing psm:attachments region, and update attach.ts handling so attachment ledger/baseContent tracking is preserved.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_6",
+          "text": "Update planner/reviewer prompt assembly so plans can reference readiness data and include docs, versioning, tests, CI/CD, or DevOps work only when applicable to the project profile and user policy.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_7",
+          "text": "Add tests for artifact policy persistence, prompt assembly, AGENTS.md marker coexistence, and no-op behavior when export is disabled; run npm run typecheck and relevant tests for this increment.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_4_8",
+          "text": "Document artifact policy controls, project-rule storage choices, AGENTS.md export behavior, and the managed marker safety contract.",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "phase_5_agent_audit_spike",
+      "title": "Agent Audit Spike",
+      "summary": "Ship the skills/tool usage work only after a feasibility spike proves what telemetry is observable from spawned agent CLIs.",
+      "steps": [
+        {
+          "id": "step_5_1",
+          "text": "Inspect src/server/ai.ts process spawning for claude/codex, stream-json handling, session persistence, and current access to prompts, available skills, tools, connectors, capabilities, and psm markers.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_2",
+          "text": "Determine exactly what telemetry is observable without guessing: available skills injected into prompts, selected skills, tool calls, connector calls, failures, unavailable integrations, and unused tools.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_3",
+          "text": "If structured telemetry is available, persist only bounded redacted audit summaries by extending .psm-sessions.json with an audit field and MAX_PERSIST-style retention; do not store raw streams or unredacted prompts/tool arguments.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_4",
+          "text": "If .psm-sessions.json cannot safely hold bounded audit summaries, create a dedicated .psm-agent-telemetry.json store with the same retention cap, schema validation, and redaction rules before any write path is enabled.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_5",
+          "text": "If structured telemetry is not available, implement only an honest limited report showing available or injected capabilities and explicitly mark used/unused tracking as unsupported until the agent stream exposes it.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_6",
+          "text": "Add redaction rules for command arguments, connector metadata, file paths, prompts, and customer or money-moving data before persisting any audit summary.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_7",
+          "text": "After the spike, decide whether to ship a minimal generated report, a cockpit UI, or defer the full agent audit to a separate follow-up plan.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_8",
+          "text": "Add tests for observable telemetry, unavailable telemetry, retention caps, redaction, and unsupported Noteblock/connector cases; run npm run typecheck and relevant tests for this increment.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_5_9",
+          "text": "Document what the audit can and cannot prove, where telemetry is stored, retention behavior, and redaction guarantees.",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "phase_6_cross_cutting_safety",
+      "title": "Cross-Cutting Safety",
+      "summary": "Run final regression checks across shipped increments and keep rollout local/non-production unless explicitly approved.",
+      "steps": [
+        {
+          "id": "step_6_1",
+          "text": "Run full existing checks after all enabled increments: npm run typecheck, npm test, and npm run build:md; do not report lint unless a lint script is added separately.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_6_2",
+          "text": "Verify disabled-feature behavior with features.houseRulesGovernance off so existing PSM cockpit and generated markdown behavior remain unchanged where intended.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_6_3",
+          "text": "Verify enabled-feature behavior with features.houseRulesGovernance on using fixture projects and at least one real accessible workspace project.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_6_4",
+          "text": "Review generated output diffs for PROJECTS.md and any separate readiness/audit reports to ensure they are compact, useful, and do not expose sensitive data.",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "step_6_5",
+          "text": "Keep rollout local or non-production only; do not push or deploy to production without explicit confirmation.",
+          "done": false,
+          "children": []
+        }
+      ]
+    }
+  ],
+  "notes": "Revision 3 resolves the latest review by removing the single asserted precedence chain and replacing it with per-engine delivery verification before UI claims are made.,Attachment summaries are non-authoritative untrusted context and must be displayed outside the rules authority model.,Verification, docs, and feature gating are now included inside each independently reviewable increment rather than deferred to one terminal phase.,Full readiness detail should live in the cockpit UI or a separate generated report; PROJECTS.md should remain a compact human-oriented rundown.,Telemetry storage is bounded: prefer a redacted audit field in .psm-sessions.json with MAX_PERSIST-style retention, falling back to .psm-agent-telemetry.json only if needed.,features.houseRulesGovernance must be typed in src/types.ts, loaded in src/scan.ts, and exposed to the server/UI read path before it is used for gating.,Do not require ../vps1777, do not depend on Noteblock access, and do not introduce mandatory per-project .psm/ folders.,Existing verification commands are npm run typecheck, npm test, and npm run build:md.",
+  "createdAt": 1784732123817,
+  "updatedAt": 1784732525655,
+  "review": {
+    "revision": 3,
+    "summary": "Revision 3 is in good shape and resolves the prior round: it replaces the single asserted precedence chain with empirical per-engine delivery verification (step_2_2), frames attachment summaries as untrusted non-authoritative context (step_2_3), folds tests/docs/feature-gating into each independently reviewable increment, bounds telemetry storage to a redacted .psm-sessions.json audit field or a capped .psm-agent-telemetry.json fallback, keeps PROJECTS.md compact, and correctly types the feature flag through src/types.ts + src/scan.ts + the server/UI read path. Ordering across increments is sound (readiness before the project-rules UI and planner-prompt integration). The main remaining concern is that step_4_6 changes agent-facing planner/reviewer prompt assembly while the feature flag is described only as gating 'cockpit features' — the flag must also gate that agent-behavior change, and the disabled-state verification should assert prompt parity. A few tasks (prompt-integration mechanism, gitignore for the new telemetry file, explicit server/UI run) could be made more concrete.",
+    "issues": [
+      {
+        "severity": "warning",
+        "message": "Feature-flag coverage gap: step_4_6 modifies planner/reviewer prompt assembly (agent-facing behavior, assembled in src/server/ai.ts around initialPlanningPrompt / the reviewer prompt), but features.houseRulesGovernance is described as gating 'cockpit features.' If the flag only gates UI, turning the feature off would still alter what planning/reviewer agents receive. Make the flag also gate the prompt-assembly changes, and extend step_6_2 to explicitly verify agent prompt parity when the flag is off (not just cockpit UI and generated markdown).",
+        "phaseId": "phase_4_project_rules_experience",
+        "stepId": "step_4_6"
+      },
+      {
+        "severity": "info",
+        "message": "The integration mechanism is underspecified: state how readiness data reaches the planner/reviewer prompt — computed at session start from a cwd scan vs. precomputed/cached — and which code path in ai.ts consumes it. Without naming the data path this remains a vague task and risks recomputing a full workspace scan on every planning turn.",
+        "phaseId": "phase_4_project_rules_experience",
+        "stepId": "step_4_6"
+      },
+      {
+        "severity": "info",
+        "message": "If the fallback .psm-agent-telemetry.json store is created, add it to .gitignore alongside the existing .psm-* dotfiles (the branch already modifies .gitignore) so redacted-but-local telemetry is never accidentally committed. Note the audit-field-in-.psm-sessions.json option inherits that file's existing ignore status, but the new file does not.",
+        "phaseId": "phase_5_agent_audit_spike",
+        "stepId": "step_5_4"
+      },
+      {
+        "severity": "info",
+        "message": "step_6_3 implies but does not state running the app. Add an explicit end-to-end check (npm run server, then load the house-rules view and per-project practices view) so the new cockpit UI is actually exercised against a real project, not only unit-tested — the existing checks (typecheck/test/build:md) do not cover the server/UI render path.",
+        "phaseId": "phase_6_cross_cutting_safety",
+        "stepId": "step_6_3"
+      }
+    ],
+    "reviewedAt": 1784732525655
+  }
+}

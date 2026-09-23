@@ -1,0 +1,332 @@
+{
+  "id": "api-dao-split-2026-07-20",
+  "project": "werewolf-dapp",
+  "title": "Split werewolf-dapp into <api-name> (dedicated API service) and <dao-name> (rebranded DAO project), both MCP-callable",
+  "status": "ai-reviewed",
+  "revision": 1,
+  "phases": [
+    {
+      "id": "p0",
+      "title": "Phase 0 — Decisions, freeze, safety net",
+      "summary": "Prod untouched. Lock naming and WLF-ledger scope as ADRs, commit in-flight work so history extraction doesn't lose it, and close the backup gap before any infra change.",
+      "steps": [
+        {
+          "id": "p0s1",
+          "text": "Naming ADR: choose <api-name>/<dao-name> (Janus/Athena or werewolf-api/werewolf-dao); centralize branding in new server/config/branding.js so a later rename is cheap",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p0s2",
+          "text": "WLF ledger ADR (owner sign-off): wlf.js/wlfService is an off-chain loyalty ledger called from 9 ERP controllers — it STAYS in the API; dao-project gets on-chain scope only, redemption bridge documented as future work",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p0s3",
+          "text": "Commit the uncommitted AiProject.workspaceProject WIP to dev with server tests green (else git filter-repo silently drops it)",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p0s4",
+          "text": "Droplet backup (hard gate): pull-only rsync of .env (both envs), uploads/, published-sites/, nginx vhosts, pm2 dump; mongodump of Atlas prod; store off-droplet and restore-test one file per set; write restore runbook",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p0s5",
+          "text": "Snapshot droplet config into repo: commit captured nginx vhosts as docs and add server/ecosystem.config.js (pm2 config currently droplet-only)",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p1",
+      "title": "Phase 1 — Additive api.werewolf.solutions vhost",
+      "summary": "Canonical API domain exists before any code moves: DNS + nginx vhosts proxying to the existing pm2 apps. Zero app change, seconds-fast rollback.",
+      "steps": [
+        {
+          "id": "p1s1",
+          "text": "DNS A records: api.werewolf.solutions and api-staging.werewolf.solutions → droplet IP",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p1s2",
+          "text": "nginx vhosts + certbot: api.→127.0.0.1:5000, api-staging.→5100; existing vhosts and Stripe webhook URL untouched",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p1s3",
+          "text": "Verify staging then prod: curl health + ws_sk_ endpoint on new hosts; old URLs, /sites/*, dashboard login still work; docs name api. as canonical (no consumer changes yet)",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p2",
+      "title": "Phase 2 — Extract <api-name> repo and move the deploy pipeline",
+      "summary": "git filter-repo (server/, mcp/, docs/, .notes) preserving history, server/ kept as subdirectory so rsync paths stay byte-identical; deploys target the SAME droplet dirs and pm2 apps — droplet runtime unchanged, no new processes.",
+      "steps": [
+        {
+          "id": "p2s1",
+          "text": "Freeze server/+mcp/ changes in werewolf-dapp for the extraction window",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s2",
+          "text": "Create <api-name> repo via git clone --no-local + git filter-repo; verify full history (git log --follow server/app.js), WIP commit present, tree diff vs werewolf-dapp server/ empty",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s3",
+          "text": "New repo CI: existing deploy.yml minus client build; ADD --exclude 'public/build' to rsync (protects the live dashboard until Phase 3); first run tests-only with deploy disabled",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s4",
+          "text": "Mandatory manual rsync -azn --delete dry-run vs staging: near-empty transfer list, no deletions of uploads/published-sites/.env/public/build",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s5",
+          "text": "Enable staging deploy (dev → werewolf-dapp-staging, same pm2 app); smoke: JWT login, ws_sk_ call, pk endpoint, dashboard, /sites/*",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s6",
+          "text": "Disable server rsync/pm2 in werewolf-dapp deploy.yml — new repo becomes sole writer to droplet server dirs",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p2s7",
+          "text": "Prod deploy from new repo; smoke: dashboard login, handymanservices key, Stripe test webhook, /sites/<tenant>, /sdk, /uploads fetch. Rollback = revert werewolf-dapp deploy.yml and push",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p3",
+      "title": "Phase 3 — werewolf-dapp becomes dashboard-only (nginx static)",
+      "summary": "The only user-visible cutover: werewolf.solutions serves the React dashboard as static files from nginx; /api/, /sites/, /sdk/, /uploads/ keep proxying to the node app. Same-origin preserved ⇒ zero CORS/auth change (auth verified cookie-free).",
+      "steps": [
+        {
+          "id": "p3s1",
+          "text": "New static deploy.yml in werewolf-dapp: client typecheck+build, rsync client/dist → ~/werewolf-dashboard[-staging]/; VITE_PROD_API_URL stays unset (same-origin /api/v1)",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p3s2",
+          "text": "Flip STAGING vhost to static root + try_files, keep location proxies to :5100; full pass: login, forced refresh-token cycle, WLF widget, builder page, uploads, /sites/*, SPA deep-link hard reload",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p3s3",
+          "text": "Flip PROD vhost after ≥1 day staging soak; rerun prod smoke set. Rollback = restore Phase-0 vhost snapshot + nginx reload",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p3s4",
+          "text": "Remove server/ + mcp/ + server scripts from werewolf-dapp; README → 'dashboard + landing; API lives in <api-name>'; client build + Actions green",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p3s5",
+          "text": "After prod soak: remove SPA/static serving from server/app.js in API repo and drop the public/build rsync exclude (until then it is the rollback path)",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p4",
+      "title": "Phase 4 — <dao-name>: rebrand dao-project + read-only MCP",
+      "summary": "Rename repo, keep Foundry tree/submodules untouched, no HTTP backend created. New viem-based stdio MCP server, strictly read-only (no signers/keys). Nothing touches prod.",
+      "steps": [
+        {
+          "id": "p4s1",
+          "text": "Rename dao-project → <dao-name> on GitHub (redirects preserved); update README/CLAUDE.md and local remotes",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p4s2",
+          "text": "Add mcp/ dir with stdio server (@modelcontextprotocol/sdk + zod + viem): get_deployments (broadcast/**/run-latest.json), get_abi (out/), get_token_stats + cheap Staking/TokenSale reads; env <DAO_NAME>_RPC_URL; no walletClient anywhere",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p4s3",
+          "text": "Tests: node --test for broadcast/ABI parsers (mutation-checked), stdio initialize/tools-list/tools-call smoke, one live Sepolia read",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p4s4",
+          "text": "Docs scope note + ADR pointer: off-chain ledger lives in <api-name> /api/v1/wlf; on-chain WLF token here; bridge/redemption future",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p5",
+      "title": "Phase 5 — MCP consolidation + psm capability registration",
+      "summary": "API MCP gets renamed env vars with back-compat and the api. default URL; both servers registered in psm's capability catalog so any workspace project can attach them; MCP tool scope stays disciplined per docs/10-mcp-spec.md.",
+      "steps": [
+        {
+          "id": "p5s1",
+          "text": "werewolf-mcp.mjs: <API_NAME>_API_URL||WEREWOLF_API_URL (same for _API_KEY), default → https://api.werewolf.solutions/api/v1; root 'mcp' npm script; keep tool set to site-builder tools (next expansion must come from the shared copilot registry)",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p5s2",
+          "text": "Verify stdio smoke against staging with old env name, then new name",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p5s3",
+          "text": "Add <api-name> and <dao-name> entries to psm/docs/workspace-capabilities.json (stdio, npm-script, requiredEnv); usage strings state write-risk posture; attach to a sandbox project and confirm generated .mcp.json tools work in Claude Code",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p5s4",
+          "text": "De-stub docs/10-mcp-spec.md: current tools, env names, psm registration, registry-sharing rule; record still-open per-business-key vs operator-scope question",
+          "done": false,
+          "children": []
+        }
+      ]
+    },
+    {
+      "id": "p6",
+      "title": "Phase 6 — Workspace + docs consistency",
+      "summary": "psm overrides + regenerated PROJECTS.md, architecture docs, READMEs across all touched projects, and consumer guidance — leaving the workspace internally consistent.",
+      "steps": [
+        {
+          "id": "p6s1",
+          "text": "psm/overrides.json: add <api-name>; rewrite werewolf-dapp (dashboard+landing); rename dao-project key → <dao-name> with stack 'Solidity, Foundry' (fixes stale Hardhat label); npm run build:md and commit PROJECTS.md",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p6s2",
+          "text": "API repo docs: 02-architecture topology, runbooks (backups, nginx layout, static dashboard deploy); regenerate concatenated docs.md",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p6s3",
+          "text": "READMEs: <api-name> root, werewolf-dapp dashboard-only, <dao-name> rebrand+MCP, mcp/README env back-compat",
+          "done": false,
+          "children": []
+        },
+        {
+          "id": "p6s4",
+          "text": "handymanservices: document WEREWOLF_API_URL=https://api.werewolf.solutions/api/v1 in .env.example/README (old default keeps working; no forced deploy)",
+          "done": false,
+          "children": []
+        }
+      ]
+    }
+  ],
+  "notes": "Key verification finding: wlf.js/wlfService is an OFF-CHAIN loyalty ledger embedded in 9 ERP controllers + Stripe handlers — recommended to stay in the API (Phase-0 ADR needs owner sign-off), so 'web3/DAO surface' = contracts/dapp/chain-reads only; no HTTP endpoints move. Safety invariants: droplet backups gate everything (known M1 gap); no new pm2 processes on the 1 GB droplet; old werewolf.solutions/api/v1 base URL, /sites, /sdk, /uploads and the Stripe webhook URL keep working indefinitely (cutover is additive); dashboard stays same-origin so no CORS/auth changes (auth verified cookie-free, localStorage tokens); every infra change staged on dev/staging before prod with documented rollback (vhost snapshots, revertible deploy.yml). Naming (Janus/Athena vs descriptive) deliberately deferred to Phase 0 with branding centralized in server/config/branding.js. Full plan: ~/.claude/plans/psm-dedicated-planning-session-sharded-sunbeam.md",
+  "createdAt": 1784550283653,
+  "updatedAt": 1784550464582,
+  "review": {
+    "revision": 1,
+    "summary": "The additive-domain and staged cutover approach is sound, but this revision is not yet execution-ready. It needs corrections around environment naming, backup validation, repository extraction prerequisites, deployment ownership, and static-release safety.",
+    "issues": [
+      {
+        "severity": "blocking",
+        "message": "Repository names are being reused as environment-variable prefixes. The descriptive choices contain hyphens, making names such as WEREWOLF-API_API_URL invalid in normal shell assignment. The naming ADR must define separate, stable, env-safe identifiers (for example WEREWOLF_API and WEREWOLF_DAO) and an explicit placeholder substitution table covering repo names, package names, PM2 names, paths, and environment variables.",
+        "phaseId": "p0",
+        "stepId": "p0s1"
+      },
+      {
+        "severity": "blocking",
+        "message": "The hard backup gate is not adequately verified: restoring one file cannot validate a mongodump. Specify encryption and access controls for copied secrets, checksums/manifests, retention and destination ownership, then restore the Mongo dump into an isolated disposable database and verify representative documents, indexes, and counts before infrastructure changes begin.",
+        "phaseId": "p0",
+        "stepId": "p0s4"
+      },
+      {
+        "severity": "warning",
+        "message": "Literal nginx and PM2 captures may include environment values, credentials, host details, or certificate material. Require sanitization and a secret scan before committing; keep deployable templates and a separately protected inventory of secret/runtime values.",
+        "phaseId": "p0",
+        "stepId": "p0s5"
+      },
+      {
+        "severity": "blocking",
+        "message": "The stated filter-repo allowlist excludes essential root and CI files, including .github/workflows/deploy.yml that p2s3 expects to modify, and potentially package manifests, lockfiles, .gitignore, licenses, test configuration, and runtime metadata. Add an explicit extraction manifest or bootstrap step and verify all retained paths—not only server/—against a recorded source commit.",
+        "phaseId": "p2",
+        "stepId": "p2s2"
+      },
+      {
+        "severity": "blocking",
+        "message": "The new repository cannot run CI or deploy until repository creation, access/ownership, branch protection, Actions environments, secrets/variables, deploy keys, and branch-to-environment mappings are established. These prerequisites and a non-deploying workflow validation must precede the staging handoff.",
+        "phaseId": "p2",
+        "stepId": "p2s3"
+      },
+      {
+        "severity": "warning",
+        "message": "The sole-writer handoff is vulnerable to concurrent or queued workflows and leaves an ambiguous rollback path. Freeze all extracted/deployment inputs (including docs and workflows), drain or cancel queued runs, add deployment concurrency controls, record the equivalent source SHAs, and define an atomic enable-new/disable-old sequence with a known-good rollback tag or artifact.",
+        "phaseId": "p2",
+        "stepId": "p2s6"
+      },
+      {
+        "severity": "warning",
+        "message": "Rsyncing a Vite build with --delete directly into the live nginx root is non-atomic and can briefly pair an old index with deleted assets. Deploy versioned release directories, validate the built output, switch an nginx-root symlink atomically, and retain at least one previous release for rollback.",
+        "phaseId": "p3",
+        "stepId": "p3s1"
+      },
+      {
+        "severity": "warning",
+        "message": "The nginx acceptance criteria should explicitly cover websocket Upgrade forwarding, exact location precedence for /api/, /sites/, /sdk/, and /uploads/, cache policy differences between index.html and hashed assets, nginx -t before reload, and log/health monitoring after each flip.",
+        "phaseId": "p3",
+        "stepId": "p3s2"
+      },
+      {
+        "severity": "warning",
+        "message": "GitHub renaming alone does not establish the intended local workspace identity. Decide whether the local dao-project directory is renamed, update every path-based reference and PSM discovery key accordingly, and verify submodule URLs plus CI badges/workflows; otherwise the Phase 5 capability path and Phase 6 override rename may reference different project identities.",
+        "phaseId": "p4",
+        "stepId": "p4s1"
+      },
+      {
+        "severity": "warning",
+        "message": "“Cheap Staking/TokenSale reads” is too vague for a stable MCP contract. Enumerate tool names, supported chains/contracts, address-resolution rules, schemas, block-tag behavior, timeouts, and errors; expose allowlisted parsed deployment/ABI data rather than arbitrary paths or raw broadcast contents.",
+        "phaseId": "p4",
+        "stepId": "p4s2"
+      },
+      {
+        "severity": "warning",
+        "message": "A live Sepolia read should be an opt-in integration smoke, not part of deterministic mandatory tests. Gate it on RPC availability, assert the expected chain ID and deployed bytecode, and keep fixture-based parser/protocol tests runnable offline.",
+        "phaseId": "p4",
+        "stepId": "p4s3"
+      },
+      {
+        "severity": "warning",
+        "message": "Capability registration depends on final repository names and stable local paths, and may depend on PSM already discovering the new/renamed project keys. Move or split the relevant p6s1 inventory update ahead of attachment testing, and verify that generated .mcp.json files reference environment placeholders without materializing secret values.",
+        "phaseId": "p5",
+        "stepId": "p5s3"
+      }
+    ],
+    "reviewedAt": 1784550464582
+  }
+}
