@@ -170,6 +170,20 @@ function writeAuthority(ref: string, available: Availability): Verdict {
   return found;
 }
 
+/**
+ * Whether the caller may manage resources (machines, their access) owned by a
+ * workspace. Personal is always the caller's own; a business needs a current
+ * role that can manage it, confirmed by the account API just now.
+ */
+export async function manageAuthority(ref: string): Promise<Verdict> {
+  if (!isWorkspaceRef(ref)) return { ok: false, status: 400, error: "Unknown workspace" };
+  if (sameRef(ref, PERSONAL)) return { ok: true, entry: PERSONAL_ENTRY };
+  const found = resolveWorkspace(ref, await availableWorkspaces());
+  if (!found.ok) return found;
+  if (!found.entry.canManage) return { ok: false, status: 403, error: "Your role in that workspace cannot manage machines" };
+  return found;
+}
+
 export function workspaceRouter(deps: { getProjects: () => Project[] }): express.Router {
   const router = express.Router();
   const fail = (res: express.Response, status: number, error: string) => res.status(status).json({ error });

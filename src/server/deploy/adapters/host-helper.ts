@@ -172,7 +172,7 @@ function knownHost(profile: ConnectionProfile): string {
   return `${value.trim()}\n`;
 }
 
-async function collect(child: ReturnType<typeof spawn>, maximum: number, signal?: AbortSignal): Promise<{ stdout: Buffer; stderr: string; code: number | null }> {
+export async function collect(child: ReturnType<typeof spawn>, maximum: number, signal?: AbortSignal): Promise<{ stdout: Buffer; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];

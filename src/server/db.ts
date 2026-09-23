@@ -402,6 +402,25 @@ const MIGRATIONS: readonly string[] = [
      WHERE id IN (SELECT json_extract(document, '$.workroomId') FROM deployment_preparations);`,
   `CREATE TABLE agent_tool_requests (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, document TEXT NOT NULL CHECK(json_valid(document)));`,
   `CREATE TABLE source_publication_plans (id TEXT PRIMARY KEY, document TEXT NOT NULL CHECK(json_valid(document)));`,
+  // Machines are registered once per owning workspace; access is granted per
+  // project environment and role, so one project never inherits another's.
+  `CREATE TABLE machines (
+     id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, host TEXT NOT NULL, port INTEGER NOT NULL,
+     revision INTEGER NOT NULL, document TEXT NOT NULL CHECK(json_valid(document)),
+     UNIQUE(workspace_id, host, port)
+   );
+   CREATE TABLE machine_access (
+     id TEXT PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE RESTRICT,
+     project_id TEXT NOT NULL, environment_id TEXT NOT NULL, role TEXT NOT NULL,
+     revision INTEGER NOT NULL, document TEXT NOT NULL CHECK(json_valid(document)),
+     UNIQUE(machine_id, project_id, environment_id, role)
+   );
+   CREATE TABLE machine_setup_jobs (
+     id TEXT PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(id) ON DELETE RESTRICT,
+     access_id TEXT NOT NULL, state TEXT NOT NULL, updated_at INTEGER NOT NULL,
+     document TEXT NOT NULL CHECK(json_valid(document))
+   );
+   CREATE INDEX machine_setup_jobs_machine ON machine_setup_jobs(machine_id, updated_at DESC);`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

@@ -1,7 +1,8 @@
 import { SourcePublicationController } from "./deploy/source-publication.ts";
 import { ManagedMcpTools } from "./agent-mcp-tools.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import { databaseFile } from "./db.ts";
+import os from "node:os";
+import { databaseFile, db } from "./db.ts";
 import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
 import express from "express";
 import type { Request, Response } from "express";
@@ -18,7 +19,11 @@ import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
 import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
 import { acceptsPairedOrigins, describeMode, psmMode, scansImplicitly } from "../mode.ts";
-import { workspaceRouter } from "./workspaces.ts";
+import { loadState as loadWorkspaceState, manageAuthority, projectWorkspaceRef, workspaceRouter } from "./workspaces.ts";
+import { machineRouter } from "./machines/api.ts";
+import { MachineService } from "./machines/service.ts";
+import { SshMachineTransport } from "./machines/ssh.ts";
+import { MachineStore } from "./machines/store.ts";
 import { ensureProjectId } from "../identity.ts";
 import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
@@ -2285,6 +2290,36 @@ local.use(createDeploymentRouter({
   preparation: deploymentPreparation,
   streamTickets: deploymentStreamTickets,
   agentGeneration: () => agentSecret().createdAt,
+}));
+
+/* ---------- deployment machines ---------- */
+
+const machines = new MachineService({
+  store: new MachineStore(db),
+  deployments: deploymentStore,
+  broker: deploymentSecretBroker,
+  transport: new SshMachineTransport({ broker: deploymentSecretBroker }),
+});
+// A setup this process was running when it stopped is failed as uncertain; its
+// retry re-inspects the server rather than replaying a privileged step.
+machines.recoverInterrupted();
+local.use(machineRouter({
+  service: machines,
+  localRequest,
+  project: (id) => {
+    const project = getProjects().find((entry) => entry.id === id);
+    return project?.id ? { id: project.id, name: project.name, workspaceId: projectWorkspaceRef(loadWorkspaceState(), project.id) } : null;
+  },
+  // Only a business workspace needs the Werewolf session; personal never
+  // waits on a remote refresh.
+  authorize: (ref) => ref === "personal"
+    ? manageAuthority(ref)
+    : sessionContext()
+      .then(({ accessToken }) => new Promise<Awaited<ReturnType<typeof manageAuthority>>>((resolve, reject) => {
+        runWithSession(accessToken, () => { manageAuthority(ref).then(resolve, reject); });
+      }))
+      .catch(() => manageAuthority(ref)),
+  actor: () => `local:${os.userInfo().username}`,
 }));
 
 // The one line that decides whether this process can touch the machine.
