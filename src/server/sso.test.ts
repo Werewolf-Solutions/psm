@@ -61,9 +61,11 @@ process.env.PORT = "4317";
 
 const {
   SSO_CALLBACK_PATH,
+  approvedSsoCallback,
   resetSsoAvailability,
   ssoAvailability,
   ssoConfig,
+  ssoOriginForCallback,
   ssoRedirectUri,
   werewolfWebOrigin,
 } = await import("./sso.ts");
@@ -188,5 +190,75 @@ test("an explicit web origin beats anything discovered", () => {
   } finally {
     if (previous === undefined) delete process.env.WEREWOLF_WEB_ORIGIN;
     else process.env.WEREWOLF_WEB_ORIGIN = previous;
+  }
+});
+
+/* ---- which callback psm will sign an exchange for ----
+ *
+ * These matter more than they look. psm derives the `Origin` it presents to
+ * dapp from this URI (server/session.ts), so "whatever the body said" would let
+ * the caller pick the origin psm asserts. The reference is the callback psm
+ * itself issues for the same request, which agentGuard has already pinned to
+ * loopback or the one paired origin.
+ */
+
+test("the callback psm issues is the callback psm will redeem", () => {
+  const request = req({ origin: "http://localhost:4317" });
+  // The page reports what it used, and it matches — this is the normal path.
+  assert.equal(
+    approvedSsoCallback(request, "http://localhost:4317/auth/callback"),
+    "http://localhost:4317/auth/callback",
+  );
+  // Nothing claimed at all: psm's own answer stands in.
+  assert.equal(approvedSsoCallback(request, ""), "http://localhost:4317/auth/callback");
+});
+
+test("a callback psm does not issue is refused before dapp is asked", () => {
+  const request = req({ origin: "http://localhost:4317" });
+  for (const claimed of [
+    "https://attacker.example/auth/callback",          // a foreign origin outright
+    "http://127.0.0.1:4317/auth/callback",             // registered, but not this page's
+    "http://localhost:4317/auth/callback/../evil",     // path games on the right origin
+    "http://localhost:4317@attacker.example/callback", // the userinfo trick
+    "http://localhost:9999/auth/callback",             // an unregistered port
+    "javascript:alert(1)",
+  ]) {
+    assert.throws(
+      () => approvedSsoCallback(request, claimed),
+      /psm issues/,
+      `${claimed} should not be redeemable here`,
+    );
+  }
+});
+
+test("a pinned public origin is the only callback that psm then accepts", () => {
+  process.env.PSM_PUBLIC_ORIGIN = "https://psm.example.com";
+  try {
+    // Behind a proxy the browser's own origin is the public one, so the page
+    // reports that and nothing else is accepted — including the local host it
+    // is actually being served on.
+    const request = req({ origin: "http://localhost:4317" });
+    assert.equal(
+      approvedSsoCallback(request, "https://psm.example.com/auth/callback"),
+      "https://psm.example.com/auth/callback",
+    );
+    assert.throws(() => approvedSsoCallback(request, "http://localhost:4317/auth/callback"), /psm issues/);
+  } finally {
+    delete process.env.PSM_PUBLIC_ORIGIN;
+  }
+});
+
+test("the origin psm presents is the callback's own, and nothing else", () => {
+  assert.equal(ssoOriginForCallback("http://localhost:4317/auth/callback"), "http://localhost:4317");
+  assert.equal(
+    ssoOriginForCallback("https://psm.werewolf.solutions/auth/callback"),
+    "https://psm.werewolf.solutions",
+  );
+  // localhost and 127.0.0.1 are different strings to dapp's exact match, and so
+  // they are different origins here too.
+  assert.equal(ssoOriginForCallback("http://127.0.0.1:4317/auth/callback"), "http://127.0.0.1:4317");
+
+  for (const bad of ["", "not-a-url", "javascript:alert(1)", "file:///auth/callback"]) {
+    assert.throws(() => ssoOriginForCallback(bad), /not a usable callback URL|is an http\(s\) URL/);
   }
 });

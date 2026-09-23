@@ -778,6 +778,8 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
 .dep-error { margin: 12px 22px 0; padding: 10px 12px; color: #f85149; border: 1px solid currentColor; border-radius: 8px; }
 .dep-prep-ai { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
 .dep-prep-ai select { padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.dep-prep-ai #dep-prep-model { max-width: 190px; }
+.dep-prep-ai .model-catalog-status { display: none; }
 .dep-prep {
   margin: 12px 22px 0; padding: 12px 14px; border: 1px solid var(--accent); border-radius: 9px; background: var(--bg-soft);
 }
@@ -1840,9 +1842,17 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .agent-permissions { padding: 20px; border-bottom: 1px solid var(--line); }
 .agent-permissions h2 { margin: 0 0 8px; }
 .cap-section-description, .permission-row p, .permission-row small, .permission-connection small { color: var(--muted); }
-.permission-row { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.permission-summary, .permission-category-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.permission-summary { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); }
+.permission-summary > div:first-child, .permission-category-head > div:first-child { flex: 1; min-width: 0; }
+.permission-summary h3, .permission-category-head h3 { margin: 0 0 5px; }
+.permission-summary p, .permission-category-head p { margin: 0; }
+.permission-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+.permission-category { margin-top: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.permission-row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.permission-row:last-child { border-bottom: 0; padding-bottom: 0; }
 .permission-row > div { flex: 1; min-width: 0; }
-.permission-row h3, .permission-connection h3 { margin: 0 0 6px; font-size: 14px; }
+.permission-row h4, .permission-connection h3 { margin: 0 0 6px; font-size: 14px; }
 .permission-row p { margin: 0 0 6px; }
 .permission-row .btn { flex-shrink: 0; }
 .permission-status { color: var(--accent); }
@@ -1851,8 +1861,20 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .permission-connection { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .permission-cause { margin-top: 12px; padding: 12px; background: var(--bg-soft); border-radius: 6px; }
 .permission-cause pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
-@media (max-width: 640px) { .permission-row { flex-wrap: wrap; } .permission-row > div { flex-basis: 100%; } }
+@media (max-width: 640px) {
+  .permission-summary, .permission-category-head, .permission-row { align-items: flex-start; flex-wrap: wrap; }
+  .permission-summary > div, .permission-category-head > div, .permission-row > div { flex-basis: 100%; }
+}
 
 .ws-capabilities > .agent-permissions, .ws-capabilities > .cap-toolbar { flex-shrink: 0; }
 .ws-capabilities > .cap-body { flex: none; min-height: 240px; }
 .ws-capabilities .cap-list { overflow-y: visible; }
+
+/* Workspace selectors (web/workspaces.js) — same footprint as the other header buttons. */
+.workspace-select { max-width: 200px; cursor: pointer; }
+/* The list on screen is incomplete or unverified — say so in the control itself,
+   so "Personal only" never passes for a confirmed answer. Its title explains. */
+.workspace-select.workspace-degraded {
+  border-color: var(--st-paused);
+  color: var(--st-paused);
+}

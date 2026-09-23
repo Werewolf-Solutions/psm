@@ -41,6 +41,7 @@
 
   const APP_KEY = "psm";
   const CALLBACK_PATH = "/auth/callback";
+  const AUTH_REQUEST_MS = 8_000;
   /** Must match a registered redirect URI exactly — web clients are exact-match. */
   const redirectUri = () => `${location.origin}${CALLBACK_PATH}`;
 
@@ -117,9 +118,23 @@
 
   const authUrl = (action) => `${API_BASE}/apps/${APP_KEY}/auth/${action}`;
 
+  /**
+   * Authentication is part of page startup, so a browser/network policy that
+   * silently drops the request must not leave the whole cockpit loading forever.
+   */
+  async function timedFetch(url, init = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_MS);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   /** Every direct auth call needs the cookie, which is cross-origin in production. */
   const post = (url, body, headers) =>
-    fetch(url, {
+    timedFetch(url, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json", ...(headers || {}) },
@@ -128,7 +143,7 @@
 
   /** The same call, but to psm's own agent, which holds the cookie for us. */
   const postToAgent = (path, body) =>
-    fetch(path, {
+    timedFetch(path, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -145,7 +160,7 @@
   async function checkRegistered() {
     let res;
     try {
-      res = await fetch(
+      res = await timedFetch(
         `${API_BASE}/apps/${APP_KEY}/public?redirectUri=${encodeURIComponent(redirectUri())}`,
         { headers: { Accept: "application/json" } },
       );
@@ -346,7 +361,7 @@
     } else if (accessToken) {
       // Revokes server-side and clears the cookie. Best effort — a failure here
       // must not leave the page thinking it is still signed in.
-      await fetch(authUrl("logout"), {
+      await timedFetch(authUrl("logout"), {
         method: "POST",
         credentials: "include",
         headers: { Authorization: `Bearer ${accessToken}` },

@@ -12,12 +12,36 @@
  * httpOnly `ws_app_rt_psm` cookie. The stand-in below enforces that exactly as
  * werewolf-dapp does: the cookie is the *only* accepted source on refresh
  * (appSsoController.refreshAppSession), and it rotates on every use.
+ *
+ * It also enforces dapp's **origin pin** for a web client. Because those cookie
+ * endpoints hand back a bearer token, dapp requires the caller's `Origin` to be
+ * one of the application row's registered redirect origins
+ * (appSessionCookie.isOriginAllowed) — and an absent Origin is not one of them.
+ * A browser sets that header itself; psm is a server and has to send it, derived
+ * from the callback the sign-in actually used. The stand-in refuses exactly as
+ * dapp does, so a psm that sends no Origin fails these tests rather than only
+ * failing against the real thing.
  */
 import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-const calls: Array<{ path: string; body: any; auth?: string; cookie?: string }> = [];
+/**
+ * The `psm` row's redirect origins, as bootstrap-psm.js registers them. dapp
+ * derives its accepted Origins from exactly this list.
+ */
+const REGISTERED_ORIGINS = [
+  "https://psm.werewolf.solutions",
+  "http://localhost:8080",
+  "http://localhost:4317",
+  "http://127.0.0.1:4317",
+];
+
+/** The callback this psm issues, and the origin psm therefore presents. */
+const CALLBACK = "http://localhost:4317/auth/callback";
+const ORIGIN = "http://localhost:4317";
+
+const calls: Array<{ path: string; body: any; auth?: string; cookie?: string; origin?: string }> = [];
 let refreshCount = 0;
 let failNextRefresh = false;
 /** Play dapp's `web` client type: cookie in, cookie out, nothing in the body. */
@@ -33,6 +57,7 @@ const dapp = http.createServer((req, res) => {
       body: raw ? JSON.parse(raw) : null,
       auth: req.headers.authorization as string,
       cookie: req.headers.cookie as string,
+      origin: req.headers.origin as string,
     });
     const send = (status: number, payload: unknown, setCookie?: string) => {
       res.writeHead(status, {
@@ -41,6 +66,14 @@ const dapp = http.createServer((req, res) => {
       });
       res.end(JSON.stringify(payload));
     };
+    /* dapp's rule, transcribed: for a web client the Origin must be the origin
+     * of one of the row's registered redirect URIs, and "" is not one. */
+    const originAllowed = () => {
+      if (!webMode) return true; // only web clients are pinned
+      const origin = String(req.headers.origin || "");
+      return REGISTERED_ORIGINS.includes(origin);
+    };
+
     // A web client's refresh token is never in the JSON — it is in the cookie.
     const mintCookie = () => {
       issuedCookie = `ws_app_rt_psm=refresh-r${refreshCount}`;
@@ -49,6 +82,11 @@ const dapp = http.createServer((req, res) => {
 
     if (req.url === "/apps/psm/auth/exchange") {
       const body = raw ? JSON.parse(raw) : {};
+      // dapp collapses an origin failure into the same generic 401 as a bad
+      // code — no oracles — so psm sees only "sign-in failed".
+      if (!originAllowed()) {
+        return send(401, { success: false, message: "Invalid or expired authorization code" });
+      }
       if (body.code !== "good-code") {
         return send(401, { success: false, message: "Invalid or expired authorization code" });
       }
@@ -67,6 +105,10 @@ const dapp = http.createServer((req, res) => {
     }
 
     if (req.url === "/apps/psm/auth/refresh") {
+      // Refresh is the one route where dapp says why: 403, not 401.
+      if (!originAllowed()) {
+        return send(403, { success: false, message: "Application origin is not allowed" });
+      }
       if (failNextRefresh) return send(401, { success: false, message: "Refresh token is invalid" });
       if (webMode) {
         // Exactly dapp's rule: for a web client the cookie is the only source,
@@ -261,6 +303,7 @@ test("refresh presents the cookie, and keeps the rotated one", async () => {
     { user: { id: "user-1" }, tokens: { accessToken: "access-x1", expiresIn: -10 } },
     API,
     first,
+    ORIGIN,
   );
   assert.equal((await sessionContext()).accessToken, "access-r2");
 
@@ -279,6 +322,7 @@ test("refresh presents the cookie, and keeps the rotated one", async () => {
     { user: { id: "user-1" }, tokens: { accessToken: "access-r2", expiresIn: -10 } },
     API,
     issuedCookie,
+    ORIGIN,
   );
   assert.equal((await sessionContext()).accessToken, "access-r3");
 });
@@ -323,4 +367,115 @@ test("a dapp with no cookie transport still refreshes, from the body", async () 
   // The rotated token from the body is kept, so the next refresh is not a replay.
   openSession(authResult(-10), API);
   assert.equal((await sessionContext()).accessToken, "access-r2");
+});
+
+/* ---- the Origin dapp pins a web client to ---- */
+
+test("the exchange presents the callback's origin, which is what dapp accepts", async () => {
+  webMode = true;
+  const { user } = await exchangeCode({
+    code: "good-code",
+    codeVerifier: "verifier",
+    redirectUri: CALLBACK,
+    device: { id: "device-1", name: "psm", platform: "test" },
+  });
+  assert.equal(user.id, "user-1");
+
+  const exchange = calls.at(-1)!;
+  assert.equal(exchange.origin, ORIGIN, "no Origin at all is what dapp refused");
+  assert.ok(
+    REGISTERED_ORIGINS.includes(exchange.origin!),
+    "and it has to be a registered one, not any string psm felt like sending",
+  );
+});
+
+test("the origin is retained on the session and presented again on refresh", async () => {
+  webMode = true;
+  await exchangeCode({
+    code: "good-code",
+    codeVerifier: "verifier",
+    redirectUri: CALLBACK,
+    device: { id: "device-1", name: "psm", platform: "test" },
+  });
+  const opened = calls.at(-1)!;
+  calls.length = 0;
+
+  // Age the real session out — this is an actual refresh against the stand-in,
+  // not a hand-built record, so the retained origin is what is under test.
+  openSession(
+    { user: { id: "user-1" }, tokens: { accessToken: "access-x1", expiresIn: -10 } },
+    API,
+    issuedCookie,
+    opened.origin!,
+  );
+  assert.equal((await sessionContext()).accessToken, "access-r2", "refresh must actually succeed");
+
+  const refresh = calls.at(-1)!;
+  assert.equal(refresh.path, "/apps/psm/auth/refresh");
+  assert.equal(refresh.origin, ORIGIN, "the same origin the session was opened with");
+});
+
+test("a session carrying no origin cannot refresh — dapp answers 403", async () => {
+  webMode = true;
+  // The pre-fix shape: a session opened without an origin to remember. dapp
+  // refuses it, and psm reports signed-out rather than looping.
+  openSession(
+    { user: { id: "user-1" }, tokens: { accessToken: "access-x1", expiresIn: -10 } },
+    API,
+    "ws_app_rt_psm=refresh-r1",
+  );
+  assert.equal(await currentUser(), null);
+  assert.equal(calls.at(-1)?.origin, undefined, "it had none to send");
+});
+
+test("signing out presents the same origin as the rest of the session", async () => {
+  webMode = true;
+  await exchangeCode({
+    code: "good-code",
+    codeVerifier: "verifier",
+    redirectUri: CALLBACK,
+    device: { id: "device-1", name: "psm", platform: "test" },
+  });
+  await signOut();
+  const logout = calls.at(-1)!;
+  assert.equal(logout.path, "/apps/psm/auth/logout");
+  assert.equal(logout.origin, ORIGIN);
+});
+
+test("the legacy body transport carries an Origin too", async () => {
+  // dapp builds without the cookie do not pin the origin, but psm sends the
+  // same header either way — one code path, and it is already correct when that
+  // build gains the cookie transport.
+  webMode = false;
+  await exchangeCode({
+    code: "good-code",
+    codeVerifier: "verifier",
+    redirectUri: "https://psm.werewolf.solutions/auth/callback",
+    device: { id: "device-1", name: "psm", platform: "test" },
+  });
+  assert.equal(calls.at(-1)?.origin, "https://psm.werewolf.solutions");
+
+  // and the hosted origin refreshes under that same origin. The exchange above
+  // already spent counter 1, so the rotated token here is r2.
+  openSession(authResult(-10), API, null, "https://psm.werewolf.solutions");
+  assert.equal((await sessionContext()).accessToken, "access-r2");
+  assert.equal(calls.at(-1)?.origin, "https://psm.werewolf.solutions");
+});
+
+test("a callback that is not a usable http(s) URL never reaches dapp", async () => {
+  const device = { id: "device-1", name: "psm", platform: "test" };
+  for (const redirectUri of [
+    "javascript:alert(1)//auth/callback",
+    "not-a-url",
+    "",
+    "file:///auth/callback",
+  ]) {
+    await assert.rejects(
+      () => exchangeCode({ code: "good-code", codeVerifier: "v", redirectUri, device }),
+      /not a usable callback URL|is an http\(s\) URL/,
+      `${redirectUri || "(empty)"} should be refused locally`,
+    );
+  }
+  assert.equal(calls.length, 0, "psm must not ask dapp to vouch for a callback it made up");
+  assert.equal(await currentUser(), null);
 });

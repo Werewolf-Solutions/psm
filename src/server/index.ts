@@ -18,6 +18,7 @@ import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
 import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
 import { acceptsPairedOrigins, describeMode, psmMode, scansImplicitly } from "../mode.ts";
+import { workspaceRouter } from "./workspaces.ts";
 import { ensureProjectId } from "../identity.ts";
 import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
@@ -87,7 +88,7 @@ import {
   sessionContext,
   signOut,
 } from "./session.ts";
-import { ssoAvailability, ssoConfig, ssoRedirectUri } from "./sso.ts";
+import { approvedSsoCallback, ssoAvailability, ssoConfig } from "./sso.ts";
 import { runWithSession } from "../store.ts";
 import { subscriptionUsage } from "./usage.ts";
 import { modelCatalog } from "./models.ts";
@@ -180,14 +181,6 @@ app.use(agentGuard({
 }));
 app.use(express.json({ limit: "2mb" }));
 
-// Resolve the signed-in session once per request and carry its Werewolf token,
-// so cloud calls act on the owner's behalf without keeping a session of their own.
-app.use((_req, _res, next) => {
-  sessionContext()
-    .then(({ accessToken }) => runWithSession(accessToken, next))
-    .catch(() => runWithSession(null, next));
-});
-
 /* ---- Sign in with Werewolf (authorization code + PKCE) ----
  * The browser runs the flow — the same web/auth.js the hosted page runs, against
  * the one `psm` application row. It comes back to /auth/callback (served by the
@@ -199,9 +192,11 @@ app.post("/api/auth/exchange", async (req, res) => {
     const { user } = await exchangeCode({
       code: String(req.body?.code || ""),
       codeVerifier: String(req.body?.codeVerifier || ""),
-      // The page reports the callback it actually used; dapp exact-matches it
-      // against the code it minted, so a mismatch is refused there.
-      redirectUri: String(req.body?.redirectUri || ssoRedirectUri(req)),
+      /* The page reports the callback it actually used, and dapp exact-matches
+       * it against the code it minted. psm checks it here as well, because the
+       * Origin it presents to dapp is derived from this URI — forwarding it
+       * unchecked would hand the caller that choice. See approvedSsoCallback. */
+      redirectUri: approvedSsoCallback(req, String(req.body?.redirectUri || "")),
       device: {
         id: deviceFingerprint(String(req.headers["user-agent"] || "psm")),
         name: "psm",
@@ -431,6 +426,20 @@ local.get("/api/runtime/services", async (req, res) => {
 
 /* ---------- Werewolf-hosted PSM Cloud ---------- */
 
+/**
+ * Only cloud calls need the Werewolf access token in request context.
+ *
+ * This used to be global middleware, which meant serving `/`, JavaScript, and
+ * every local API call first tried to refresh an expired Werewolf session. If
+ * that remote request stalled, the local cockpit could not even reload. Keep
+ * remote authentication off the page-serving and machine-control paths.
+ */
+app.use("/api/cloud", (_req, _res, next) => {
+  sessionContext()
+    .then(({ accessToken }) => runWithSession(accessToken, next))
+    .catch(() => runWithSession(null, next));
+});
+
 function cloudError(res: express.Response, err: unknown) {
   const typed = err as Error & { status?: number; code?: string; data?: unknown };
   return res.status(typed.status || 500).json({
@@ -439,6 +448,10 @@ function cloudError(res: express.Response, err: unknown) {
     data: typed.data,
   });
 }
+
+// Personal/business workspaces. Under /api/cloud so it inherits the session
+// context above; personal answers work with no session at all.
+app.use("/api/cloud", workspaceRouter({ getProjects }));
 
 app.get("/api/cloud/status", async (_req, res) => {
   const runtime = (await runtimeServices()).werewolf;
@@ -2220,8 +2233,11 @@ const deploymentPreparation = new DeploymentPreparationController({
         { preparation: true },
       ).id;
     },
-    engine: (roomId) => {
-      try { return workSessions.get(roomId).engine; } catch { return null; }
+    ai: (roomId) => {
+      try {
+        const room = workSessions.get(roomId);
+        return { engine: room.engine, model: room.model, effort: room.effort };
+      } catch { return null; }
     },
     useAi: (roomId, ai) => { workSessions.setEngine(roomId, ai); },
     send: (roomId, message) => {

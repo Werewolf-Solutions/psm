@@ -106,6 +106,65 @@ function pageOrigin(req?: express.Request): string {
   return `http://localhost:${Number(process.env.PORT || 4317)}`;
 }
 
+/** A callback psm will not sign an exchange for. 400, not 401: it never left. */
+export class SsoCallbackError extends Error {
+  status = 400;
+}
+
+/**
+ * The callback psm will accept for a code exchange, given what the page claims.
+ *
+ * The page reports the URI it actually used, because dapp exact-matches it
+ * against the one bound into the code. psm cannot simply *forward* that string,
+ * though, because it now derives the `Origin` header of its own server-side
+ * exchange from it (see server/session.ts): an unchecked value here would let a
+ * caller choose which origin psm asserts to dapp. So the claim is checked
+ * against the callback this psm would have issued for this very request, and
+ * anything else is refused before a single byte reaches dapp.
+ *
+ * That comparison is meaningful because the claim and the reference are not the
+ * same source. `ssoRedirectUri` is built from `PSM_PUBLIC_ORIGIN` when a proxy
+ * pins one, and otherwise from the request's own origin — which `agentGuard`
+ * has already narrowed to loopback or the single paired origin before any route
+ * runs. The body is just a string a caller typed.
+ */
+export function approvedSsoCallback(req: express.Request | undefined, claimed: string): string {
+  const expected = ssoRedirectUri(req);
+  const requested = String(claimed || "").trim();
+  // Nothing claimed: the page is this psm's own, and the callback is ours to say.
+  if (!requested) return expected;
+  if (requested === expected) return requested;
+  throw new SsoCallbackError(
+    `This sign-in came back to ${requested}, and psm issues ${expected}. ` +
+      "A web client is exact-matched, so the callback has to be the one this psm serves.",
+  );
+}
+
+/**
+ * The `Origin` psm presents to dapp on this app's auth calls, derived from a
+ * callback that has already been through `approvedSsoCallback`.
+ *
+ * dapp pins a web client's cookie endpoints to an origin represented in the
+ * row's `redirectUris` (`server/utils/appSessionCookie.js`, `isOriginAllowed`),
+ * and psm is a server, so nothing sets this header for it. The callback's own
+ * origin is exactly the right answer: if the URI is registered — and dapp
+ * re-checks that on the exchange — then its origin is in the allowlist by
+ * construction. Nothing here widens what dapp accepts; it only stops psm from
+ * arriving with no Origin at all, which dapp correctly refuses.
+ */
+export function ssoOriginForCallback(callbackUri: string): string {
+  let url: URL;
+  try {
+    url = new URL(callbackUri);
+  } catch {
+    throw new SsoCallbackError(`${callbackUri || "That callback"} is not a usable callback URL.`);
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new SsoCallbackError("A psm callback is an http(s) URL; this one is not.");
+  }
+  return url.origin;
+}
+
 /**
  * Is psm registered with the dapp this instance is pointed at, as the kind of
  * client this build expects, and will it accept this page's callback?
@@ -125,6 +184,7 @@ export interface SsoAvailability {
 }
 
 const CHECK_TTL_MS = 30_000;
+const REGISTRATION_TIMEOUT_MS = 5_000;
 let lastCheck: { at: number; key: string; result: SsoAvailability } | null = null;
 
 export async function ssoAvailability(
@@ -151,13 +211,23 @@ async function probeRegistration(
   // redirectAllowed:false, which is a misleading way to read "wrong question".
   const url = `${apiUrl}/apps/${APP_KEY}/public?redirectUri=${encodeURIComponent(redirectUri)}`;
   let response: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REGISTRATION_TIMEOUT_MS);
   try {
-    response = await fetchImpl(url, { headers: { Accept: "application/json" } });
+    response = await fetchImpl(url, {
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
   } catch (err) {
+    const error = err as Error;
     return {
       available: false,
-      reason: `Could not reach Werewolf at ${apiUrl} (${(err as Error).message}).`,
+      reason: error.name === "AbortError"
+        ? `Werewolf at ${apiUrl} did not answer within ${REGISTRATION_TIMEOUT_MS / 1000} seconds.`
+        : `Could not reach Werewolf at ${apiUrl} (${error.message}).`,
     };
+  } finally {
+    clearTimeout(timeout);
   }
   const body = (await response.json().catch(() => ({}))) as any;
 

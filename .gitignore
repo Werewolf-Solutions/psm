@@ -36,3 +36,4 @@ notes.md
 # Generated Python bytecode.
 __pycache__/
 *.pyc
+.psm-workspaces.json

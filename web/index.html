@@ -88,6 +88,7 @@
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
+        <select id="workspace-select" class="btn workspace-select" aria-label="Workspace" title="Personal workspace — private to you"><option value="personal">Personal</option></select>
         <button id="account-chip" class="btn account-chip" title="Your Werewolf account">Sign&nbsp;in</button>
         <button id="cloud-open" class="btn" title="PSM Pro account, sync, and encrypted backups">☁&nbsp;Cloud</button>
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
@@ -240,6 +241,7 @@
           <span class="ws-status" id="ws-status">idle</span>
         </div>
         <div class="ws-head-actions">
+          <select id="ws-workspace" class="btn workspace-select" aria-label="This project's workspace" title="Which workspace this project belongs to. Moving it does not change file or deployment access." hidden></select>
           <button class="btn" id="ws-working" title="Manually show or hide this project in Working on">Mark working</button>
           <button class="btn" id="ws-close" aria-label="Return home">← Home</button>
         </div>
@@ -485,13 +487,19 @@
             <div class="dep-toolbar">
               <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
               <button class="btn" id="dep-discover">Check readiness</button>
-              <label class="dep-prep-ai" id="dep-prep-ai-wrap" hidden>
+              <div class="dep-prep-ai" id="dep-prep-ai-wrap" hidden>
                 <span>Preparation AI</span>
-                <select id="dep-prep-ai">
-                  <option value="claude">claude</option>
-                  <option value="codex">codex</option>
+                <select id="dep-prep-ai" aria-label="Preparation provider">
+                  <option value="claude">Claude Code</option>
+                  <option value="codex">Codex</option>
                 </select>
-              </label>
+                <select id="dep-prep-model" aria-label="Preparation model">
+                  <option value="">Provider default</option>
+                </select>
+                <select id="dep-prep-effort" aria-label="Preparation reasoning effort" title="Reasoning effort for the selected model">
+                  <option value="">Default effort</option>
+                </select>
+              </div>
               <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
               <button class="btn btn-primary" id="dep-approve" disabled>Deploy</button>
             </div>
@@ -868,6 +876,7 @@
     <script src="/agent.js"></script>
     <script src="/deployment-connections.js"></script>
     <script src="/agent-permissions.js"></script>
+    <script src="/workspaces.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>
   </body>

@@ -37,6 +37,16 @@ test("auth.js is loaded before app.js", () => {
   );
 });
 
+test("the permissions UI survives mixed frontend and backend versions", () => {
+  // Static browser files update immediately in development, while the TypeScript
+  // service requires a restart. The legacy response has neither categories nor
+  // bulk permission input, so an upgrade must still render individual grants.
+  const permissions = read("agent-permissions.js");
+  assert.match(permissions, /fallbackCategories/);
+  assert.match(permissions, /permissionCategory/);
+  assert.match(permissions, /permission: permissions\.length === 1/);
+});
+
 test("the page never stores a refresh token", () => {
   // psm is a `web` client so that dapp keeps the refresh token in an httpOnly
   // cookie. The builds of dapp without that transport hand the token to the page
@@ -101,6 +111,29 @@ test("an agent-served page hands its code to the agent, not straight to dapp", (
   assert.ok(
     app.indexOf("PsmAuth.configure({ servedByAgent: SERVED_BY_AGENT })") < app.indexOf("PsmAuth.completeSignIn"),
     "detectHost() has to configure PsmAuth before boot() redeems a code",
+  );
+});
+
+test("page startup cannot wait forever on Werewolf authentication", () => {
+  const auth = read("auth.js");
+  const app = read("app.js");
+  const server = fs.readFileSync(path.join(WEB, "..", "src", "server", "index.ts"), "utf8");
+  const session = fs.readFileSync(path.join(WEB, "..", "src", "server", "session.ts"), "utf8");
+  const sso = fs.readFileSync(path.join(WEB, "..", "src", "server", "sso.ts"), "utf8");
+
+  assert.match(auth, /const AUTH_REQUEST_MS = [\d_]+;/, "direct browser auth needs a deadline");
+  assert.match(auth, /function timedFetch\(/, "browser auth calls should share the bounded fetch");
+  assert.match(app, /\/api\/auth\/session[\s\S]{0,160}AbortSignal\.timeout\(STARTUP_REQUEST_MS\)/);
+  assert.match(session, /signal: AbortSignal\.timeout\(DAPP_REQUEST_TIMEOUT_MS\)/);
+  assert.match(sso, /setTimeout\(\(\) => controller\.abort\(\), REGISTRATION_TIMEOUT_MS\)/);
+  assert.match(
+    server,
+    /app\.use\("\/api\/cloud",[\s\S]{0,240}sessionContext\(\)/,
+    "only cloud routes should resolve the remote session before handling a request",
+  );
+  assert.ok(
+    server.indexOf('app.use("/api/cloud"') > server.indexOf('app.get("/api/auth/session"'),
+    "page and auth routes must be mounted before cloud session middleware",
   );
 });
 

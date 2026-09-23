@@ -36,9 +36,12 @@ import crypto from "node:crypto";
 
 import { runWithSession } from "../store.ts";
 import { werewolfApiUrl } from "./runtime.ts";
+import { ssoOriginForCallback } from "./sso.ts";
 
 /** dapp access tokens live 15 minutes; refresh a little before the edge. */
 const ACCESS_SKEW_MS = 60_000;
+/** A remote auth service must never be able to hold the local cockpit open. */
+const DAPP_REQUEST_TIMEOUT_MS = 8_000;
 
 /** The single application row psm signs in as. */
 export const APP_KEY = "psm";
@@ -59,6 +62,11 @@ interface SessionRecord {
   /** dapp's httpOnly refresh cookie, as `name=value`. Rotates on every use. */
   refreshCookie: string | null;
   apiUrl: string;
+  /**
+   * The `Origin` this session was opened with, kept so every later call on it
+   * presents the same one. See `appOrigin` below for why psm sends one at all.
+   */
+  origin: string;
   createdAt: number;
 }
 
@@ -88,9 +96,14 @@ async function dappRaw(
       ...init,
       headers: { "Content-Type": "application/json", ...(init.headers || {}) },
       redirect: "manual", // an auth endpoint that redirects is not one we follow
+      signal: AbortSignal.timeout(DAPP_REQUEST_TIMEOUT_MS),
     });
   } catch (err) {
-    throw new AuthError(`Could not reach the Werewolf API: ${(err as Error).message}`, 502);
+    const error = err as Error;
+    const detail = error.name === "TimeoutError"
+      ? `request timed out after ${DAPP_REQUEST_TIMEOUT_MS / 1000} seconds`
+      : error.message;
+    throw new AuthError(`Could not reach the Werewolf API: ${detail}`, 502);
   }
   const body = await response.json().catch(() => null);
   if (!response.ok || body?.success === false) {
@@ -133,6 +146,7 @@ export function openSession(
   data: any,
   apiUrl: string,
   refreshCookie: string | null = null,
+  origin: string = "",
 ): { user: PsmSessionUser } {
   const tokens = data?.tokens;
   if (!tokens?.accessToken) throw new AuthError("Werewolf did not return a session", 502);
@@ -154,9 +168,32 @@ export function openSession(
     refreshCookie: refreshCookie
       || (tokens.refreshToken ? `${REFRESH_COOKIE}=${tokens.refreshToken}` : null),
     apiUrl,
+    origin,
     createdAt: Date.now(),
   };
   return { user };
+}
+
+/**
+ * The `Origin` header psm sends on this app's auth calls.
+ *
+ * dapp pins a **web** client's cookie endpoints to an origin that appears in the
+ * application row's `redirectUris` — `isOriginAllowed` in
+ * werewolf-dapp/server/utils/appSessionCookie.js — so that another same-site
+ * subdomain cannot refresh psm's session and read the bearer token that comes
+ * back. That check is right, and psm is on the wrong side of it by accident: a
+ * browser stamps this header itself, a server does not, and psm arrived with
+ * none at all. An absent Origin is not a trusted Origin, so dapp refused —
+ * `401` on exchange, `403` on refresh — and the cockpit could never sign in.
+ *
+ * The fix belongs here rather than in dapp's check. The origin is taken from the
+ * callback this sign-in actually used, *after* `approvedSsoCallback` has
+ * confirmed it is the one this psm issues (see server/sso.ts). It is never the
+ * caller's own `Origin` header, which would let whoever reached this route
+ * choose what psm asserts.
+ */
+function appOrigin(origin: string): Record<string, string> {
+  return origin ? { Origin: origin } : {};
 }
 
 /**
@@ -165,6 +202,10 @@ export function openSession(
  * The verifier travelled through the page — that is the PKCE contract, and it is
  * useless to anyone without this exchange. What must not travel through the page
  * is the *refresh* credential, and it does not: dapp's cookie is captured here.
+ *
+ * `redirectUri` must already have been approved by `approvedSsoCallback`; the
+ * caller in server/index.ts does that, and the origin psm presents to dapp is
+ * derived from it rather than from anything the caller sent.
  */
 export async function exchangeCode(input: {
   code: string;
@@ -175,11 +216,13 @@ export async function exchangeCode(input: {
   if (!input.code || !input.codeVerifier) {
     throw new AuthError("This sign-in is missing its code.", 400);
   }
+  const origin = ssoOriginForCallback(input.redirectUri);
   const apiUrl = await werewolfApiUrl();
   const { data, response } = await dappRaw(
     `/apps/${APP_KEY}/auth/exchange`,
     {
       method: "POST",
+      headers: appOrigin(origin),
       body: JSON.stringify({
         code: input.code,
         codeVerifier: input.codeVerifier,
@@ -189,7 +232,7 @@ export async function exchangeCode(input: {
     },
     apiUrl,
   );
-  return openSession(data, apiUrl, readRefreshCookie(response));
+  return openSession(data, apiUrl, readRefreshCookie(response), origin);
 }
 
 /**
@@ -217,7 +260,9 @@ async function refreshSession(): Promise<boolean> {
       {
         method: "POST",
         body: JSON.stringify({ refreshToken: bare }),
-        headers: { Cookie: session.refreshCookie },
+        // The same origin the session was opened with. dapp checks this on
+        // refresh too, and answers 403 rather than 401 when it is missing.
+        headers: { Cookie: session.refreshCookie, ...appOrigin(session.origin) },
       },
       session.apiUrl,
     );
@@ -273,6 +318,11 @@ export async function signOut(): Promise<void> {
         // Logout is what actually revokes the session behind the cookie, so it
         // has to present the cookie as well as the access token.
         ...(record.refreshCookie ? { Cookie: record.refreshCookie } : {}),
+        /* dapp's logout is guarded by the access token rather than by
+         * isOriginAllowed, so this is not required there today. Sending it
+         * anyway keeps one origin for the whole life of a session and means a
+         * later tightening of that route does not strand sign-out. */
+        ...appOrigin(record.origin),
       },
     },
     record.apiUrl,

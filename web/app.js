@@ -177,7 +177,7 @@ async function load() {
   // what this psm can do at all — a hosted one has no disk, an agent scans only
   // what has been linked, so the board's empty state differs by posture
   STATE.can = data.capabilities || { runsCommands: true, scansImplicitly: true, canLink: true };
-  await Promise.all([fetchSessions(false), fetchRuntimeServices()]);
+  await Promise.all([fetchSessions(false), fetchRuntimeServices(), window.PsmWorkspaces?.refresh()]);
   render();
 }
 
@@ -324,6 +324,8 @@ function statusList() {
 function visible() {
   const q = STATE.query.trim().toLowerCase();
   return STATE.projects.filter((p) => {
+    // Only the selected workspace's projects (unassigned ones are personal).
+    if (window.PsmWorkspaces?.hides(p.name)) return false;
     if (STATE.filter === "active" && (p.archived || p.status !== "active")) return false;
     if (STATE.filter !== "all" && STATE.filter !== "active" && p.status !== STATE.filter) return false;
     if (!q) return true;
@@ -929,6 +931,8 @@ function emptyManagedDeploymentState() {
     preparationPoll: null,
     preparationSignature: "",
     preparationEngine: null,
+    preparationModel: null,
+    preparationEffort: null,
   };
 }
 
@@ -1255,6 +1259,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   $("#ws-ai-limit").hidden = true;
   $("#ws-ai-limit").innerHTML = "";
   $("#ws-name").textContent = opts.title || p.name;
+  window.PsmWorkspaces?.showProject(opts.room ? null : p.name);
   renderMembers(opts.room || null);
   renderRoomDependencies(opts.room || null);
   renderWorkingButton();
@@ -4689,15 +4694,21 @@ function renderDeploymentReadiness() {
     ? "Preparation is already running"
     : "Fix what psm can fix, build the release, and check again";
   // Which AI clears the steps psm cannot do alone. It is offered beside the
-  // button because that is where the choice is made — a provider that has hit
-  // its usage window is a reason to switch, not a reason to give up on the run.
+  // button because that is where the choice is made — a provider or model that
+  // has hit its usage window is a reason to switch, not a reason to give up.
   const engineWrap = $("#dep-prep-ai-wrap");
   engineWrap.hidden = $("#dep-make-ready").hidden;
-  $("#dep-prep-ai").value = preparationEngine();
-  $("#dep-prep-ai").disabled = state.loading || preparing;
+  const engine = preparationEngine();
+  const model = preparationModel();
+  const effort = preparationEffort();
+  $("#dep-prep-ai").value = engine;
+  renderEffortOptions($("#dep-prep-effort"), engine, model, effort, WS.name);
+  for (const control of [$("#dep-prep-ai"), $("#dep-prep-model"), $("#dep-prep-effort")]) {
+    control.disabled = state.loading || preparing;
+  }
   engineWrap.title = preparing
     ? "Stop preparation to change the AI it uses"
-    : "The AI that fixes what psm cannot fix alone";
+    : "The provider, model, and reasoning effort that fix what psm cannot fix alone";
   $("#dep-approve").disabled = !deploymentReadyToApprove();
   $("#dep-approve").textContent = state.plan?.operation === "rollback" ? "Deploy rollback" : "Deploy";
   $("#dep-error").hidden = !state.error;
@@ -5040,6 +5051,8 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       state.preparationPublication = null;
       state.preparationSignature = "";
       state.preparationEngine = null;
+      state.preparationModel = null;
+      state.preparationEffort = null;
     } else if (!state.run && environment?.latestRun) {
       state.run = environment.latestRun;
     }
@@ -5192,9 +5205,14 @@ async function checkDeploymentReadiness(makeReady = false) {
     const action = makeReady ? "make-ready" : "readiness";
     const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/${action}`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      // The engine goes with the press, so resuming after a usage limit is one
-      // choice and one click rather than an edit somewhere else first.
-      body: JSON.stringify(makeReady ? { artifactId, engine: preparationEngine() } : { artifactId }),
+      // The whole AI selection goes with the press, so starting or resuming is
+      // one choice and one click rather than an edit somewhere else first.
+      body: JSON.stringify(makeReady ? {
+        artifactId,
+        engine: preparationEngine(),
+        model: preparationModel(),
+        effort: preparationEffort(),
+      } : { artifactId }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not check deployment readiness");
@@ -5250,6 +5268,33 @@ const PREPARATION_PHASES = {
 function preparationEngine() {
   const state = WS.managedDeploy;
   return state.preparationEngine || state.preparation?.engine || WS.engine || "claude";
+}
+
+/** Model the next preparation press uses; an empty string explicitly selects the provider default. */
+function preparationModel() {
+  const state = WS.managedDeploy;
+  if (state.preparationModel !== null) return state.preparationModel;
+  const engine = preparationEngine();
+  if (state.preparation?.engine === engine) return state.preparation.model || "";
+  return WS.engine === engine ? WS.model || "" : "";
+}
+
+/** Effort the next preparation press uses; an empty string explicitly selects the model default. */
+function preparationEffort() {
+  const state = WS.managedDeploy;
+  if (state.preparationEffort !== null) return state.preparationEffort;
+  const engine = preparationEngine();
+  if (state.preparation?.engine === engine) return state.preparation.effort || "";
+  return WS.engine === engine && WS.model === preparationModel() ? WS.effort || "" : "";
+}
+
+function refreshPreparationModels() {
+  return refreshModelCatalog(
+    WS.name,
+    preparationEngine(),
+    () => ({ model: preparationModel(), effort: preparationEffort() }),
+    $("#dep-prep-effort"),
+  );
 }
 
 function preparationStep(job) {
@@ -5778,6 +5823,21 @@ $("#dep-artifact").onchange = (event) => {
 };
 $("#dep-prep-ai").onchange = (event) => {
   WS.managedDeploy.preparationEngine = event.target.value;
+  WS.managedDeploy.preparationModel = "";
+  WS.managedDeploy.preparationEffort = "";
+  renderDeploymentReadiness();
+  refreshPreparationModels();
+};
+$("#dep-prep-model").onchange = (event) => {
+  WS.managedDeploy.preparationModel = event.target.value.trim();
+  WS.managedDeploy.preparationEffort = "";
+  renderDeploymentReadiness();
+  $("#dep-prep-effort").focus();
+};
+$("#dep-prep-model").onfocus = refreshPreparationModels;
+$("#dep-prep-effort").onfocus = refreshPreparationModels;
+$("#dep-prep-effort").onchange = (event) => {
+  WS.managedDeploy.preparationEffort = event.target.value;
   renderDeploymentReadiness();
 };
 $("#dep-prep-stop").onclick = stopDeploymentPreparation;
@@ -5876,10 +5936,14 @@ let AUTH = { user: null, required: false, checked: false, sso: { available: fals
  * seals /api/ off deliberately, so this is a designed signal rather than luck).
  */
 let SERVED_BY_AGENT = null;
+const STARTUP_REQUEST_MS = 8_000;
 async function detectHost() {
   if (SERVED_BY_AGENT !== null) return SERVED_BY_AGENT;
   try {
-    const r = await fetch("/api/auth/session", { credentials: "same-origin" });
+    const r = await fetch("/api/auth/session", {
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(STARTUP_REQUEST_MS),
+    });
     SERVED_BY_AGENT = r.ok && (r.headers.get("content-type") || "").includes("json");
   } catch {
     SERVED_BY_AGENT = false;
@@ -5916,7 +5980,10 @@ async function loadSession({ justSignedIn = false } = {}) {
     } else {
       // The agent holds the session — it keeps dapp's refresh cookie, which this
       // page could not. The same call tells us which dapp to sign in against.
-      const r = await fetch("/api/auth/session", { credentials: "same-origin" });
+      const r = await fetch("/api/auth/session", {
+        credentials: "same-origin",
+        signal: AbortSignal.timeout(STARTUP_REQUEST_MS),
+      });
       const data = await r.json();
       AUTH.user = data.user || null;
       AUTH.required = !!data.required;
@@ -5947,6 +6014,9 @@ function renderAccount() {
     chip.title = "Sign in with your Werewolf account";
     chip.classList.remove("on");
   }
+  // Signing in or out changes which business workspaces are real (never the
+  // personal one); re-ask the agent rather than trusting what was listed before.
+  if (AUTH.checked) window.PsmWorkspaces?.refresh();
 }
 
 /** Hosted psm cannot show anything until someone is signed in. */
