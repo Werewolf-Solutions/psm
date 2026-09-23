@@ -290,12 +290,14 @@
         secretControls = [];
         const profile = selectedProfile();
         if (!profile || scopeIssue(profile, environment)) return;
-        if (!profile.missingSecretSlots?.length) {
-          credentials.append(element("div", "dep-row-detail", "Credentials are present. Check deployment readiness to verify the actual connection and target."));
-          return;
-        }
-        credentials.append(element("div", "dep-row-detail", "Credentials go to this agent's secure store. If its OS keyring is unavailable, they last only until the agent restarts. Saving updates this profile wherever it is used."));
-        for (const slot of profile.missingSecretSlots) {
+        const requiredSlots = profile.requiredSecretSlots?.length
+          ? profile.requiredSecretSlots
+          : profile.kind === "ssh-host-helper@1" ? ["privateKey"] : ["apiToken"];
+        const missingSlots = new Set(profile.missingSecretSlots || []);
+        credentials.append(element("div", "dep-row-detail", missingSlots.size
+          ? "Credentials are missing. Save them to this agent's secure store. If its OS keyring is unavailable, they last only until the agent restarts."
+          : "Credentials are present. You can replace them here; replacement updates this profile everywhere it is used."));
+        for (const slot of requiredSlots) {
           const form = element("form", "dep-connection-secret");
           const label = element("label", "dep-row-detail", { apiToken: "API token", privateKey: "SSH private key" }[slot] || slot);
           const input = element("input", "dep-connection-input");
@@ -305,7 +307,7 @@
           input.setAttribute("aria-label", `${slot} for ${profile.label || profile.connectionId}`);
           label.append(input);
           addFieldHelp(label, input, slot);
-          const save = element("button", "dep-mini-btn", "Save credential");
+          const save = element("button", "dep-mini-btn", missingSlots.has(slot) ? "Save credential" : "Replace credential");
           save.type = "submit";
           let fileValue = "";
           let fileVersion = 0;
@@ -344,7 +346,7 @@
                 const value = await file.text();
                 if (!current() || busy || version !== fileVersion || selectedProfile() !== profile) return;
                 fileValue = value;
-                fileStatus.textContent = "Private key selected. Save credential to store it with this agent.";
+                fileStatus.textContent = `Private key selected. ${save.textContent} to store it with this agent.`;
                 updateSecret();
               } catch {
                 if (current() && version === fileVersion) fileStatus.textContent = "Could not read this private key file.";

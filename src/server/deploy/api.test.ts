@@ -385,6 +385,7 @@ async function preparationHarness(options: { local?: boolean } = {}) {
   const briefs: string[] = [];
   const builds: string[] = [];
   const engines: (string | null)[] = [];
+  const selections: { engine: string | null; model: string | null; effort: string | null }[] = [];
   let stopped = 0;
   let refuse: string | null = null;
   const service = {
@@ -406,6 +407,7 @@ async function preparationHarness(options: { local?: boolean } = {}) {
     repairs: {
       start: async (job, checked) => {
         engines.push(job.engine);
+        selections.push({ engine: job.engine, model: job.model, effort: job.effort });
         if (refuse) throw new Error(refuse);
         briefs.push(checked.readiness.items.map((item) => item.title).join(", "));
         return "wrk_room";
@@ -430,7 +432,7 @@ async function preparationHarness(options: { local?: boolean } = {}) {
     method, headers: { "content-type": "application/json" }, ...(method === "POST" ? { body: JSON.stringify(payload) } : {}),
   }).then(async (response) => ({ status: response.status, body: await response.json() as Record<string, unknown> }));
   return {
-    briefs, builds, engines,
+    briefs, builds, engines, selections,
     counts: () => ({ briefs: briefs.length, builds: builds.length, stopped }),
     ready: () => { items = []; },
     refuse: (message: string | null) => { refuse = message; },
@@ -518,18 +520,26 @@ test("a preparation stopped by a usage limit resumes on the other provider", asy
   t.after(kit.close);
 
   kit.refuse("codex: You've hit your usage limit. Choose a different AI for preparation, then resume.");
-  const limited = await kit.makeReady({ engine: "codex" });
+  const limited = await kit.makeReady({ engine: "codex", model: "gpt-preparation", effort: "high" });
   assert.equal(asJob(limited.body).state, "blocked");
   assert.match(String(asJob(limited.body).message), /usage limit/);
   assert.equal(asJob(limited.body).engine, "codex", "the panel can name the provider that refused");
+  assert.equal(asJob(limited.body).model, "gpt-preparation");
+  assert.equal(asJob(limited.body).effort, "high");
 
   // The operator picks the other one and presses again.
   kit.refuse(null);
-  const resumed = await kit.makeReady({ engine: "claude" });
+  const resumed = await kit.makeReady({ engine: "claude", model: "claude-next", effort: "max" });
   assert.equal(resumed.status, 202);
   assert.equal(asJob(resumed.body).state, "running");
   assert.equal(asJob(resumed.body).engine, "claude");
+  assert.equal(asJob(resumed.body).model, "claude-next");
+  assert.equal(asJob(resumed.body).effort, "max");
   assert.deepEqual(kit.engines, ["codex", "claude"], "the repair is attempted on what was chosen, not on what it opened with");
+  assert.deepEqual(kit.selections, [
+    { engine: "codex", model: "gpt-preparation", effort: "high" },
+    { engine: "claude", model: "claude-next", effort: "max" },
+  ]);
   assert.equal(kit.counts().briefs, 1);
 });
 

@@ -19,6 +19,8 @@ export interface PreparationJob {
   updatedAt: number;
   workroomId: string | null;
   waitingForRepair: boolean;
+  /** This preparation has already asked its AI room to diagnose external blockers. */
+  diagnosedExternal?: boolean;
   repairs: number;
   runId: string | null;
   planId: string | null;
@@ -33,7 +35,7 @@ export interface PreparationJob {
 }
 export type ReadinessResult = Awaited<ReturnType<DeploymentService["checkReadiness"]>>;
 export interface PreparationRepairer {
-  start(job: PreparationJob, checked: ReadinessResult): Promise<string>;
+  start(job: PreparationJob, checked: ReadinessResult, purpose?: "repair" | "diagnose-external"): Promise<string>;
   status(roomId: string): { busy: boolean; question: boolean };
   stop(roomId: string): void;
 }
@@ -128,6 +130,7 @@ export class DeploymentPreparationController {
       state: "running", phase: "check", message: "Checking and preparing this deployment…",
       createdAt: now, updatedAt: now, workroomId: previous?.workroomId ?? null,
       waitingForRepair: false, repairs: 0, runId: null, planId: null, failure: null, blockedBy: null,
+      diagnosedExternal: false,
       engine: ai.engine ?? previous?.engine ?? null,
       model: ai.model ?? (ai.engine ? null : previous?.model ?? null),
       effort: ai.effort ?? (ai.engine ? null : previous?.effort ?? null),
@@ -326,8 +329,23 @@ export class DeploymentPreparationController {
       await this.repair(job, { ...checked, readiness: { ...checked.readiness, items: repairItems } }); return;
     }
     if (externalItems.length || job.failure) {
+      if (externalItems.length && !job.diagnosedExternal) {
+        job.phase = "repair"; job.state = "running";
+        job.message = "Asking the selected AI to diagnose the external deployment checks…";
+        this.save(job);
+        job.workroomId = await this.options.repairs.start(job, {
+          ...checked, readiness: { ...checked.readiness, items: externalItems },
+        }, "diagnose-external");
+        job.diagnosedExternal = true;
+        job.waitingForRepair = true;
+        this.save(job);
+        if (!this.live(job)) this.options.repairs.stop(job.workroomId);
+        return;
+      }
       job.state = "blocked"; job.blockedBy = "external"; job.phase = "check";
-      job.message = externalItems.length ? externalPreparationMessage(externalItems) : `Infrastructure preparation failed: ${job.failure}. Review the run and its connections before resuming.`;
+      job.message = externalItems.length
+        ? `${externalPreparationMessage(externalItems)}${job.workroomId ? " Open the preparation session for the AI diagnosis and next actions." : ""}`
+        : `Infrastructure preparation failed: ${job.failure}. Review the run and its connections before resuming.`;
       this.save(job); return;
     }
     if (outstanding.some((item) => item.action === "prepare-artifact")) {

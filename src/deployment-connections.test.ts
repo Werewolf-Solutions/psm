@@ -152,7 +152,13 @@ test("guided create binds the profile and exposes a working credential form; JSO
   await submit(secret);
   assert.deepEqual(calls.at(-2)?.body, { slot: "apiToken", value: "dummy-api-token" });
   assert.equal(input.value, "");
-  assert.equal(container.querySelectorAll(".dep-connection-secret").length, 0);
+  const replacement = container.querySelectorAll(".dep-connection-secret")[0];
+  assert.equal(replacement.querySelectorAll("button")[0].textContent, "Replace credential");
+  const replacementInput = replacement.querySelectorAll("input")[0];
+  replacementInput.value = "replacement-api-token";
+  replacementInput.oninput();
+  await submit(replacement);
+  assert.deepEqual(calls.at(-2)?.body, { slot: "apiToken", value: "replacement-api-token" });
 });
 
 test("retrying a failed binding does not create another profile", async () => {

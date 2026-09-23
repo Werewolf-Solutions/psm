@@ -451,7 +451,7 @@ function validateResource(
       ...(dependsOn ? { dependsOn } : {}),
       desired: {
         root: normalizeAbsolutePath(v, desired?.root, `${at}.desired.root`),
-        retainReleases: v.integer(desired?.retainReleases, `${at}.desired.retainReleases`, 2, 100),
+        retainReleases: v.integer(desired?.retainReleases, `${at}.desired.retainReleases`, 5, 100),
       },
     };
   }

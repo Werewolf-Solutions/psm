@@ -159,6 +159,13 @@ test("validates and normalizes a static-ssh-nginx manifest", () => {
   assert.equal(environment.watch[0].hostname, "todo.example.com");
 });
 
+test("rejects release retention below the host helper minimum", () => {
+  const manifest = validManifest();
+  manifest.environments[0].resources[1].desired.retainReleases = 3;
+  assert.ok(deploymentManifestIssues(manifest, { projectRoot: projectRoot() })
+    .some((issue) => issue.path.endsWith("desired.retainReleases")));
+});
+
 test("fails closed on unknown fields and adapter kinds", () => {
   const unknownField = validManifest();
   unknownField.environments[0].units[0].executor.command = "deploy.sh";

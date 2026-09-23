@@ -38,15 +38,44 @@ None of these are in place, and the first two are outside psm:
 
 1. **A GitHub App** with Actions-read on the source repositories, installed in the org. Its
    ID goes in `vars.PSM_ARTIFACT_READER_APP_ID`, its key in
-   `secrets.PSM_ARTIFACT_READER_PRIVATE_KEY`. The `actions/create-github-app-token` ref in
-   the workflow is a `REPLACE_…` placeholder — pin it to a reviewed full commit SHA rather
-   than a tag. It is deliberately not filled in with a guess.
+   `secrets.PSM_ARTIFACT_READER_PRIVATE_KEY`. Creating and installing the App is a repository
+   *owner* action in GitHub's web UI; nothing in this repository can do it. **The action pin
+   it used to need is now resolved — see below.**
 2. **The host helper installed on the droplet**, with this target enrolled. Enrollment is
    where `contractRevision`, the deploy account, the canonical root and the host key
    fingerprint come from — every `REPLACE_…` in `targets/*.json`.
 3. **A GitHub Environment per target** in the control repository, named by that target
    file's `githubEnvironment`, holding `PSM_TARGET_SSH_PRIVATE_KEY` and
    `PSM_TARGET_KNOWN_HOSTS`, with whatever protection rules the target's risk deserves.
+
+## The action pin
+
+`actions/create-github-app-token` is now pinned to a **full commit SHA**, resolved and
+reviewed on 2026-09-21 rather than guessed:
+
+```yaml
+uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+```
+
+A SHA and not a tag, because this is the one step that holds the App's private key and a
+tag can be repointed at any time by anyone who can push one.
+
+| | |
+|---|---|
+| Resolved how | `GET /repos/actions/create-github-app-token/git/ref/tags/v3.2.0` → a lightweight tag pointing straight at this commit (no tag object to dereference) |
+| Release | v3.2.0, published 2026-05-12 |
+| Commit signature | verified |
+
+**Why v3 and not the v2 line this draft originally named.** v3.0.0 has exactly two breaking
+changes and neither reaches this workflow: custom proxy handling was removed (it now needs
+`NODE_USE_ENV_PROXY=1`, and this workflow sets no proxy), and self-hosted runners must be
+on Actions Runner ≥ v2.327.1 (both jobs are `runs-on: ubuntu-latest`). v3 is the maintained
+line, and its release commit carries a verified signature where the latest v2 release commit
+(v2.2.2, `fee1f7d63c2ff003460e3d139729b119787bc349`, 2026-03-13) does not.
+
+To stay on v2 instead, use that v2.2.2 SHA — it is recorded here so the choice does not have
+to be re-derived. Re-review on every bump; a pin is only as good as the last time somebody
+looked at what it points to.
 
 ## Known gaps
 

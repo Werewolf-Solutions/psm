@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { repairBrief, WorkroomPreparationRepairer, type RepairSessionHost } from "./repair-sessions.ts";
+import { repairBrief, WorkroomPreparationRepairer, type PreparationAi, type RepairSessionHost } from "./repair-sessions.ts";
 import type { PreparationJob, ReadinessResult } from "./make-ready.ts";
 
 function job(overrides: Partial<PreparationJob> = {}): PreparationJob {
@@ -18,16 +18,27 @@ function checked(items: { title: string; detail: string; status: string; action:
 }
 
 function host(overrides: Partial<RepairSessionHost> = {}) {
-  const opened: { ai: { engine?: string | null } }[] = [];
+  const opened: { ai: PreparationAi }[] = [];
   const sent: string[] = [];
   const stopped: string[] = [];
-  const switches: string[] = [];
+  const switches: PreparationAi[] = [];
   let waiting = false;
-  let engine: string | null = "codex";
+  let currentAi: PreparationAi = { engine: "codex", model: null, effort: null };
   const base: RepairSessionHost = {
-    open: (input) => { opened.push({ ai: input.ai }); engine = input.ai.engine ?? "codex"; return `room-${opened.length}`; },
-    engine: () => engine,
-    useAi: (_room, ai) => { engine = ai.engine ?? engine; switches.push(String(ai.engine)); },
+    open: (input) => {
+      opened.push({ ai: input.ai });
+      currentAi = { engine: input.ai.engine ?? "codex", model: input.ai.model ?? null, effort: input.ai.effort ?? null };
+      return `room-${opened.length}`;
+    },
+    ai: () => currentAi,
+    useAi: (_room, ai) => {
+      currentAi = {
+        engine: ai.engine ?? currentAi.engine,
+        model: ai.model === undefined ? currentAi.model : ai.model,
+        effort: ai.effort === undefined ? currentAi.effort : ai.effort,
+      };
+      switches.push({ ...currentAi });
+    },
     send: (_room, message) => { sent.push(message); return { ok: true }; },
     state: () => ({ busy: sent.length > 0, question: waiting }),
     stop: (room) => { stopped.push(room); },
@@ -35,7 +46,7 @@ function host(overrides: Partial<RepairSessionHost> = {}) {
   return {
     host: { ...base, ...overrides }, opened, sent, stopped, switches,
     waitFor: () => { waiting = true; },
-    engine: () => engine,
+    engine: () => currentAi.engine,
   };
 }
 
@@ -69,6 +80,18 @@ test("the brief withholds the credentials and the deploy button from the repair"
   assert.match(kit.sent[0], /Do not read, write or invent deployment credentials/);
   assert.match(kit.sent[0], /do not run a deployment/);
   assert.match(kit.sent[0], /ask the operator a question instead of guessing/);
+});
+
+test("external blockers go to the selected AI as a read-only diagnosis", async () => {
+  const kit = host();
+  const repairer = new WorkroomPreparationRepairer(kit.host);
+  await repairer.start(job({ engine: "codex", model: "gpt-next", effort: "max" }), checked([
+    { title: "Host target", detail: "release directory differs from the target contract", status: "blocked", action: "connect" },
+  ]), "diagnose-external");
+  assert.deepEqual(kit.opened[0].ai, { engine: "codex", model: "gpt-next", effort: "max" });
+  assert.match(kit.sent[0], /release directory differs from the target contract/);
+  assert.match(kit.sent[0], /exact ordered actions/);
+  assert.match(kit.sent[0], /Do not edit files, change a connection or host/);
 });
 
 test("a second attempt continues the same room instead of opening another", async () => {
@@ -115,9 +138,18 @@ test("the operator's engine moves the room preparation already opened", async ()
 
   const again = await repairer.start(job({ workroomId: room, engine: "claude", repairs: 2 }), checked([]));
   assert.equal(again, room, "the transcript the operator was reading is the one that continues");
-  assert.deepEqual(kit.switches, ["claude"]);
+  assert.deepEqual(kit.switches, [{ engine: "claude", model: null, effort: null }]);
   assert.equal(kit.engine(), "claude");
   assert.equal(kit.opened.length, 1);
+});
+
+test("the operator can change model and effort without changing provider", async () => {
+  const kit = host();
+  const repairer = new WorkroomPreparationRepairer(kit.host);
+  const room = await repairer.start(job({ engine: "codex" }), checked([]));
+
+  await repairer.start(job({ workroomId: room, engine: "codex", model: "gpt-next", effort: "max", repairs: 2 }), checked([]));
+  assert.deepEqual(kit.switches, [{ engine: "codex", model: "gpt-next", effort: "max" }]);
 });
 
 test("a new room opens on the engine that was chosen for it", async () => {

@@ -190,8 +190,8 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
         // usage limit resumes on the other without losing its room or progress.
         coordinator.start(project.id, environmentId, {
           ...(req.body?.engine == null ? {} : { engine: String(req.body.engine) }),
-          ...(req.body?.model == null ? {} : { model: String(req.body.model) }),
-          ...(req.body?.effort == null ? {} : { effort: String(req.body.effort) }),
+          ...(req.body?.model == null ? {} : { model: String(req.body.model).trim() || null }),
+          ...(req.body?.effort == null ? {} : { effort: String(req.body.effort).trim() || null }),
         });
         await coordinator.advance(project.id, environmentId);
         const job = coordinator.current(project.id, environmentId);
@@ -513,6 +513,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
           readiness: readiness.ready ? "ready" : "missing-secret",
           ready: readiness.ready,
           publicMetadata: readiness.publicMetadata,
+          requiredSecretSlots: profile.requiredSecretSlots,
           credentialFingerprint: readiness.credentialFingerprint,
           missingSecretSlots: readiness.missingSecretSlots,
           constraints: record.constraints,

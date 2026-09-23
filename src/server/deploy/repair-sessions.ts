@@ -30,7 +30,7 @@ export interface RepairSessionHost {
   /** Opens a workroom scoped to one project and returns its id. */
   open(input: { projectId: string; environmentId: string; title: string; objective: string; ai: PreparationAi }): string;
   /** Which AI that room currently runs. */
-  engine(roomId: string): string | null;
+  ai(roomId: string): PreparationAi | null;
   /** Points an existing room at a different AI. Switching engines starts a fresh thread. */
   useAi(roomId: string, ai: PreparationAi): void;
   /** Sends one turn. `question` means the room is already waiting on the operator. */
@@ -56,13 +56,22 @@ function outstanding(checked: ReadinessResult): string[] {
  * these are the same lines the operator is reading in the Readiness list, so the
  * two sides of the screen agree about what is left.
  */
-export function repairBrief(job: PreparationJob, checked: ReadinessResult): string {
+export function repairBrief(job: PreparationJob, checked: ReadinessResult, purpose: "repair" | "diagnose-external" = "repair"): string {
   const lines = [
     `psm is preparing this project for deployment to "${job.environmentId}" and these readiness checks are not passing.`,
     "",
     ...(outstanding(checked).length ? outstanding(checked) : ["1. The checks did not name a cause. Investigate the deployment manifest and the release source."]),
   ];
   if (job.failure) lines.push("", `What failed last time: ${job.failure}`);
+  if (purpose === "diagnose-external") {
+    lines.push(
+      "",
+      "Diagnose these external deployment checks using the available read-only project and connection information. Do not edit files, change a connection or host, request secrets, run a build, or deploy.",
+      "Explain the likely cause, identify what can be verified now, and give the operator exact ordered actions with the owning project or connection and commands or UI paths where supported by evidence. Mark assumptions clearly.",
+      "If the operator must provide missing facts or perform a privileged step, ask a focused question or give the exact step in this room. After your turn psm rechecks readiness and continues automatically if the blockers are gone.",
+    );
+    return lines.join("\n");
+  }
   if (job.repairs > 1) lines.push("", `This is attempt ${job.repairs} of 3. Read what this room already tried before repeating it.`);
   lines.push(
     "",
@@ -79,7 +88,7 @@ export function repairBrief(job: PreparationJob, checked: ReadinessResult): stri
 export class WorkroomPreparationRepairer implements PreparationRepairer {
   constructor(private readonly host: RepairSessionHost) {}
 
-  async start(job: PreparationJob, checked: ReadinessResult): Promise<string> {
+  async start(job: PreparationJob, checked: ReadinessResult, purpose: "repair" | "diagnose-external" = "repair"): Promise<string> {
     const ai = { engine: job.engine, model: job.model, effort: job.effort };
     const roomId = job.workroomId ?? this.host.open({
       projectId: job.projectId,
@@ -92,17 +101,21 @@ export class WorkroomPreparationRepairer implements PreparationRepairer {
     // the whole reason a preparation stopped by a usage limit can be resumed:
     // pick the other provider, press the button, and the same room continues on
     // it rather than staying stuck against a window that has not reset.
-    if (job.engine && this.host.engine(roomId) !== job.engine) {
-      this.host.useAi(roomId, ai);
+    if (job.engine) {
+      const current = this.host.ai(roomId);
+      const sameChoice = current?.engine === job.engine
+        && (current.model || null) === (job.model || null)
+        && (current.effort || null) === (job.effort || null);
+      if (!sameChoice) this.host.useAi(roomId, ai);
     }
     // An unanswered question is not a room to talk over: the operator is already
     // the blocker, and a second turn would bury what they were asked.
     if (this.host.state(roomId).question) return roomId;
-    const sent = this.host.send(roomId, repairBrief(job, checked));
+    const sent = this.host.send(roomId, repairBrief(job, checked, purpose));
     if (!sent.ok && !sent.question) {
       // Name the provider that refused. "You've hit your usage limit" with no
       // subject is unactionable when the fix is to choose the other one.
-      const engine = this.host.engine(roomId);
+      const engine = this.host.ai(roomId)?.engine;
       const reason = sent.error || "the preparation session could not take this work";
       throw new Error(sent.limited && engine
         ? `${engine}: ${reason} Choose a different AI for preparation, then resume.`

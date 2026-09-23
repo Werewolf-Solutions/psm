@@ -31,7 +31,9 @@ on:
       execution_contract_json: { required: true, type: string }
       execution_contract_digest: { required: true, type: string }
 
-permissions: {}
+# Both jobs check out this private controller repository. No write scope is needed.
+permissions:
+  contents: read
 
 # One release at a time per target. Never cancel: a cancelled activation leaves the
 # target in a state PSM did not authorize and cannot attribute.
@@ -93,11 +95,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # Actions-read on the allowed source repositories only. REPLACE the ref with the
-      # full commit SHA of the reviewed release of this action before this repo exists.
+      # Actions-read on the allowed source repositories only. Pinned to a full commit
+      # SHA, not a tag: a tag can be moved, and this step holds the App private key.
+      # The review behind this SHA is in README.md, "The action pin".
       - name: Mint a short-lived source-repository token
         id: source_token
-        uses: actions/create-github-app-token@REPLACE_WITH_REVIEWED_FULL_COMMIT_SHA # v2.x
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ vars.PSM_ARTIFACT_READER_APP_ID }}
           private-key: ${{ secrets.PSM_ARTIFACT_READER_PRIVATE_KEY }}

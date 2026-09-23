@@ -215,7 +215,7 @@
           "required": ["root", "retainReleases"],
           "properties": {
             "root": { "type": "string", "pattern": "^/" },
-            "retainReleases": { "type": "integer", "minimum": 2, "maximum": 100 }
+            "retainReleases": { "type": "integer", "minimum": 5, "maximum": 100 }
           }
         }
       }

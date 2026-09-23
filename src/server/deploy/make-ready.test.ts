@@ -13,6 +13,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
   let question = false;
   let mutations = false;
   let repairs = 0;
+  const repairPurposes: string[] = [];
   let builds = 0;
   let stops = 0;
   const cancellations: string[] = [];
@@ -39,7 +40,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     } },
     runner: { enqueue: () => { throw new Error("Preparation must not queue infrastructure"); }, cancel: async (id) => { cancellations.push(id); } },
     repairs: {
-      start: async () => { repairs++; busy = true; return "room"; },
+      start: async (_job, _checked, purpose = "repair") => { repairs++; repairPurposes.push(purpose); busy = true; return "room"; },
       status: () => ({ busy, question }), stop: () => { stops++; busy = false; },
     },
   });
@@ -52,7 +53,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     buildAvailable: (available: boolean) => { canPrepare = available; },
     worker: (state: { busy: boolean; question?: boolean }) => { busy = state.busy; question = state.question ?? false; },
     infrastructure: () => { mutations = true; },
-    counts: () => ({ repairs, builds, stops }),
+    counts: () => ({ repairs, builds, stops }), repairPurposes,
     close: () => { controller.close(); database.close(); },
   };
 }
@@ -272,25 +273,42 @@ test("Stop reaches a preparation waiting on its checkout", async (t) => {
 });
 
 
-test("external dependencies and connection failures never spend repository repair attempts", async (t) => {
+test("external dependencies and connection failures get one AI diagnosis, then pause", async (t) => {
   const h = harness(); t.after(h.close);
   h.blockers(["resolve-dependency", "connect", "review-resource", "prepare-artifact"]);
   h.start(); await h.advance();
+  assert.equal(h.current().state, "running");
+  assert.deepEqual(h.repairPurposes, ["diagnose-external"]);
+  assert.equal(h.current().repairs, 0, "diagnosis does not use a repository repair attempt");
+  h.worker({ busy: false }); await h.advance();
   assert.equal(h.current().state, "blocked"); assert.equal(h.current().blockedBy, "external");
-  assert.deepEqual(h.counts(), { repairs: 0, builds: 0, stops: 0 });
+  assert.deepEqual(h.counts(), { repairs: 1, builds: 0, stops: 0 });
   assert.match(h.current().message, /external setup/);
-  await h.advance(); assert.equal(h.counts().repairs, 0);
+  assert.match(h.current().message, /Open the preparation session/);
+  await h.advance(); assert.equal(h.counts().repairs, 1);
+});
+
+test("preparation continues automatically when an external blocker clears during diagnosis", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["connect"]); h.start(); await h.advance();
+  h.worker({ busy: false, question: true }); await h.advance();
+  assert.equal(h.current().state, "waiting-input");
+  h.worker({ busy: false }); h.blockers([]); await h.advance();
+  assert.equal(h.current().state, "succeeded");
+  assert.deepEqual(h.repairPurposes, ["diagnose-external"]);
 });
 
 test("mixed blockers repair local source once, then pause on the external cause", async (t) => {
   const h = harness(); t.after(h.close);
   const repair = h.controller.options.repairs.start;
   const received: string[][] = [];
-  h.controller.options.repairs.start = async (job, checked) => { received.push(checked.readiness.items.map((item) => item.action!)); return repair(job, checked); };
+  h.controller.options.repairs.start = async (job, checked, purpose) => { received.push(checked.readiness.items.map((item) => item.action!)); return repair(job, checked, purpose); };
   h.blockers(["review-source", "resolve-dependency", "connect"]); h.start(); await h.advance();
   assert.deepEqual(received, [["review-source"]]);
   h.worker({ busy: false }); h.blockers(["resolve-dependency", "connect"]); await h.advance();
-  assert.equal(h.counts().repairs, 1); assert.equal(h.current().blockedBy, "external");
+  assert.deepEqual(h.repairPurposes, ["repair", "diagnose-external"]);
+  h.worker({ busy: false }); await h.advance();
+  assert.equal(h.counts().repairs, 2); assert.equal(h.current().blockedBy, "external");
   h.blockers([]); h.start(); await h.advance(); assert.equal(h.current().state, "succeeded");
 });
 
@@ -298,7 +316,9 @@ test("a failed build with a current connection failure pauses instead of repairi
   const h = harness(); t.after(h.close);
   h.blockers(["prepare-artifact"]); h.start(); await h.advance();
   Object.assign(h.runs[0], { terminal: true, state: "failed" }); h.blockers(["connect", "prepare-artifact"]);
-  await h.advance(); assert.equal(h.current().blockedBy, "external"); assert.equal(h.counts().repairs, 0);
+  await h.advance(); assert.deepEqual(h.repairPurposes, ["diagnose-external"]);
+  h.worker({ busy: false }); await h.advance(); assert.equal(h.current().blockedBy, "external");
+  assert.equal(h.current().repairs, 0);
 });
 
 test("resource drift goes to the reviewed infrastructure plan without a repair room", async (t) => {
