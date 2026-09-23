@@ -9,8 +9,8 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P00 — Establish the current baseline** |
-| Execution state | Planned; aggregation is complete, implementation of this sequence has not started. |
+| Next phase | **P01 — Machine inventory and reusable bootstrap** (P00 verified 2026-09-23) |
+| Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
 | First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
@@ -57,8 +57,8 @@ local to those documents; they are not additional competing sequences.
 
 | ID / status | Deliverable | Depends on | Acceptance and source |
 | --- | --- | --- | --- |
-| **P00 · next** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
-| **P01 · pending** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
+| **P00 · verified** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
+| **P01 · in progress** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
 | **P02 · pending** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
 | **P03 · pending** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
 | **P04 · pending** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
@@ -100,6 +100,23 @@ flowchart LR
 These belong to the user and gate the phases shown. Raise them during P00 so a
 phase does not discover them halfway through. Record each answer here, dated,
 and move it to the resolved list below.
+
+**Answered 2026-09-23 (P00):**
+
+- **Runner hosting:** pluggable, local first. Define the runner backend interface
+  and ship a local Docker backend; choose the cloud provider later. P03's live
+  hosted acceptance stays **blocked** until then.
+- **Model-provider auth:** bring your own key. Each workspace stores its own
+  provider API key in the secret broker; PSM carries no model cost.
+- **Dapp registration:** deferred. Build workspace authentication against the
+  local dapp and pairing; production registration stays **blocked** and
+  production is not touched.
+- **First target host:** production-adjacent. The runbook records that
+  `werewolf-alpha` serves other workloads, and the status record notes that the
+  shared droplet's dapp process handles live Stripe. Confirm each mutation there
+  individually, even under a standing grant.
+
+The table below keeps the original questions for reference.
 
 | Decision | Gates | Current evidence |
 | --- | --- | --- |
@@ -210,3 +227,45 @@ All plans found in `docs/` and the two local `.psm-plans/` documents are mapped
 above. The local structured plans have been preserved as tracked-file candidates
 under `archive/`; their saved statuses are historical, not updated implementation
 evidence. No roadmap phase is marked implemented by this aggregation.
+
+### 2026-09-23 — P00 baseline
+
+```text
+Phase / step: P00
+State: verified
+Changed files / repositories: psm only. The uncommitted dev tree was committed on
+  opus-delivery-20260923-155753 in five themed commits (1fe3d14 agent tools,
+  31fc374 deploy diagnosis + Todo host prep, a2b1a05 workspaces + sign-in callback,
+  1bd6899 roadmaps, d2ce7e9 release 0.3.3). The main checkout's dev branch is
+  untouched; two Codex sessions were active there.
+Verification (2026-09-23, at d2ce7e9):
+  npm run typecheck                          → exit 0
+  npm test                                   → 550 pass, 0 fail (70 test files)
+  node --test scripts/setup-todo-staging.test.mjs → 7 pass
+  (cd host-helper && go test ./...)          → ok
+Delivery state: committed d2ce7e9 (not pushed, not deployed)
+Sibling repositories (delivery workspace copies, not modified by P00):
+  todo-app      5ff90df, 3 modified files (deployments.json, package.json,
+                migrate-todo-workspaces.js)
+  werewolf-dapp cdd1cf4 (0.5.4), 2 modified files
+Implemented vs remaining, mapped:
+  P01  Nothing of the machine model exists. src/server/machine.ts is the local
+       process list, unrelated. Reusable inputs: SshHostHelperTransport
+       (deploy/adapters/host-helper.ts), SecretBroker (deploy/connections.ts),
+       host-helper/packaging/install.sh, and the Todo-specific
+       bootstrap-command-user.sh to generalise.
+  P02  Per-project boolean grants with revisions and events exist
+       (agent-permissions.ts, now 12 keys in 5 categories). No Allow/Ask/Deny,
+       durations, presets, delegation or credential leases for commands.
+  P03  Absent by design: no psm process on any server today.
+  P05  Native provider session resume absent (ai.ts replays 30 events / 48k chars).
+  P06  Open: dapp transfer lock-expiry race; todo viewer offered "+ add" inputs
+       (finding B); staging still runs dapp 0.5.1 with the three regressions.
+       Resolved 2026-09-21: cloud sign-in against a local dapp.
+Remaining blocker: none for P01. P03 live acceptance is blocked on the runner
+  provider choice; production registration is deferred (see Open decisions).
+Independent next work: P06 re-verification can proceed alongside.
+Next action: P01 — add src/server/machines/ (records, validated plan, generated
+  bootstrap with inspect/apply and collision checks) and prove repeatable
+  enrollment against a disposable Ubuntu 20.04 sshd container.
+```
