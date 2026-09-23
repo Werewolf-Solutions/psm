@@ -197,3 +197,15 @@ test("minimal adapter environments inherit only explicitly allowed names", () =>
   });
   assert.equal(Object.getPrototypeOf(environment), null);
 });
+
+test("Buffer secrets are copied, not viewed, so zeroing never wipes a stored or caller-owned value", async () => {
+  const broker = new SecretBroker();
+  const original = Buffer.from("-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n");
+  const caller = Buffer.from(original);
+  await broker.put("buffer-copy", "privateKey", caller);
+  assert.deepEqual(caller, original, "the caller's buffer is untouched by put");
+  for (let use = 0; use < 2; use++) {
+    const seen = await broker.withLease("buffer-copy", ["privateKey"], (lease) => lease.useBytes("privateKey", (value) => Buffer.from(value).toString()));
+    assert.equal(seen, original.toString(), `lease use ${use + 1} still sees the secret`);
+  }
+});

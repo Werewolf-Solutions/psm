@@ -505,7 +505,7 @@ export class InMemorySecretBackend implements SecretBackend {
 
   async read(connectionId: string, slot: string): Promise<Uint8Array | null> {
     const value = this.#connections.get(connectionId)?.get(slot);
-    return value ? value.slice() : null;
+    return value ? new Uint8Array(value) : null;
   }
 
   async write(connectionId: string, slot: string, value: Uint8Array): Promise<void> {
@@ -515,7 +515,7 @@ export class InMemorySecretBackend implements SecretBackend {
       this.#connections.set(connectionId, slots);
     }
     slots.get(slot)?.fill(0);
-    slots.set(slot, value.slice());
+    slots.set(slot, new Uint8Array(value));
   }
 
   async delete(connectionId: string, slot: string): Promise<boolean> {
@@ -610,7 +610,7 @@ class BoundedSecretLease implements SecretLease {
   }
 
   useBytes<T>(slot: string, operation: (value: Uint8Array) => T): T {
-    const copy = this.#value(slot).slice();
+    const copy = new Uint8Array(this.#value(slot));
     try {
       return operation(copy);
     } finally {
@@ -647,7 +647,9 @@ function validateSecretAddress(connectionId: string, slot: string): void {
 }
 
 function encodeSecret(value: string | Uint8Array): Uint8Array {
-  const encoded = typeof value === "string" ? new TextEncoder().encode(value) : value.slice();
+  // `new Uint8Array(x)` always copies. `Buffer#slice` is a view, so zeroing its
+  // result would also wipe the caller's buffer (and a stored secret).
+  const encoded = typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(value);
   if (encoded.byteLength === 0 || encoded.byteLength > 1024 * 1024) {
     encoded.fill(0);
     throw new Error("A secret must contain between 1 byte and 1 MiB");
@@ -697,7 +699,7 @@ export class SecretBroker {
   } = {}) {
     this.#backend = options.backend ?? new InMemorySecretBackend();
     this.#generations = options.generations ?? new InMemorySecretGenerationStore();
-    this.#hmacKey = options.fingerprintKey?.slice() ?? randomBytes(32);
+    this.#hmacKey = options.fingerprintKey ? new Uint8Array(options.fingerprintKey) : randomBytes(32);
     if (this.#hmacKey.byteLength < 32) throw new Error("fingerprint key must be at least 32 bytes");
   }
 
