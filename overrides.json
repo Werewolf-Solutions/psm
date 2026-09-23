@@ -8,8 +8,8 @@
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
     "next": "Continue AI builder workspace links so generated sites stay connected to their separate repos/projects.",
     "runCommand": "npm run dev",
-    "port": 5174,
-    "aiFullAccess": true,
+    "port": 5173,
+    "aiFullAccess": false,
     "aiEngine": "claude",
     "aiModel": "sonnet",
     "aiEffort": "max"
@@ -27,13 +27,26 @@
     "category": "Flagship & platform",
     "status": "active",
     "priority": "high",
-    "stack": "Node, AI agent, knowledge graph",
+    "stack": "Go, React, AI agent, knowledge graph",
     "description": "An AI-native Infrastructure Operating System — one control plane to observe, operate, and evolve infrastructure via dashboard, CLI, API, and an embedded AI agent with a live knowledge graph.",
-    "next": "dctl connector work (e.g. SSH server registration).",
+    "next": "Complete the private Homelab Mode rollout: join the server to Tailscale, bring up the main-PC Ollama model, then exercise a governed service restart end to end.",
     "runCommand": "go run ./cmd/daedalus-core",
     "aiEngine": "codex",
-    "aiFullAccess": true,
-    "port": 5174
+    "aiFullAccess": false,
+    "port": 5174,
+    "attachments": [
+      {
+        "capabilityRef": "workspace:control-room-spec",
+        "kind": "doc",
+        "source": "workspace",
+        "mode": "copy",
+        "manifestDigest": "sha256:0c021e8ee9ca4b9de59245ea5b8ce72d7b887816454620c92135da23e66db208",
+        "attachedAt": 1789842979945
+      }
+    ],
+    "pinned": true,
+    "aiModel": "gpt-5.6-sol",
+    "aiEffort": "low"
   },
   "control-room": {
     "category": "Flagship & platform",
@@ -318,8 +331,8 @@
     "priority": "high",
     "pinned": true,
     "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
-    "next": "psm and todo-app both declare desired state now, and both plans stop at connection-missing. Next: stand up the Werewolf-Solutions/deployment-control workflow, install the host helper on the droplet, bind the DigitalOcean and Better Stack connections, then take one real managed release.",
-    "aiFullAccess": true,
+    "next": "Finish the pinned deployment-control release workflow and Todo target enrollment, then prove one managed staging release. Todo DNS/GitHub/SSH connections exist; the host key is repaired. See docs/roadmaps/ecosystem-integration.md.",
+    "aiFullAccess": false,
     "aiEngine": "codex",
     "attachments": [
       {
@@ -331,17 +344,13 @@
         "attachedAt": 1784559897780
       }
     ],
-    "runCommand": "npm run dev",
-    "workingOn": true,
-    "workingOnAt": 1787653845117,
-    "aiModel": "gpt-6-astra",
-    "aiEffort": "medium"
+    "runCommand": "npm run dev"
   },
   "__workspace__": {
     "aiFullAccess": true,
-    "aiEngine": "codex",
-    "aiModel": "gpt-5.6-sol",
-    "aiEffort": "ultra"
+    "aiEngine": "claude",
+    "aiModel": "sonnet",
+    "aiEffort": "medium"
   },
   "atlas": {
     "status": "active",
@@ -385,8 +394,7 @@
     "aiEngine": "codex",
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high",
-    "workingOn": true,
-    "workingOnAt": 1787838265175
+    "next": "Deploy staging at todo.werewolf.solutions through PSM: re-enroll its host root, finish the release controller, publish the validated 0.5.2 source, then verify browser sign-in and rollback. Resolve business sharing before external rollout."
   },
   "proteus": {
     "category": "AI & automation",

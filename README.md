@@ -1,5 +1,8 @@
 # psm — workspace cockpit & project glue
 
+**Implementation roadmap:** start with the [ordered delivery index](docs/roadmaps/README.md).
+It links all plans, resolves their execution order and tracks the next phase.
+
 A tool that keeps an eye on every project in this workspace, lets you work on each one
 without leaving the dashboard, and acts as the glue between them. It **scans** each
 sibling folder, **classifies** it (status, stack, last activity), tracks reusable
@@ -9,6 +12,15 @@ From any project card you can open a **workspace** to run it, watch its logs, ch
 AI that edits its code, preview its web page, attach workspace capabilities, and deploy
 it — the multi-terminal workflow, in one place. It also regenerates `PROJECTS.md` on
 demand.
+
+The [ecosystem integration assessment](docs/roadmaps/ecosystem-integration.md)
+maps PSM, Todo and Werewolf's current boundaries and the path to repeatable app
+rollouts. The first deployment target is Todo staging at `todo.werewolf.solutions`;
+see [current readiness](docs/deploy/TODO-STAGING.md).
+
+For an operator-run, dry-run-first repair of Todo's staging root permission and a
+staging-only controller scaffold, use [the setup runbook](docs/deploy/TODO-STAGING-SETUP.md).
+`node scripts/setup-todo-staging.mjs check` is read-only; no deployment is triggered.
 
 ## Run the dashboard
 
@@ -227,9 +239,11 @@ Click **▶** on a card to open its cockpit:
   iterate for up to three revision-bound rounds; reorder or edit the result, then
   **Confirm & start working** to open a fresh normal project-agent session. Confirmed
   revisions are immutable and progress becomes a live checklist.
-- **Capabilities** — attach explicit workspace MCP servers, copy-pinned docs/API specs,
-  repository skills, or a custom MCP command/URL. Every change has a file/command preview
-  and separate confirmation. psm writes configuration but never runs or proxies the tool.
+- **Capabilities** — grant managed agents repository, local Git, remote Git, execution,
+  and integration access individually, by category, or with **Grant full access**. Remote Git
+  includes bounded fetch and non-force push to operator-configured remotes. The same pane
+  attaches explicit workspace MCP servers, copy-pinned docs/API specs, repository skills,
+  or a custom MCP command/URL; attached calls keep their individual review flow.
 - **Run** — start/stop the project's run command (auto-detected — npm scripts, `cargo run`,
   `go run`, `dotnet run` / `./build.sh run`, or a node/python entry — and editable). Logs
   stream live, ANSI-stripped; the command you actually run is remembered.
@@ -464,3 +478,12 @@ that. Every shipped change bumps something; docs-only changes need not.
 Run `npm run providers:check` to check installed AI CLIs, available updates, and
 live model/effort discovery. See [provider maintenance](docs/provider-maintenance.md)
 for project-specific checks and the contract for adding providers.
+
+
+## Workspaces (personal and business)
+
+The header selector chooses a workspace: **Personal** always works, signed out and offline;
+business workspaces appear only for a signed-in Werewolf account that the API says belongs to them
+(`src/server/workspaces.ts`). A project's workspace is recorded against its stable
+`.psm/identity.json` id, not its directory, and moving it never changes file, agent-pairing or
+deployment access. See [docs/roadmaps/workspace-implementation-status.md](docs/roadmaps/workspace-implementation-status.md).
