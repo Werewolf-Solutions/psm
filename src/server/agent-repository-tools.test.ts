@@ -20,7 +20,9 @@ function fixture(t: test.TestContext) {
   fs.writeFileSync(path.join(root, "app.txt"), "before\n");
   fs.writeFileSync(path.join(root, "other.txt"), "unrelated\n");
   git("add", "."); git("commit", "-qm", "initial");
-  for (const permission of ["repo.read", "repo.edit", "git.commit", "git.branch"]) store.change(project, permission, true, store.snapshot(project).revision, "operator");
+  for (const permission of ["repo.read", "repo.edit", "repo.delete", "git.commit", "git.branch", "git.switch", "git.merge", "git.fetch", "git.push"] as const) {
+    store.change(project, permission, true, store.snapshot(project).revision, "operator");
+  }
   const tools = new RepositoryTools(store.snapshot(project), store);
   t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, database, store, project, tools, git };
@@ -85,13 +87,47 @@ test("a project cannot borrow another project's grants", (t) => {
   assert.throws(() => tools.stage(["app.txt"]), /has not granted/);
 });
 
+test("file deletion is separately granted and keeps protected paths protected", (t) => {
+  const { root, tools } = fixture(t);
+  fs.writeFileSync(path.join(root, "delete-me.txt"), "temporary");
+  fs.mkdirSync(path.join(root, "empty"));
+  tools.delete("delete-me.txt");
+  tools.delete("empty");
+  assert.equal(fs.existsSync(path.join(root, "delete-me.txt")), false);
+  assert.equal(fs.existsSync(path.join(root, "empty")), false);
+  assert.throws(() => tools.delete(".git/config"), /protected/);
+});
+
 test("Git branch grant creates without switching or accepting command syntax", (t) => {
   const { tools, git } = fixture(t);
   const before = git("branch", "--show-current");
   tools.branch("repair/source");
   assert.equal(git("branch", "--show-current"), before);
-  assert.throws(() => tools.branch("-D main"), /simple local branch/);
-  assert.throws(() => tools.branch("fix && curl localhost"), /simple local branch/);
+  assert.throws(() => tools.branch("-D main"), /simple Git branch/);
+  assert.throws(() => tools.branch("fix && curl localhost"), /simple Git branch/);
+});
+
+test("granted branch switching, merging, fetching, and pushing use validated names and configured remotes", (t) => {
+  const { root, tools, git } = fixture(t);
+  const base = git("branch", "--show-current").trim();
+  tools.branch("feature/managed");
+  tools.switchBranch("feature/managed");
+  fs.writeFileSync(path.join(root, "app.txt"), "feature\n");
+  git("add", "app.txt"); git("commit", "-qm", "feature");
+  tools.switchBranch(base);
+  tools.merge("feature/managed");
+  assert.equal(fs.readFileSync(path.join(root, "app.txt"), "utf8"), "feature\n");
+  tools.deleteBranch("feature/managed");
+
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), "psm-permission-remote-"));
+  t.after(() => fs.rmSync(remote, { recursive: true, force: true }));
+  execFileSync("git", ["init", "--bare", "-q", remote]);
+  git("remote", "add", "origin", remote);
+  tools.push("origin", base);
+  tools.fetch("origin");
+  assert.equal(execFileSync("git", ["--git-dir", remote, "rev-parse", `refs/heads/${base}`], { encoding: "utf8" }).trim(), git("rev-parse", "HEAD").trim());
+  assert.throws(() => tools.push("https://example.invalid/repo", base), /configured Git remote/);
+  assert.throws(() => tools.merge("--upload-pack=bad"), /simple Git branch/);
 });
 
 test("managed SDK tools exclude shell, inherited config and external integrations", async () => {

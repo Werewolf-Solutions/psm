@@ -7,11 +7,57 @@ import type { RepositoryTools } from "./agent-repository-tools.ts";
 import type { AgentPermissionStore } from "./agent-permissions.ts";
 
 export type TaskExecutor = (args: string[], signal?: AbortSignal) => Promise<string>;
+
+/**
+ * Turn the docker CLI's connection failures into something the operator can act
+ * on, because the two that matter look identical from here and have completely
+ * different fixes.
+ *
+ * **Permission denied on the socket is usually not a missing group.** The socket
+ * is `root:docker` mode 0660, so a process needs the `docker` group — and a
+ * process's supplementary groups are fixed when it starts and never re-read.
+ * Adding the PSM user to the group therefore does nothing at all for a psm that
+ * was already running: `id` in a new terminal shows the group, `/proc/<psm
+ * pid>/status` still does not, and the socket keeps refusing it. Restarting psm
+ * from a session that has the group is the whole fix, and it is not a fix anyone
+ * guesses from `permission denied`.
+ *
+ * Returns null when the output is not a connection failure, so a genuine test
+ * failure is passed through untouched.
+ */
+export function describeDockerConnectionFailure(output: string): string | null {
+  if (/permission denied while trying to connect to the docker/i.test(output)) {
+    return (
+      "The managed task sandbox could not reach the Docker daemon: permission denied on the "
+      + "Docker socket. The socket is owned by the `docker` group, and a process keeps the "
+      + "group list it started with — so if the PSM user was added to that group after psm "
+      + "started, psm still does not have it. Check with "
+      + "`grep Groups /proc/$(pgrep -f 'src/server/index.ts' | head -1)/status` against "
+      + "`getent group docker`, then restart psm from a session that has the group."
+    );
+  }
+  if (/failed to connect to the docker|cannot connect to the docker daemon|is the docker daemon running/i.test(output)) {
+    return (
+      "The managed task sandbox could not reach the Docker daemon: nothing is listening on the "
+      + "socket. Start the daemon on the PSM host (`systemctl start docker`), or point "
+      + "DOCKER_HOST at the right socket."
+    );
+  }
+  return null;
+}
+
 export const dockerTaskExecutor: TaskExecutor = (args, signal) => new Promise((resolve, reject) => {
   execFile("docker", args, { signal, timeout: 300_000, maxBuffer: 512 * 1024, env: { PATH: process.env.PATH }, encoding: "utf8" }, (error, stdout, stderr) => {
     if (error && !stdout && !stderr) { reject(new Error("The managed task sandbox is unavailable. Configure Docker and preload the Node sandbox image on the PSM host.")); return; }
     const output = `${stdout}\n${stderr}`.slice(-64_000);
-    if (error) reject(new Error(`Sandbox task failed: ${output}`)); else resolve(output);
+    if (error) {
+      /* A daemon psm cannot reach is an operator problem, not a failing test, and
+       * saying so here stops it being read as "the project's tests broke". */
+      const connection = describeDockerConnectionFailure(output);
+      reject(new Error(connection ?? `Sandbox task failed: ${output}`));
+      return;
+    }
+    resolve(output);
   });
 });
 
@@ -50,7 +96,7 @@ export class ManagedTaskRunner {
     private readonly download: typeof downloadLockedPackage = downloadLockedPackage) {}
   private snapshot(): string {
     this.store.check(this.repository.snapshot, "repo.read");
-    const entries = this.repository.list().filter((file) => !file.startsWith(".psm/") && !file.startsWith(".psm-"));
+    const entries = this.repository.taskFiles().filter((file) => !file.startsWith(".psm/") && !file.startsWith(".psm-"));
     const hash = createHash("sha256");
     let sourceBytes = 0;
     const files = entries.map((file) => {

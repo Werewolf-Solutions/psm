@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { AgentPermissionStore } from "./agent-permissions.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import { ManagedTaskRunner, downloadLockedPackage, type TaskExecutor } from "./agent-task-runner.ts";
+import { ManagedTaskRunner, describeDockerConnectionFailure, downloadLockedPackage, type TaskExecutor } from "./agent-task-runner.ts";
 import { openDatabase } from "./db.ts";
 
 function fixture(t: test.TestContext) {
@@ -41,6 +41,27 @@ test("tests execute with offline, bounded, read-only host inputs and no credenti
   h.store.change(h.project, "test.run", false, h.store.snapshot(h.project).revision, "operator");
   await assert.rejects(runner.tests(), /permissions changed/);
   assert.equal(calls.length, 2);
+});
+test("task snapshots exclude Git-ignored runtime output", async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const h = fixture(t); const calls: string[][] = [];
+  execFileSync("git", ["init"], { cwd: h.directory, stdio: "ignore" });
+  fs.writeFileSync(path.join(h.directory, ".gitignore"), "logs/\n");
+  fs.mkdirSync(path.join(h.directory, "logs"));
+  fs.writeFileSync(path.join(h.directory, "logs/server.log"), "runtime output");
+  fs.writeFileSync(path.join(h.directory, "new-test.js"), "export {};\n");
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => {
+    calls.push(args);
+    if (args[0] === "run") {
+      const source = args.find((arg) => arg.endsWith("target=/source,readonly"))!.split("source=")[1].split(",target=")[0];
+      assert.equal(fs.existsSync(path.join(source, "logs/server.log")), false);
+      assert.equal(fs.existsSync(path.join(source, "new-test.js")), true);
+    }
+    return "passed";
+  });
+  t.after(() => runner.close());
+  assert.equal(await runner.tests(), "passed");
+  assert.equal(calls.at(-1)![0], "rm");
 });
 test("package installation uses verified downloads offline, preserves the checkout and cleans failed containers", async (t) => {
   const h = fixture(t); const original = fs.readFileSync(path.join(h.directory, "package-lock.json"), "utf8");
@@ -80,4 +101,51 @@ test("npm ci can consume rewritten locked tarball paths offline without lifecycl
   fs.writeFileSync(userconfig, ""); fs.writeFileSync(globalconfig, "");
   execFileSync("npm", ["ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: workspace, env: { PATH: process.env.PATH, HOME: root, npm_config_cache: path.join(root, "cache"), npm_config_userconfig: userconfig, npm_config_globalconfig: globalconfig }, stdio: "pipe", timeout: 30_000 });
   assert.equal(fs.readFileSync(path.join(workspace, "node_modules/psm-fixture/index.js"), "utf8"), "module.exports = 42;");
+});
+
+/* ---- telling an unreachable daemon apart from a failing test ----
+ *
+ * Both arrive here as "docker exited non-zero with output on stderr". Reading a
+ * permission error as a test failure sent someone looking at the project's code
+ * for a fault that was in the PSM host's group membership, so the two are
+ * separated deliberately and the message says what to do.
+ */
+
+test("a socket permission error explains the group, and that a restart is the fix", () => {
+  // The docker CLI's exact wording, captured from the CLI on 2026-09-21.
+  const message = describeDockerConnectionFailure(
+    "\npermission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+  );
+  assert.ok(message, "a permission failure must be recognised");
+  assert.match(message!, /permission denied on the Docker socket/);
+  // The non-obvious half: a running process never picks up a new group.
+  assert.match(message!, /group list it started with/);
+  assert.match(message!, /restart psm/i);
+  assert.doesNotMatch(message!, /Sandbox task failed/, "it must not read as a failing test");
+});
+
+test("an absent daemon is a different message with a different fix", () => {
+  const message = describeDockerConnectionFailure(
+    "\nfailed to connect to the docker API at unix:///var/run/docker.sock; check if the path is "
+    + "correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file or directory",
+  );
+  assert.ok(message);
+  assert.match(message!, /nothing is listening/);
+  assert.match(message!, /systemctl start docker/);
+  assert.doesNotMatch(message!, /group/, "a missing daemon is not a permissions problem");
+});
+
+test("a genuine test failure is passed through untouched", () => {
+  for (const output of [
+    "1..3\nnot ok 2 - the thing under test\n# fail 1",
+    "Error: expected 3 to equal 4",
+    "npm ERR! missing script: test",
+    "",
+  ]) {
+    assert.equal(
+      describeDockerConnectionFailure(output),
+      null,
+      `"${output.slice(0, 30)}" is the project's failure, not the host's`,
+    );
+  }
 });

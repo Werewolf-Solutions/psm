@@ -63,6 +63,21 @@ export class RepositoryTools {
     walk(this.snapshot.project.path, "", 0);
     return files;
   }
+  /** Files that define the current test input. In Git checkouts, ignored runtime
+   * output (logs, caches, uploads, and other generated data) must not turn into
+   * source merely because it exists beside the checkout. */
+  taskFiles(): string[] {
+    this.allow("repo.read");
+    const dotGit = path.join(this.snapshot.project.path, ".git");
+    if (!fs.existsSync(dotGit) || !fs.lstatSync(dotGit).isDirectory()) return this.list();
+    return this.git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+      .split("\0")
+      .filter(Boolean)
+      .filter((file) => {
+        try { return fs.statSync(this.resolve(file)).isFile(); }
+        catch { return false; }
+      });
+  }
   search(text: string): Array<{ file: string; line: number; text: string }> {
     this.allow("repo.read");
     if (!text || text.length > 200) throw new PermissionError("Search for 1–200 literal characters.");
@@ -96,7 +111,16 @@ export class RepositoryTools {
     fs.mkdirSync(this.resolve(directory, true, true));
     return `Created ${directory}`;
   }
-  private git(args: string[], input?: string | Buffer): string {
+  delete(file: string): string {
+    this.allow("repo.delete");
+    const resolved = this.resolve(file, false, true);
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) fs.rmdirSync(resolved);
+    else if (stat.isFile()) fs.unlinkSync(resolved);
+    else throw new PermissionError("Delete an ordinary file or empty directory.");
+    return `Deleted ${file}`;
+  }
+  private git(args: string[], input?: string | Buffer, remote = false): string {
     const root = this.snapshot.project.path;
     const dotGit = path.join(root, ".git");
     if (!fs.lstatSync(dotGit).isDirectory() || fs.lstatSync(dotGit).isSymbolicLink()) throw new PermissionError("Managed Git requires an ordinary checkout; linked worktrees are not supported.");
@@ -111,7 +135,9 @@ export class RepositoryTools {
       }
     };
     check(dotGit);
-    const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin", HOME: root, LANG: "C.UTF-8", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_LITERAL_PATHSPECS: "1" };
+    const env: NodeJS.ProcessEnv = remote
+      ? { PATH: process.env.PATH || "/usr/bin:/bin", HOME: homedir(), LANG: "C.UTF-8", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_LITERAL_PATHSPECS: "1", ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}) }
+      : { PATH: "/usr/bin:/bin", HOME: root, LANG: "C.UTF-8", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat", GIT_LITERAL_PATHSPECS: "1" };
     const base = ["--git-dir", dotGit, "--work-tree", root];
     // Even status and commit may invoke clean/process filters while refreshing
     // the index. Disable every configured filter, including include-file entries.
@@ -137,7 +163,7 @@ export class RepositoryTools {
       if (!match) throw new PermissionError("Git cannot tell who to commit as in this checkout. Set user.name and user.email (for example git config --global user.name \"Your Name\"), then resume preparation.");
       return { name: match[1], email: match[2] };
     };
-    if (args.includes("commit") || args[0] === "var") {
+    if (args.includes("commit") || args.includes("merge") || args[0] === "var") {
       const author = identity("AUTHOR"), committer = identity("COMMITTER");
       env.GIT_AUTHOR_NAME = author.name; env.GIT_AUTHOR_EMAIL = author.email;
       env.GIT_COMMITTER_NAME = committer.name; env.GIT_COMMITTER_EMAIL = committer.email;
@@ -189,11 +215,54 @@ export class RepositoryTools {
     this.staged.delete(key);
     return result;
   }
+  private branchName(name: string): string {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(name)) throw new PermissionError("Use a simple Git branch or ref name.");
+    this.git(["check-ref-format", "--branch", name]);
+    return name;
+  }
+  private remoteName(name: string): string {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name)) throw new PermissionError("Use the name of a configured Git remote.");
+    const remotes = this.git(["remote"]).split("\n").filter(Boolean);
+    if (!remotes.includes(name)) throw new PermissionError(`Git remote ${name} is not configured for this project.`);
+    return name;
+  }
   branch(name: string): string {
     this.allow("git.branch");
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9/_-]{0,99}$/.test(name)) throw new PermissionError("Use a simple local branch name.");
-    this.git(["check-ref-format", "--branch", name]);
-    this.git(["branch", "--no-track", name, "HEAD"]);
-    return `Created ${name}; the current branch is unchanged.`;
+    const branch = this.branchName(name);
+    this.git(["branch", "--no-track", branch, "HEAD"]);
+    return `Created ${branch}; the current branch is unchanged.`;
+  }
+  deleteBranch(name: string): string {
+    this.allow("git.branch");
+    const branch = this.branchName(name);
+    this.git(["branch", "-d", branch]);
+    return `Deleted local branch ${branch}.`;
+  }
+  switchBranch(name: string): string {
+    this.allow("git.switch");
+    const branch = this.branchName(name);
+    this.git(["switch", branch]);
+    this.staged.delete(this.snapshot.project.path);
+    return `Switched to ${branch}.`;
+  }
+  merge(ref: string): string {
+    this.allow("git.merge");
+    const source = this.branchName(ref);
+    const result = this.git(["merge", "--no-edit", "--no-verify", source]);
+    this.staged.delete(this.snapshot.project.path);
+    return result || `Merged ${source}.`;
+  }
+  fetch(remote = "origin"): string {
+    this.allow("git.fetch");
+    const name = this.remoteName(remote);
+    const result = this.git(["fetch", name], undefined, true);
+    return result || `Fetched ${name}.`;
+  }
+  push(remote = "origin", branch?: string): string {
+    this.allow("git.push");
+    const name = this.remoteName(remote);
+    const target = this.branchName(branch || this.git(["branch", "--show-current"]).trim());
+    const result = this.git(["push", "--porcelain", name, `HEAD:refs/heads/${target}`], undefined, true);
+    return result || `Pushed HEAD to ${name}/${target}.`;
   }
 }

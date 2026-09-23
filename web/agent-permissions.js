@@ -1,6 +1,22 @@
 /* Project policy is server-owned. This view never writes repository settings. */
 (() => {
   const generations = new WeakMap();
+  const fallbackCategories = [
+    { id: "repository", title: "Repository", description: "Read, edit, and delete project files." },
+    { id: "git-local", title: "Local Git", description: "Create commits and manage local branches and merges." },
+    { id: "git-remote", title: "Remote Git", description: "Fetch from and push to configured remotes." },
+    { id: "execution", title: "Execution", description: "Run tests and install project packages." },
+    { id: "integrations", title: "Integrations", description: "Use explicitly attached tools and services." },
+  ];
+  const permissionCategory = (permission) => {
+    if (permission.category) return permission.category;
+    if (permission.id.startsWith("repo.")) return "repository";
+    if (["git.fetch", "git.push"].includes(permission.id)) return "git-remote";
+    if (permission.id.startsWith("git.")) return "git-local";
+    if (["test.run", "pkg.install"].includes(permission.id)) return "execution";
+    if (permission.id === "mcp.use") return "integrations";
+    return "other";
+  };
   const node = (tag, text, className = "") => {
     const element = document.createElement(tag);
     element.textContent = text;
@@ -31,40 +47,92 @@
     const show = (data) => {
       container.querySelector(".permission-list")?.remove();
       const list = node("div", "", "permission-list");
-      list.append(node("p", "Managed execution: Claude and Codex. Tests and installs use a disposable offline Docker sandbox. Attached MCP calls require individual review below.", "cap-section-description"));
-      for (const permission of data.permissions) {
-        const grant = data.grants[permission.id];
-        const row = node("article", "", "permission-row");
-        const description = node("div", "");
-        description.append(node("h3", permission.title), node("p", permission.description));
-        if (grant) description.append(node("small", `${grant.granted ? "Granted" : "Revoked"} by ${grant.actor} · ${new Date(grant.at).toLocaleString()}`));
-        else description.append(node("small", permission.id === "git.push" ? "Outside standing agent permissions" : "No grant recorded"));
-        const state = node("span", permission.supported ? grant?.granted ? "Granted" : "Not granted" : permission.id === "git.push" ? "Approval required" : "Unavailable", "cap-badge");
-        row.append(description, state);
-        if (permission.supported) {
-          const button = node("button", grant?.granted ? "Revoke" : "Grant", "btn");
-          button.type = "button";
-          button.onclick = async () => {
-            if (pending || !current()) return;
-            const granted = !grant?.granted;
-            if (granted && !window.confirm(`Allow ${project.name} agents to ${permission.title.toLowerCase()}?\n\n${permission.description}\n\nCurrent turns will stop so new permissions take effect.`)) return;
-            pending = true;
-            list.querySelectorAll("button").forEach((item) => { item.disabled = true; });
-            try {
-              const updated = await request(api, `${base}/agent-permissions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ permission: permission.id, granted, revision: data.revision }) });
-              if (current()) {
-                const resumed = Array.isArray(updated.resumedPreparations) ? updated.resumedPreparations : [];
-                status.textContent = !granted ? "Revoked. Affected turns and queued messages were stopped."
-                  : resumed.length ? `Grant saved. Deployment preparation resumed for ${resumed.join(", ")}.`
-                  : "Grant saved. A preparation waiting on grants continues once every required one is in place.";
-                show(updated);
-              }
-            } catch (error) { if (current()) status.textContent = error.message; }
-            finally { pending = false; if (current()) list.querySelectorAll("button").forEach((item) => { item.disabled = false; }); }
-          };
-          row.append(button);
+      const supported = data.permissions.filter((permission) => permission.supported);
+      const currentCatalog = Array.isArray(data.categories) && data.categories.length > 0;
+      const categoryIds = new Set(data.permissions.map(permissionCategory));
+      const categories = currentCatalog
+        ? data.categories
+        : fallbackCategories.filter((category) => categoryIds.has(category.id));
+      const changePermissions = async (permissions, granted, label) => {
+        if (pending || !current() || !permissions.length) return;
+        if (granted && !window.confirm(`Allow ${project.name} agents to ${label}?\n\nThis changes ${permissions.length} standing permission${permissions.length === 1 ? "" : "s"}. Remote Git grants can publish source, and repository grants can delete files. Current turns will stop so the new permissions take effect.`)) return;
+        pending = true;
+        list.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+        try {
+          const updated = await request(api, `${base}/agent-permissions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ permissions, permission: permissions.length === 1 ? permissions[0] : undefined, granted, revision: data.revision }),
+          });
+          if (current()) {
+            const resumed = Array.isArray(updated.resumedPreparations) ? updated.resumedPreparations : [];
+            status.textContent = !granted ? "Permissions revoked. Affected turns and queued messages were stopped."
+              : resumed.length ? `Grants saved. Deployment preparation resumed for ${resumed.join(", ")}.`
+              : "Grants saved. A preparation waiting on grants continues once every required one is in place.";
+            show(updated);
+          }
+        } catch (error) { if (current()) status.textContent = error.message; }
+        finally { pending = false; if (current()) list.querySelectorAll("button").forEach((item) => { item.disabled = item.dataset.fixedDisabled === "true"; }); }
+      };
+      const action = (text, permissions, granted, label, primary = false, available = true) => {
+        const button = node("button", text, primary ? "btn btn-primary" : "btn");
+        button.type = "button";
+        button.disabled = !permissions.length || !available;
+        button.dataset.fixedDisabled = button.disabled ? "true" : "false";
+        if (!available) button.title = "Restart PSM to load the categorized permission service.";
+        button.onclick = () => changePermissions(permissions, granted, label);
+        return button;
+      };
+
+      const summary = node("div", "", "permission-summary");
+      const summaryCopy = node("div", "");
+      summaryCopy.append(
+        node("h3", "Managed agent access"),
+        node("p", "Claude and Codex receive only the operations granted here. Grant full access enables every supported repository, Git, execution, and integration operation.", "cap-section-description"),
+      );
+      const summaryActions = node("div", "", "permission-actions");
+      const missing = supported.filter((permission) => !data.grants[permission.id]?.granted).map((permission) => permission.id);
+      const granted = supported.filter((permission) => data.grants[permission.id]?.granted).map((permission) => permission.id);
+      summaryActions.append(
+        action("Grant full access", missing, true, "use every supported managed operation", true, currentCatalog),
+        action("Revoke all", granted, false, "revoke every managed operation", false, currentCatalog),
+      );
+      summary.append(summaryCopy, summaryActions);
+      list.append(summary);
+      if (!currentCatalog) list.append(node("p", "PSM is still running the previous permission service. Individual grants remain available; restart PSM to load the complete Git list and category-wide grants.", "permission-status"));
+
+      for (const category of categories) {
+        const permissions = data.permissions.filter((permission) => permissionCategory(permission) === category.id);
+        if (!permissions.length) continue;
+        const section = node("section", "", "permission-category");
+        const heading = node("div", "", "permission-category-head");
+        const copy = node("div", "");
+        copy.append(node("h3", category.title), node("p", category.description, "cap-section-description"));
+        const actions = node("div", "", "permission-actions");
+        const categoryMissing = permissions.filter((permission) => permission.supported && !data.grants[permission.id]?.granted).map((permission) => permission.id);
+        const categoryGranted = permissions.filter((permission) => permission.supported && data.grants[permission.id]?.granted).map((permission) => permission.id);
+        actions.append(
+          action("Grant all", categoryMissing, true, `use all ${category.title.toLowerCase()} operations`, false, currentCatalog),
+          action("Revoke all", categoryGranted, false, `revoke all ${category.title.toLowerCase()} operations`, false, currentCatalog),
+        );
+        heading.append(copy, actions);
+        section.append(heading);
+
+        for (const permission of permissions) {
+          const grant = data.grants[permission.id];
+          const row = node("article", "", "permission-row");
+          const description = node("div", "");
+          description.append(node("h4", permission.title), node("p", permission.description));
+          if (grant) description.append(node("small", `${grant.granted ? "Granted" : "Revoked"} by ${grant.actor} · ${new Date(grant.at).toLocaleString()}`));
+          else description.append(node("small", "No grant recorded"));
+          const state = node("span", permission.supported ? grant?.granted ? "Granted" : "Not granted" : "Unavailable", "cap-badge");
+          row.append(description, state);
+          if (permission.supported) {
+            row.append(action(grant?.granted ? "Revoke" : "Grant", [permission.id], !grant?.granted, permission.title.toLowerCase()));
+          }
+          section.append(row);
         }
-        list.append(row);
+        list.append(section);
       }
       const audit = node("details", "", "permission-audit");
       audit.append(node("summary", "Permission history"));

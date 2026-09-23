@@ -65,10 +65,16 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     tool("search", "Search project files for literal text.", { project, text: z.string() }, ({ project, text }) => invoke(project, (repo) => repo.search(text))),
     tool("write", "Create or replace a project text file. Read existing files first.", { project, file: z.string(), content: z.string() }, ({ project, file, content }) => invoke(project, (repo) => repo.write(file, content))),
     tool("mkdir", "Create one project directory inside an existing directory.", { project, directory: z.string() }, ({ project, directory }) => invoke(project, (repo) => repo.mkdir(directory))),
+    tool("delete", "Delete one ordinary file or empty directory.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.delete(file))),
     tool("git_read", "Inspect Git status, recent commit summaries, or the diff of a named file.", { project, operation: z.enum(["status", "log", "diff"]), file: z.string().optional() }, ({ project, operation, file }) => invoke(project, (repo) => repo.gitRead(operation, file))),
     tool("git_stage", "Stage explicit file paths. Preserves unrelated staged work by refusing if the index belongs to another turn. Does not execute filters.", { project, files: z.array(z.string()).min(1).max(100) }, ({ project, files }) => invoke(project, (repo) => repo.stage(files))),
     tool("git_commit", "Commit this turn's staged changes locally, with Git hooks and signing disabled. Does not publish.", { project, message: z.string() }, ({ project, message }) => invoke(project, (repo) => repo.commit(message))),
-    tool("git_branch", "Create a local branch at HEAD; does not switch or delete branches.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.branch(name))),
+    tool("git_branch", "Create a local branch at HEAD without switching.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.branch(name))),
+    tool("git_branch_delete", "Delete a fully merged local branch.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.deleteBranch(name))),
+    tool("git_switch", "Switch to an existing local branch.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.switchBranch(name))),
+    tool("git_merge", "Merge a local or remote-tracking branch into the current branch.", { project, ref: z.string() }, ({ project, ref }) => invoke(project, (repo) => repo.merge(ref))),
+    tool("git_fetch", "Fetch from an operator-configured Git remote.", { project, remote: z.string().default("origin") }, ({ project, remote }) => invoke(project, (repo) => repo.fetch(remote))),
+    tool("git_push", "Push HEAD without force to a named branch on an operator-configured Git remote.", { project, remote: z.string().default("origin"), branch: z.string().optional() }, ({ project, remote, branch }) => invoke(project, (repo) => repo.push(remote, branch))),
   ] });
   const close = server.instance.close.bind(server.instance);
   server.instance.close = async () => { for (const task of tasks.values()) task.close(); await close(); };

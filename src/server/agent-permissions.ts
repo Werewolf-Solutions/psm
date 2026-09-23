@@ -6,15 +6,27 @@ import express from "express";
 import type { DatabaseSync } from "node:sqlite";
 import { db } from "./db.ts";
 
+export const AGENT_PERMISSION_CATEGORIES = [
+  { id: "repository", title: "Repository files", description: "Read and change ordinary files inside this project checkout." },
+  { id: "git-local", title: "Local Git", description: "Manage commits, branches, and merges in the local checkout." },
+  { id: "git-remote", title: "Remote Git", description: "Fetch from and push to remotes already configured by the operator." },
+  { id: "execution", title: "Execution", description: "Run bounded project tasks and prepare dependencies." },
+  { id: "integrations", title: "Integrations", description: "Use explicitly attached external tools through their review flow." },
+] as const;
+
 export const AGENT_PERMISSIONS = [
-  { id: "repo.read", title: "Read repository", description: "Read and search ordinary project files and inspect Git changes.", supported: true },
-  { id: "repo.edit", title: "Edit repository", description: "Create and update ordinary project files. Permission config, credentials and Git internals are protected.", supported: true },
-  { id: "git.commit", title: "Stage and commit", description: "Stage named files and commit those changes locally. Hooks and signing are disabled; existing staged work is preserved.", supported: true },
-  { id: "git.branch", title: "Create branch", description: "Create a local branch at HEAD. Does not switch, delete or publish branches.", supported: true },
-  { id: "test.run", title: "Run tests", description: "Run project tests in an isolated, offline container. Requires Docker and a preloaded Node image.", supported: true },
-  { id: "pkg.install", title: "Install packages", description: "Download integrity-verified public npm packages and install offline in the turn sandbox. Does not change the checkout.", supported: true },
-  { id: "mcp.use", title: "Use attached tools", description: "Discover explicitly attached MCP tools and request individual calls. Each invocation requires operator review in Capabilities.", supported: true },
-  { id: "git.push", title: "Publish source", description: "PSM-managed; requires approval of a publishing plan. Never a standing agent grant.", supported: false },
+  { id: "repo.read", category: "repository", title: "Read repository", description: "Read and search ordinary project files and inspect Git changes.", supported: true },
+  { id: "repo.edit", category: "repository", title: "Edit repository", description: "Create and update ordinary project files. Permission config, credentials and Git internals are protected.", supported: true },
+  { id: "repo.delete", category: "repository", title: "Delete repository files", description: "Delete ordinary files and empty directories inside the project checkout.", supported: true },
+  { id: "git.commit", category: "git-local", title: "Stage and commit", description: "Stage named files and commit those changes locally. Hooks and signing are disabled; existing staged work is preserved.", supported: true },
+  { id: "git.branch", category: "git-local", title: "Manage branches", description: "Create and delete local branches using validated branch names.", supported: true },
+  { id: "git.switch", category: "git-local", title: "Switch branches", description: "Switch the checkout to an existing local branch.", supported: true },
+  { id: "git.merge", category: "git-local", title: "Merge branches", description: "Merge a validated local or remote-tracking ref into the current branch with hooks disabled.", supported: true },
+  { id: "git.fetch", category: "git-remote", title: "Fetch remotes", description: "Fetch from a named Git remote already configured in this checkout using the operator's Git credentials.", supported: true },
+  { id: "git.push", category: "git-remote", title: "Push branches", description: "Push HEAD to a named branch on an operator-configured Git remote. Force push and model-supplied URLs are not allowed.", supported: true },
+  { id: "test.run", category: "execution", title: "Run tests", description: "Run project tests in an isolated, offline container. Requires Docker and a preloaded Node image.", supported: true },
+  { id: "pkg.install", category: "execution", title: "Install packages", description: "Download integrity-verified public npm packages and install offline in the turn sandbox. Does not change the checkout.", supported: true },
+  { id: "mcp.use", category: "integrations", title: "Use attached tools", description: "Discover explicitly attached MCP tools and request individual calls. Each invocation requires operator review in Capabilities.", supported: true },
 ] as const;
 export type AgentPermission = typeof AGENT_PERMISSIONS[number]["id"];
 export interface PermissionProject { id: string; path: string; name: string }
@@ -37,20 +49,33 @@ export class AgentPermissionStore {
     }
   }
   change(project: PermissionProject, permission: string, granted: unknown, revision: unknown, actor: string): PermissionSnapshot {
-    const definition = AGENT_PERMISSIONS.find((entry) => entry.id === permission);
-    if (!definition || typeof granted !== "boolean" || !Number.isSafeInteger(revision)) throw new PermissionError("Invalid permission change.");
-    if (granted && !definition.supported) throw new PermissionError(definition.description);
+    return this.changeMany(project, [permission], granted, revision, actor);
+  }
+  changeMany(project: PermissionProject, permissions: unknown, granted: unknown, revision: unknown, actor: string): PermissionSnapshot {
+    const requested = Array.isArray(permissions) ? [...new Set(permissions)] : [];
+    const definitions = requested.map((permission) => AGENT_PERMISSIONS.find((entry) => entry.id === permission));
+    if (!requested.length || definitions.some((definition) => !definition) || typeof granted !== "boolean" || !Number.isSafeInteger(revision)) {
+      throw new PermissionError("Invalid permission change.");
+    }
+    if (granted) {
+      const unsupported = definitions.find((definition) => !definition!.supported);
+      if (unsupported) throw new PermissionError(unsupported.description);
+    }
     const database = this.database();
     database.exec("BEGIN IMMEDIATE");
     try {
       const previous = this.snapshot(project);
       if (revision !== previous.revision) throw new PermissionError("Permissions changed since this view was loaded. Refresh and review again.");
+      const changed = requested.filter((permission) => previous.grants[permission as AgentPermission]?.granted !== granted) as AgentPermission[];
+      if (!changed.length) { database.exec("COMMIT"); return previous; }
       const at = Date.now();
-      const grants = { ...previous.grants, [permission]: { granted, actor, at } };
+      const nextRevision = previous.revision + 1;
+      const grants = { ...previous.grants };
+      for (const permission of changed) grants[permission] = { granted, actor, at };
       database.prepare("INSERT INTO agent_permissions VALUES (?, ?, ?, ?) ON CONFLICT(project_id, checkout) DO UPDATE SET revision = excluded.revision, grants = excluded.grants")
-        .run(project.id, previous.project.path, previous.revision + 1, JSON.stringify(grants));
-      database.prepare("INSERT INTO agent_permission_events(project_id, checkout, revision, permission, granted, actor, at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .run(project.id, previous.project.path, previous.revision + 1, permission, Number(granted), actor, at);
+        .run(project.id, previous.project.path, nextRevision, JSON.stringify(grants));
+      const event = database.prepare("INSERT INTO agent_permission_events(project_id, checkout, revision, permission, granted, actor, at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+      for (const permission of changed) event.run(project.id, previous.project.path, nextRevision, permission, Number(granted), actor, at);
       database.exec("COMMIT");
       return this.snapshot(project);
     } catch (error) { database.exec("ROLLBACK"); throw error; }
@@ -65,7 +90,7 @@ export class AgentPermissionStore {
 export const PREPARATION_OPERATIONS: ReadonlyArray<{ permission: AgentPermission; instruction: string }> = [
   { permission: "repo.read", instruction: "Inspect the failing checks and read the repository using the PSM repository tools." },
   { permission: "repo.edit", instruction: "Fix the cause in this repository using the PSM write tool." },
-  { permission: "git.commit", instruction: "Fix the cause in this repository, and commit what you change. psm deploys committed source, so an uncommitted fix leaves the check failing. Use the PSM Git tools to stage explicit file paths and commit; do not include unrelated work. Publishing requires a separate PSM-approved operation." },
+  { permission: "git.commit", instruction: "Fix the cause in this repository, and commit what you change. psm deploys committed source, so an uncommitted fix leaves the check failing. Use the PSM Git tools to stage explicit file paths and commit; do not include unrelated work. Additional granted Git operations, including merge and push, are available when the operator has enabled them." },
 ];
 export function reviewAgentPermissions(snapshots: PermissionSnapshot[], engine: string, required: readonly AgentPermission[]): string | null {
   if (!["claude", "codex"].includes(engine)) return `Review capabilities — ${engine} does not yet support PSM's managed permission tools. Select Claude or Codex to prepare this project.`;
@@ -91,7 +116,7 @@ export function agentPermissionRouter(options: {
   mcp?: ManagedMcpTools;
 }): express.Router {
   const router = express.Router();
-  const view = (project: PermissionProject) => ({ ...options.store.snapshot(project), permissions: AGENT_PERMISSIONS, history: options.store.history(project), supportedEngines: ["claude", "codex"] });
+  const view = (project: PermissionProject) => ({ ...options.store.snapshot(project), categories: AGENT_PERMISSION_CATEGORIES, permissions: AGENT_PERMISSIONS, history: options.store.history(project), supportedEngines: ["claude", "codex"] });
   router.get("/api/projects/:id/agent-permissions", (req, res) => {
     try { res.json(view(options.project(req.params.id))); }
     catch (error) { res.status(400).json({ error: (error as Error).message }); }
@@ -100,7 +125,8 @@ export function agentPermissionRouter(options: {
     if (!isPermissionOperatorRequest(req)) { res.status(403).json({ error: "Change agent permissions from the local, same-origin cockpit." }); return; }
     try {
       const project = options.project(req.params.id);
-      options.store.change(project, req.body?.permission, req.body?.granted, req.body?.revision, `local:${userInfo().username}`);
+      const permissions = Array.isArray(req.body?.permissions) ? req.body.permissions : [req.body?.permission];
+      options.store.changeMany(project, permissions, req.body?.granted, req.body?.revision, `local:${userInfo().username}`);
       const notice = options.changed(project);
       res.json({ ...view(project), ...(notice && typeof notice === "object" ? notice : {}) });
     } catch (error) { res.status(error instanceof PermissionError ? 409 : 400).json({ error: (error as Error).message }); }

@@ -28,8 +28,10 @@ test("SDK MCP transport stages and commits without approval and cannot self-gran
   await client.connect(clientTransport);
   const tools = await client.listTools();
   assert.ok(tools.tools.some((tool) => tool.name === "git_commit"));
-  assert.ok(!tools.tools.some((tool) => /bash|shell|grant|push/.test(tool.name)));
-  assert.ok(tools.tools.some((tool) => tool.name === "install_packages"));
+  assert.ok(!tools.tools.some((tool) => /bash|shell|grant/.test(tool.name)));
+  for (const name of ["delete", "git_switch", "git_merge", "git_fetch", "git_push", "install_packages"]) {
+    assert.ok(tools.tools.some((tool) => tool.name === name), `${name} should be brokered`);
+  }
   const call = (name: string, args: Record<string, unknown>) => client.callTool({ name, arguments: { project: project.id, ...args } });
   assert.equal((await call("run_tests", { script: "test" })).isError, true);
   assert.equal((await call("install_packages", {})).isError, true);

@@ -41,7 +41,7 @@ configuration. Publication and infrastructure require separate operator reviews.
   to source, policy and credential revisions with a short-lived one-use intent.
   Publish from an isolated bare repository, require a fast-forward and use an
   exact remote-ref lease to reject concurrent writers. Verify publication before
-  dispatching the build. Never expose a standing `git.push` grant.
+  dispatching the build. Managed deployment keeps this exact-review path; operators may now separately grant bounded standing `git.fetch` and non-force `git.push` access to configured remotes.
 - [x] Pause Make ready for publication approval, then continue the build and
   infrastructure preparation automatically. Cancellation invalidates pending
   publication reviews; failures require a fresh review.
@@ -56,7 +56,9 @@ configuration. Publication and infrastructure require separate operator reviews.
   before runtime observation, with metadata/generation checks that preserve
   invalid profiles. Presence still does not assert successful provider authentication.
 - [x] Show grant provenance, MCP call reviews and grouped deployment-connection
-  diagnostics in Capabilities. Preserve the existing Attached tools surface.
+  diagnostics in Capabilities. Group grants by repository, local Git, remote Git,
+  execution and integrations; support atomic category grants and full managed
+  access. Preserve the existing Attached tools surface.
 - [x] Test grant forgery, stale revisions, revocation, protected files, real Git
   staging/committing, Codex tool routing, sandbox arguments, reviewed MCP calls,
   publication races, API origin/policy/intent enforcement and preparation resumption.
@@ -78,9 +80,29 @@ These are runtime prerequisites, separate from the completed implementation:
   PSM uses `--pull=never` and never silently substitutes an unrestricted runner.
   On the host, check `docker info` and `docker image inspect node:22-bookworm-slim`;
   preload the image with `docker pull node:22-bookworm-slim` when needed.
-- **This development host:** Docker daemon access is denied. Container argument,
-  credential exclusion, cleanup and package-input tests pass, but an actual
-  container execution remains unverified until host access is configured.
+- **This development host (diagnosed 2026-09-21):** the daemon is running and the
+  PSM user *is* in the `docker` group — `getent group docker` → `docker:x:984:oznerol`,
+  and `docker ps` works in a new shell. What is denied is **the running psm
+  process**, which was started before that group membership existed:
+
+  ```
+  /proc/<psm pid>/status →  Gid: 1000   Groups: 4 24 27 30 46 100 114 1000
+  a new shell            →  Groups: 4 24 27 30 46 100 114 984 1000
+                                                           ^^^ docker
+  ```
+
+  A process's supplementary groups are fixed at exec and never re-read, so no
+  amount of `usermod` reaches a psm that is already up. **The fix is to restart
+  psm from a session that has the group** — there is nothing to configure and no
+  capability to add. `describeDockerConnectionFailure` in
+  `src/server/agent-task-runner.ts` now says this instead of surfacing the bare
+  `permission denied`, which had been read as a failing test.
+
+  **Done, and verified 2026-09-21.** psm was restarted from a session holding the
+  group; the new process shows `Groups: … 984 …`, `node:22-bookworm-slim` was
+  already preloaded, and a disposable container ran under the sandbox's own flags
+  (`--pull=never --network=none --read-only --tmpfs /tmp`) and printed
+  `v22.23.2`. Container execution on this host is no longer a prerequisite.
 - Install support currently covers npm lockfiles v2/v3 containing public
   `registry.npmjs.org` packages with SHA-512 integrity. Private registries,
   workspace/file/Git dependencies and package-version resolution are not supported.
@@ -111,6 +133,4 @@ already sent, and revocation prevents subsequent broker calls.
 
 This is not OS isolation against another process running as the operator.
 Workspace chat, operator terminals and other applications retain their own
-permissions. Discarding edits and deleting/switching branches remain outside the
-commit/branch-creation grants. PSM's running code cannot be edited by its managed
-agents; use a separate development checkout.
+permissions. File deletion, branch switching/deletion, merging, fetching and non-force pushing are separate standing grants. Remote operations accept only configured remote names and validated refs; models cannot supply remote URLs or arbitrary Git flags. PSM's running code cannot be edited by its managed agents; use a separate development checkout.
