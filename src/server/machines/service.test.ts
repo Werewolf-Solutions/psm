@@ -18,7 +18,8 @@ class FakeServer implements MachineTransport {
   calls: string[] = [];
   failNextApply: "timeout-after-applying" | null = null;
 
-  async run(endpoint: SshEndpoint, command: string, input = ""): Promise<SshResult> {
+  async run(endpoint: SshEndpoint, command: string, input: string | Buffer = ""): Promise<SshResult> {
+    input = String(input);
     this.calls.push(`${endpoint.user}: ${command.split(" ").slice(0, 4).join(" ")}`);
     if (command === "echo psm-identity-ok") return { code: 0, stdout: "psm-identity-ok\n", stderr: "" };
     const account = /readonly PSM_ACCOUNT='([^']+)'/.exec(input)?.[1];

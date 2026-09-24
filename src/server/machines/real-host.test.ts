@@ -151,3 +151,84 @@ test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !hos
   assert.equal(changed.error?.code, "host-key-mismatch");
   assert.equal(service.getMachine(machine.id, "personal").hostKeyFingerprint, trueFingerprint);
 });
+
+test("host helper install and per-project deploy identities on a systemd server", { skip: (hostKind !== "lxd") && "set PSM_MACHINE_LXD=1: installing a service needs a systemd test host" }, async (t) => {
+  const database = openDatabase(":memory:");
+  const deployments = new DeploymentStore(database);
+  const broker = new SecretBroker();
+  const transport = new SshMachineTransport({ broker });
+  const service = new MachineService({ store: new MachineStore(() => database), deployments, broker, transport });
+  const adminKey = await transport.generateKeyPair("psm test admin");
+  const target = startTestHost("lxd", adminKey.publicKey);
+  t.after(() => { target.close(); database.close(); });
+  const exec = target.exec;
+
+  const [candidate] = (await waitFor("sshd", () => service.discover(target.address, target.port))).candidates.filter((entry) => entry.keyType === "ssh-ed25519");
+  const fingerprint = exec("ssh-keygen", "-lf", "/etc/ssh/ssh_host_ed25519_key.pub").split(" ")[1];
+  let machine = service.register({ workspaceId: "personal", name: "systemd test host", host: target.address, port: target.port, knownHost: candidate.knownHost, confirmFingerprint: fingerprint });
+  deployments.createConnection({
+    connectionId: "admin-nopass", kind: ADMIN_CONNECTION_KIND, label: "admin", secretGeneration: 0, readiness: "missing-secret",
+    metadata: { publicMetadata: { knownHost: candidate.knownHost }, credentialIdentity: null, requiredSecretSlots: ["privateKey"] },
+    constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: target.address, user: "admin-nopass", port: target.port, hostKeyFingerprint: fingerprint } },
+    createdAt: Date.now(),
+  });
+  await broker.put("admin-nopass", "privateKey", Buffer.from(adminKey.privateKey));
+  machine = service.setAdminConnection(machine.id, "personal", machine.revision, "admin-nopass");
+
+  // A deploy access before the helper exists stops before any change.
+  const todo = { id: "prj_todo", name: "Todo", workspaceId: "personal" };
+  const early = await service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project: todo, environmentId: "staging", risk: "staging", hostname: "todo-staging.example.com", certbotEmail: "ops@example.com" });
+  const blocked = await service.settled(service.startSetup({ accessId: early.id, workspaceId: "personal", planDigest: early.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(blocked.error?.code, "conflict");
+  assert.match(blocked.error!.message, /helper-missing/);
+  assert.throws(() => exec("id", early.account));
+
+  // 1. Install the helper: build, upload, digest check, systemd service.
+  const helper = await service.planHelperInstall({ machineId: machine.id, workspaceId: "personal" });
+  assert.ok(helper.plan.operations.some((line) => /nginx and certbot/.test(line)));
+  const installed = await service.settled(service.startSetup({ accessId: helper.id, workspaceId: "personal", planDigest: helper.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(installed.state, "succeeded", JSON.stringify(installed.error));
+  assert.equal(exec("systemctl", "is-active", "psm-host-helper.service"), "active");
+  assert.equal(exec("stat", "-c", "%U:%G %a", "/usr/local/libexec/psm-host-helper"), "root:root 755");
+  assert.equal(exec("sh", "-c", "ls /tmp | grep -c '^psm-host-helper\\.' || true"), "0", "the uploaded binary is removed");
+  assert.ok(service.getMachine(machine.id, "personal").helper?.sha256);
+  const again = await service.settled(service.startSetup({ accessId: helper.id, workspaceId: "personal", planDigest: helper.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(again.steps.find((step) => step.id === "apply")!.status, "skipped");
+
+  // 2. The same deploy access now sets up, and the helper's own fingerprint is pinned.
+  const ready = await service.settled(service.retry(blocked.id, "personal").id);
+  assert.equal(ready.state, "succeeded", JSON.stringify(ready.error));
+  const access = service.getAccess(early.id, "personal");
+  assert.ok(access.checks.every((check) => check.ok), JSON.stringify(access.checks));
+  const plan = access.plan as import("./roles.ts").DeployAccessPlan;
+  const host = deployments.getConnection(access.connectionId);
+  const pinned = (host.metadata as any).publicMetadata.targetContracts[plan.target.targetId];
+  assert.match(pinned.fingerprint, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(pinned.revision, plan.target.revision);
+  assert.equal(host.readiness, "ready");
+  assert.equal(deployments.getConnection(access.releaseConnectionId!).readiness, "ready");
+  assert.equal(exec("id", "-Gn", plan.release.account), `${plan.release.account} psm-deploy`);
+  assert.match(exec("cat", plan.target.file), /"certbotEmail": "ops@example.com"/);
+
+  // 3. A second project on the same machine: new identities, same helper, no reinstall.
+  const api = { id: "prj_api", name: "API", workspaceId: "personal" };
+  const second = await service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project: api, environmentId: "staging", risk: "staging", hostname: "api-staging.example.com", certbotEmail: "ops@example.com" });
+  assert.equal((await service.settled(service.startSetup({ accessId: second.id, workspaceId: "personal", planDigest: second.plan.digest, method: "admin-ssh", actor: "test" }).id)).state, "succeeded");
+  assert.notEqual(second.account, access.account);
+  // Todo's infrastructure identity cannot act on the API target.
+  const secondPlan = second.plan as import("./roles.ts").DeployAccessPlan;
+  const { SshHostHelperTransport, hostHelperRequest } = await import("../deploy/adapters/host-helper.ts");
+  const { profileFromRecord } = await import("../deploy/service.ts");
+  await assert.rejects(
+    new SshHostHelperTransport({ broker }).invoke({ connection: profileFromRecord(deployments.getConnection(access.connectionId)), request: hostHelperRequest({ targetId: secondPlan.target.targetId, operation: "observe-target", desired: {} }) }),
+    (error: { code?: string }) => error.code === "not-authorized",
+  );
+
+  // 4. Repeat is a no-op; revocation removes PSM's keys but leaves the server alone.
+  const repeat = await service.settled(service.startSetup({ accessId: access.id, workspaceId: "personal", planDigest: access.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(repeat.steps.find((step) => step.id === "apply")!.status, "skipped");
+  await service.revokeAccess(access.id, "personal", service.getAccess(access.id, "personal").revision);
+  assert.throws(() => deployments.getConnection(access.connectionId), /not found/);
+  assert.throws(() => deployments.getConnection(access.releaseConnectionId!), /not found/);
+  assert.equal(exec("id", "-un", access.account), access.account);
+});

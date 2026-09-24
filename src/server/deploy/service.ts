@@ -122,7 +122,7 @@ function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
-function profileFromRecord(connection: DeploymentConnection): ConnectionProfile {
+export function profileFromRecord(connection: DeploymentConnection): ConnectionProfile {
   const metadata = object(connection.metadata);
   const constraints = object(connection.constraints);
   return {

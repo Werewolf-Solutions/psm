@@ -62,6 +62,13 @@ test("register, confirm and plan through the API, with the plan's authority show
   assert.match(script.body.command, /sha256sum -c/);
   const missing = await call("POST", `/api/machines/${confirmed.body.machine.id}/access`, { projectId: "prj_nope", environmentId: "staging" });
   assert.equal(missing.status, 404);
+  const deploy = await call("POST", `/api/machines/${confirmed.body.machine.id}/deploy-access`, { projectId: "prj_todo", environmentId: "staging", risk: "staging", hostname: "todo.example.com", certbotEmail: "ops@example.com" });
+  assert.equal(deploy.status, 201);
+  assert.equal(deploy.body.access.plan.role, "deploy");
+  assert.equal(deploy.body.access.plan.target.hostname, "todo.example.com");
+  const noEmail = await call("POST", `/api/machines/${confirmed.body.machine.id}/deploy-access`, { projectId: "prj_todo", environmentId: "production", hostname: "todo.example.com" });
+  assert.equal(noEmail.status, 400);
+  assert.equal(noEmail.body.field, "certbotEmail");
   const invalid = await call("POST", "/api/machines", { name: "x", host: "root@evil; id", knownHost: "x" });
   assert.equal(invalid.status, 400);
 });

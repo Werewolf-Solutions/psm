@@ -42,7 +42,7 @@ export class MachineTransportError extends Error {
 
 /** What the setup service needs from SSH. Tests substitute a fake. */
 export interface MachineTransport {
-  run(endpoint: SshEndpoint, remoteCommand: string, input?: string, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<SshResult>;
+  run(endpoint: SshEndpoint, remoteCommand: string, input?: string | Buffer, options?: { timeoutMs?: number; signal?: AbortSignal }): Promise<SshResult>;
   scanHostKeys(host: string, port: number): Promise<string[]>;
   generateKeyPair(comment: string): Promise<{ privateKey: Buffer; publicKey: string }>;
 }
@@ -66,7 +66,7 @@ export class SshMachineTransport implements MachineTransport {
     this.#ssh = options.sshPath ?? "ssh";
   }
 
-  async run(endpoint: SshEndpoint, remoteCommand: string, input = "", options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<SshResult> {
+  async run(endpoint: SshEndpoint, remoteCommand: string, input: string | Buffer = "", options: { timeoutMs?: number; signal?: AbortSignal } = {}): Promise<SshResult> {
     const timeoutMs = Math.min(290_000, Math.max(1_000, options.timeoutMs ?? 120_000));
     const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "psm-machine-"));
     try {

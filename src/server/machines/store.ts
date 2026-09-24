@@ -10,6 +10,9 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { CommandAccessPlan, HostKeySource, InspectionReport, MachineRole, RiskClass } from "./plan.ts";
+import type { DeployAccessPlan, HelperInstallPlan } from "./roles.ts";
+
+export type AccessPlan = CommandAccessPlan | HelperInstallPlan | DeployAccessPlan;
 
 export class MachineStoreError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {
@@ -30,6 +33,8 @@ export interface MachineRecord {
   /** A saved administrator connection PSM may use for setup, if any. */
   adminConnectionId: string | null;
   lastInspection: (InspectionReport & { at: number; as: string }) | null;
+  /** The verified host-helper installation, once there is one. */
+  helper?: { sha256: string; arch: string; sourceDigest: string; verifiedAt: number } | null;
   revision: number;
   createdAt: number;
   updatedAt: number;
@@ -57,8 +62,10 @@ export interface MachineAccessRecord {
   publicKeyFingerprint: string;
   /** Deployment connection holding the private key; the key itself lives in the broker. */
   connectionId: string;
+  /** Deploy access only: the release identity's connection. */
+  releaseConnectionId?: string;
   state: AccessState;
-  plan: CommandAccessPlan;
+  plan: AccessPlan;
   checks: VerificationCheck[];
   verifiedAt: number | null;
   revision: number;

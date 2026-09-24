@@ -28,7 +28,7 @@ export class MachinePlanError extends Error {
   }
 }
 
-export type MachineRole = "command";
+export type MachineRole = "command" | "helper" | "deploy";
 export type RiskClass = "development" | "staging" | "production";
 
 /** How PSM came to trust a machine's host key. Only the last two allow setup. */
@@ -58,7 +58,7 @@ export interface CommandAccessRequest {
 
 export interface CommandAccessPlan {
   schema: typeof MACHINE_PLAN_SCHEMA;
-  role: MachineRole;
+  role: "command";
   machineId: string;
   host: string;
   port: number;
@@ -175,20 +175,25 @@ function slug(value: string, max: number): string {
  * lands on the same one. Linux caps names at 32 characters.
  */
 export function commandAccountName(machineId: string, projectId: string, projectName: string, environmentId: string): string {
+  return roleAccountName("x", machineId, projectId, projectName, environmentId);
+}
+
+/** `psm-<role letter>-<slug>-<hash>`: x = command, i = infrastructure, r = release. */
+export function roleAccountName(letter: "x" | "i" | "r", machineId: string, projectId: string, projectName: string, environmentId: string): string {
   const suffix = createHash("sha256").update(`${machineId}\0${projectId}\0${environmentId}`).digest("hex").slice(0, 6);
-  const readable = slug(`${projectName}-${environmentId}`, 32 - "psm-x--".length - suffix.length) || "app";
-  const name = `psm-x-${readable}-${suffix}`;
+  const readable = slug(`${projectName}-${environmentId}`, 32 - `psm-${letter}--`.length - suffix.length) || "app";
+  const name = `psm-${letter}-${readable}-${suffix}`;
   if (!ACCOUNT_RE.test(name)) throw new MachinePlanError("Could not derive a valid account name.", "account");
   return name;
 }
 
 /** POSIX single-quote a value that has already passed a strict pattern. */
-function quote(value: string): string {
+export function quote(value: string): string {
   if (/[\u0000-\u001f\u007f]/.test(value)) throw new MachinePlanError("Control characters cannot appear in a setup script.");
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
-function digest(value: string | Buffer): string {
+export function digest(value: string | Buffer): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
@@ -430,6 +435,8 @@ export interface InspectionReport {
   helper: "active" | "installed" | "absent" | "unknown";
   conflicts: string[];
   result: string;
+  /** Every reported key, for role-specific fields. */
+  values: Record<string, string>;
 }
 
 /**
@@ -474,6 +481,7 @@ export function parseInspection(output: string): InspectionReport {
     helper: pick("helper", ["active", "installed", "absent"] as const, "unknown"),
     conflicts,
     result: values.get("result") ?? "",
+    values: Object.fromEntries(values),
   };
 }
 
@@ -493,7 +501,7 @@ export function compatibility(report: InspectionReport): { supported: boolean; r
  * through sudo. No placeholder paths and no credentials: the script carries
  * only the public key, and sudo prompts in that terminal if it needs to.
  */
-export function copyableSetupCommand(plan: CommandAccessPlan): string {
+export function copyableSetupCommand(plan: { script: string; scriptDigest: string; account: string }): string {
   const encoded = Buffer.from(plan.script, "utf8").toString("base64");
   const hex = plan.scriptDigest.slice("sha256:".length);
   const file = `/tmp/psm-setup-${plan.account}-${hex.slice(0, 12)}.sh`;

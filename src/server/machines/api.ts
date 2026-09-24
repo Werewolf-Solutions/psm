@@ -83,6 +83,19 @@ export function machineRouter(options: MachineApiOptions): express.Router {
     const access = await service.planCommandAccess({ machineId: req.params.id, workspaceId: ws, project, environmentId: req.body?.environmentId, risk: req.body?.risk });
     res.status(201).json({ access: service.accessView(access) });
   }));
+  router.post("/api/machines/:id/helper", route(true, async (req, res, ws) => {
+    const access = await service.planHelperInstall({ machineId: req.params.id, workspaceId: ws });
+    res.status(201).json({ access: service.accessView(access) });
+  }));
+  router.post("/api/machines/:id/deploy-access", route(true, async (req, res, ws) => {
+    const project = options.project(String(req.body?.projectId || ""));
+    if (!project) return res.status(404).json({ error: "Project not found.", code: "project-not-found" });
+    const access = await service.planDeployAccess({
+      machineId: req.params.id, workspaceId: ws, project, environmentId: req.body?.environmentId, risk: req.body?.risk, unitId: req.body?.unitId,
+      targetId: req.body?.targetId, hostname: req.body?.hostname, certbotEmail: req.body?.certbotEmail, canonicalRoot: req.body?.canonicalRoot, allowedRootPrefix: req.body?.allowedRootPrefix,
+    });
+    res.status(201).json({ access: service.accessView(access) });
+  }));
   router.get("/api/machine-access/:id", route(false, (req, res, ws) => res.json({ access: service.accessView(service.getAccess(req.params.id, ws)) })));
   router.get("/api/machine-access/:id/script", route(false, (req, res, ws) => res.json(service.setupScript(req.params.id, ws))));
   router.post("/api/machine-access/:id/revoke", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.revokeAccess(req.params.id, ws, revision(req))) })));
