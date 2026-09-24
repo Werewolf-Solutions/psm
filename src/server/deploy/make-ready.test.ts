@@ -4,7 +4,7 @@ import { openDatabase } from "../db.ts";
 import { DeploymentPreparationController, PreparationRepository, type ReadinessResult } from "./make-ready.ts";
 import type { DeploymentService } from "./service.ts";
 
-function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () => string | null) {
+function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () => string | null, standingApproval?: () => Promise<{ runId: string; reason: string } | null>) {
   const database = openDatabase(":memory:");
   const repository = new PreparationRepository(() => database);
   let outstanding: { action: string; status: string; detail: string }[] = [];
@@ -32,7 +32,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     },
   } as unknown as DeploymentService;
   const controller = new DeploymentPreparationController({
-    service, repository, background: false, reviewCapabilities, reviewCheckout,
+    service, repository, background: false, reviewCapabilities, reviewCheckout, standingApproval,
     preparer: { prepare: async () => {
       builds++;
       const run = { runId: `build-${builds}`, runKind: "prepare", planId: null, terminal: false, state: "running" };
@@ -327,4 +327,19 @@ test("resource drift goes to the reviewed infrastructure plan without a repair r
   h.infrastructure(); h.start(); await h.advance();
   assert.equal(h.current().state, "awaiting-approval"); assert.equal(h.current().phase, "infrastructure");
   assert.equal(h.counts().repairs, 0);
+});
+
+test("a standing rule applies the plan without pausing, and no rule still waits for review", async (t) => {
+  const approvals: string[] = [];
+  const h = harness(undefined, undefined, async () => { approvals.push("infrastructure"); return { runId: "policy-run", reason: "Allowed by allow deploy.approve (environmentId=staging)" }; });
+  t.after(h.close);
+  h.runs.push({ runId: "policy-run", planId: "infrastructure", runKind: "deployment", state: "running", terminal: false });
+  h.infrastructure(); h.start(); await h.advance();
+  assert.equal(h.current().state, "running");
+  assert.equal(h.current().runId, "policy-run");
+  assert.match(h.current().message, /standing rule/);
+  assert.deepEqual(approvals, ["infrastructure"]);
+  const none = harness(undefined, undefined, async () => null); t.after(none.close);
+  none.infrastructure(); none.start(); await none.advance();
+  assert.equal(none.current().state, "awaiting-approval");
 });

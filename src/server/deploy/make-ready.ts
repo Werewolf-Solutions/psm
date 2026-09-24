@@ -109,6 +109,11 @@ export class DeploymentPreparationController {
     /** Checkout problems no grant can fix: staged operator work, a detached HEAD, no usable Git identity. */
     reviewCheckout?: (projectId: string) => string | null;
     repairConnections?: (projectId: string, environmentId: string) => Promise<void>;
+    /**
+     * Approve this exact plan under a standing rule, when one covers it, and
+     * return the queued run. Null means the plan waits for an operator review.
+     */
+    standingApproval?: (input: { projectId: string; environmentId: string; planId: string }) => Promise<{ runId: string; reason: string } | null>;
     background?: boolean;
   }) { this.repository = options.repository ?? new PreparationRepository(); }
   private key(projectId: string, environmentId: string): string { return `${projectId}/${environmentId}`; }
@@ -379,8 +384,16 @@ export class DeploymentPreparationController {
       job.state = "succeeded"; job.phase = "check"; job.message = "Ready to deploy. Source, dependencies, build and infrastructure have been checked.";
       this.save(job); return;
     }
-    // Deliberately never approves or queues infrastructure. The existing API binds the
-    // operator's review to this exact plan, then the coordinator follows that run.
+    // Infrastructure is applied only under an approval bound to this exact plan:
+    // a standing rule the operator set for this environment, or their review of
+    // it through the existing API. The coordinator then follows that run.
+    const standing = await this.options.standingApproval?.({ projectId, environmentId, planId: plan.planId });
+    if (!this.live(job)) return;
+    if (standing) {
+      job.phase = "infrastructure"; job.planId = plan.planId; job.runId = standing.runId; job.state = "running";
+      job.message = `Applying the infrastructure plan under a standing rule (${standing.reason})…`;
+      this.save(job); return;
+    }
     job.phase = "infrastructure"; job.planId = plan.planId;
     job.state = "awaiting-approval"; job.message = "Review and approve the infrastructure plan below; preparation will continue afterward.";
     this.save(job);

@@ -168,8 +168,9 @@ export const PRESETS: readonly Preset[] = [
       { permission: "mcp.call", effect: "ask" },
       { permission: "machine.command", effect: "allow", scope: { environmentId: "staging" } },
       { permission: "machine.command", effect: "ask" },
+      { permission: "deploy.approve", effect: "allow", scope: { environmentId: "staging" } },
     ],
-    limits: [...COMMON_LIMITS, "Server commands run as the project's own unprivileged command account."],
+    limits: [...COMMON_LIMITS, "Server commands run as the project's own unprivileged command account.", "Production plans still wait for your review."],
   },
   {
     id: "operate-production", version: 1, title: "Operate production", summary: "Everything in Operate staging, and production server commands too, each one reviewed.",
@@ -179,18 +180,20 @@ export const PRESETS: readonly Preset[] = [
       { permission: "machine.command", effect: "allow", scope: { environmentId: "staging" } },
       { permission: "machine.command", effect: "ask", scope: { environmentId: "production" } },
       { permission: "machine.command", effect: "ask" },
+      { permission: "deploy.approve", effect: "allow", scope: { environmentId: "staging" } },
     ],
     limits: [...COMMON_LIMITS, "Server commands run as the project's own unprivileged command account."],
   },
   {
     id: "full", version: 1, title: "Full access to this project",
     summary: "Every operation PSM supports for this project, in every environment, with no per-operation review.",
-    grants: [...DEVELOP, "git.push", "mcp.call", "machine.command"],
+    grants: [...DEVELOP, "git.push", "mcp.call", "machine.command", "deploy.approve"],
     rules: [],
     limits: [
       ...COMMON_LIMITS,
       "Only this project's checkout, its attached tools and the servers connected to it; never other projects or PSM itself.",
       "Server commands run as the project's command account — not root. Administration of a server is a separate, explicit connection.",
+      "Plans that need an acknowledgement, including every production plan, still wait for you unless you add a rule for that environment.",
     ],
   },
 ];

@@ -84,7 +84,15 @@ export function explainAccess(input: AccessInputs): AccessItem[] {
   for (const server of input.servers) {
     items.push(decided(`server-commands:${server.environmentId}`, `Run commands on ${server.machine} (${server.environmentId})`, "machine.command", { environmentId: server.environmentId, connectionId: server.connectionId }));
   }
-  items.push({ id: "deploy", title: "Deploy", status: "unsupported", permission: null, detail: "Deployments run through PSM's reviewed plans, not agent tools.", action: "Use Deploy for this project." });
+  const byPolicy = (snapshot.rules ?? []).filter((rule) => rule.permission === "deploy.approve" && rule.effect === "allow").map((rule) => rule.scope.environmentId ?? "every environment");
+  if (snapshot.grants["deploy.approve"]?.granted) byPolicy.push("every environment");
+  items.push({
+    id: "deploy", title: "Apply infrastructure plans", status: byPolicy.length ? "ready" : "needs-review", permission: "deploy.approve",
+    detail: byPolicy.length
+      ? `Preparation applies plans by rule in ${[...new Set(byPolicy)].join(", ")}; plans needing an acknowledgement (every production plan) are covered only by a rule for that exact environment.`
+      : "Each infrastructure plan waits for your review in Deploy.",
+    action: byPolicy.length ? null : "Add a deploy.approve rule for an environment, or apply Operate staging.",
+  });
   for (const [id, title, detail] of UNSUPPORTED) items.push({ id, title, status: "unsupported", permission: null, detail, action: null });
   return items;
 }

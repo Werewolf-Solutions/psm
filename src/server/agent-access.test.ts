@@ -30,6 +30,8 @@ test("each gap names its cause: grant, review, connection, runner or unsupported
   assert.equal(status(items, "server-commands"), "needs-grant");
   assert.equal(status(items, "build"), "unsupported");
   assert.equal(status(items, "local-shell"), "unsupported");
+  assert.equal(status(items, "deploy"), "needs-review");
+  assert.equal(status(explainAccess({ ...base, snapshot: store.applyPreset(project, "operate-staging", develop.revision, "operator"), store }), "deploy"), "ready");
   assert.match(items.find((item) => item.id === "push")!.detail, /git.push/);
 });
 

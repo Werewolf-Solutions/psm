@@ -134,6 +134,7 @@ import {
   snapshots,
 } from "./backups.ts";
 import { createDeploymentRouter } from "./deploy/api.ts";
+import { approveByStandingRule } from "./deploy/standing-approval.ts";
 import { GitHubArtifactPreparer } from "./deploy/artifact-preparer.ts";
 import { SecretBroker } from "./deploy/connections.ts";
 import { createDeploymentEngine } from "./deploy/engine.ts";
@@ -2235,6 +2236,10 @@ local.use(agentPermissionRouter({
 }));
 
 const deploymentPreparation = new DeploymentPreparationController({
+  standingApproval: (input) => approveByStandingRule({
+    permissions: agentPermissions, project: permissionProject, store: deploymentEngine.service.store,
+    enqueue: (runId) => deploymentEngine.controller.enqueue(runId), agentId: () => agentIdentity().agentId,
+  }, input),
   reviewCapabilities: preparationPermissionGap,
   reviewCheckout: preparationCheckoutGap,
   service: deploymentEngine.service,

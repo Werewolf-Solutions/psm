@@ -656,6 +656,16 @@ the loopback cockpit and carry a valid Werewolf session so the actor is attribut
 browsers may inspect and plan production but cannot approve it. Staging may use `local-operator`
 or an authenticated paired operator according to local policy.
 
+**Standing approval (2026-09-24, P02).** A plan created by Make ready may instead be approved by
+an operator-set `deploy.approve` rule for its environment (Agent permissions; the Operate staging
+preset adds one for `staging`). It uses the same `approveAndQueue` transaction and binds the same
+plan ID, revision and digest; the record's actor is `local-operator` with subject
+`policy:<rule id>@r<policy revision>`, so every run names the rule and policy revision that stood in
+for a review. A plan that requires acknowledgements — every production plan requires
+`production-target`, and version decreases add their own — is approved by rule only when that rule
+is scoped to exactly that environment, i.e. an explicit owner choice; an unscoped grant or the Full
+access preset never claims it. Without a covering rule the plan waits for review exactly as above.
+
 This is an accident and accountability boundary, not an OS sandbox. PSM's current security model
 trusts processes running as the same local user; a malicious process with that user's filesystem
 and loopback access cannot be strongly isolated by an in-process keychain wrapper. Install the

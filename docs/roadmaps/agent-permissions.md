@@ -65,6 +65,31 @@ configuration. Publication and infrastructure require separate operator reviews.
 - [x] Pass TypeScript checking, the complete test suite and browser smoke checks
   for attached-call review and exact-source publication.
 
+## Policies, reviews and presets (P02, 2026-09-24)
+
+- [x] Standing grants are kept as unscoped Allow rules; migrated projects keep identical
+  authority. Scoped Allow / Ask / Deny rules add environment, connection, attached tool, task and
+  one-exact-operation scopes, and once / task / until / standing durations. Most specific wins;
+  Deny beats Ask beats Allow; a workspace Deny beats the project. Decisions name their rule.
+- [x] Only authority reductions invalidate running turns (`restricted_revision`); approvals and
+  new grants let the task continue.
+- [x] Ask becomes an operator review recording the exact operation; answers: once (bound to the
+  operation digest), this task, always, reject. Push approvals bind commit, remote and branch.
+- [x] Attached MCP calls follow `mcp.call`: Allow runs directly, explicit Deny refuses, no rule
+  keeps the exact per-call review; a review can be answered "always allow this tool".
+- [x] `machine.command`: commands on connected servers as the environment's verified command
+  account (P01), per-environment rules.
+- [x] `deploy.approve`: standing approval of Make-ready infrastructure plans; see
+  DEPLOYMENT-SYSTEM.md §7.3 for the acknowledgement rule.
+- [x] Versioned presets (Inspect, Develop, Operate staging, Operate production, Full access to this
+  project), each stating what it grants and what remains impossible. "Grant full access" is gone.
+- [x] Access explanation per task (ready / needs review / grant / connection / runner / provider
+  restricted / unsupported) in Capabilities and as the agents' `access_status` tool.
+- [x] Workspace chat's sandbox-off toggle is labelled Unrestricted and confirmed; sandbox-off is
+  structurally limited to workspace chat and never combined with a multi-project scope.
+- Not yet: delegation between people (needs hosted workspace authentication, P03); editing
+  workspace-level rules in the UI (stored and enforced, currently set only through the database).
+
 ## Host setup and validation
 
 These are runtime prerequisites, separate from the completed implementation:
@@ -126,8 +151,9 @@ all execution writes use size-limited tmpfs. Calls are serialized per project an
 turn, bounded by time/output/resources, and containers are removed after execution.
 
 Attached integrations are trusted operator-selected services. Their tool hints
-are not proof of safety: every invocation requires an exact operator review,
-including tools advertised as read-only. Tool discovery starts the attached
+are not proof of safety: an invocation runs only under an explicit `mcp.call` rule
+for that tool, otherwise it requires an exact operator review, including tools
+advertised as read-only. Tool discovery starts the attached
 server; it does not authorize tool calls. Approval cannot undo an external action
 already sent, and revocation prevents subsequent broker calls.
 

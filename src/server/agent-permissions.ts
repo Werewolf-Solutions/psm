@@ -15,6 +15,7 @@ export const AGENT_PERMISSION_CATEGORIES = [
   { id: "execution", title: "Execution", description: "Run bounded project tasks and prepare dependencies." },
   { id: "integrations", title: "Integrations", description: "Use explicitly attached external tools, reviewed per call unless a rule allows them." },
   { id: "machines", title: "Servers", description: "Run commands on servers connected to this project, as its own unprivileged account." },
+  { id: "deployment", title: "Deployment", description: "Let PSM apply infrastructure plans under a standing rule instead of asking for each one." },
 ] as const;
 
 export const AGENT_PERMISSIONS = [
@@ -31,6 +32,7 @@ export const AGENT_PERMISSIONS = [
   { id: "pkg.install", category: "execution", title: "Install packages", description: "Download integrity-verified public npm packages and install offline in the turn sandbox. Does not change the checkout.", supported: true },
   { id: "mcp.use", category: "integrations", title: "Discover attached tools", description: "List explicitly attached MCP tools and request calls. Calls follow the attached-call rule below.", supported: true },
   { id: "mcp.call", category: "integrations", title: "Call attached tools without review", description: "Run attached MCP tool calls directly. Without this, or with an Ask rule, each call waits for operator review.", supported: true },
+  { id: "deploy.approve", category: "deployment", title: "Apply plans by policy", description: "Preparation applies an infrastructure plan without a separate review. Plans that need an acknowledgement (every production plan does) are covered only by a rule scoped explicitly to that environment.", supported: true },
   { id: "machine.command", category: "machines", title: "Run server commands", description: "Run commands on a connected server as this project's command account: no sudo, no deployment helper, only its own working directory.", supported: true },
 ] as const;
 export type AgentPermission = typeof AGENT_PERMISSIONS[number]["id"];
