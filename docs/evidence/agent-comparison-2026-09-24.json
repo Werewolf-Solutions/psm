@@ -1,0 +1,40 @@
+{
+  "task": "math.js's sum() returns the wrong result when either argument is negative. Fix it, add a test for negative numbers to math.test.js, make sure the tests pass, and commit the change with a short message.",
+  "model": "sonnet",
+  "at": "2026-09-24T07:57:58.640Z",
+  "results": [
+    {
+      "run": "direct Claude Code",
+      "elapsedMs": 12745,
+      "turns": 9,
+      "costUsd": 0.1425966,
+      "finalText": "`sum()` now returns `a + b`. It had been adding the absolute values of both arguments, which is why negatives came out wrong.\n\nI added a negative-number test to `math.test.js` covering `(-2, 3)`, `(2, -3)` and `(-2, -3)`. Both tests pass, and the change is committed as `c5f4ed8` (\"Fix sum() for nega",
+      "testsPass": true,
+      "hiddenCheckPasses": true,
+      "committed": true,
+      "cleanTree": true,
+      "addedNegativeTest": true
+    },
+    {
+      "run": "PSM managed (Develop preset)",
+      "elapsedMs": 12831,
+      "turns": 8,
+      "costUsd": 0.051389399999999995,
+      "toolCalls": 7,
+      "tools": [
+        "read",
+        "write",
+        "run_tests",
+        "git_stage",
+        "git_commit"
+      ],
+      "handoffs": 0,
+      "finalText": "Done. Fixed `sum()` in math.js (was using `Math.abs` on both args, breaking negatives; now correctly returns `a + b`), added a negative-number test to math.test.js, confirmed both tests pass, and committed as `1db3cbc`: \"Fix sum() to handle negative numbers correctly\".",
+      "testsPass": true,
+      "hiddenCheckPasses": true,
+      "committed": true,
+      "cleanTree": true,
+      "addedNegativeTest": true
+    }
+  ]
+}
