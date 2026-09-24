@@ -242,6 +242,19 @@ test("host helper install and per-project deploy identities on a systemd server"
     (error: { code?: string }) => error.code === "not-authorized",
   );
 
+  // 3b. A second, separately revocable release key for the CI controller.
+  const ci = await service.planCiKey(access.id, "personal");
+  assert.equal(ci.account, plan.release.account);
+  const ciJob = await service.settled(service.startSetup({ accessId: ci.id, workspaceId: "personal", planDigest: ci.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(ciJob.state, "succeeded", JSON.stringify(ciJob.error));
+  const keyLines = exec("cat", `/home/${plan.release.account}/.ssh/authorized_keys`).split("\n");
+  assert.equal(keyLines.length, 2);
+  assert.ok(keyLines.every((line) => line.startsWith('command="/usr/local/libexec/psm-host-helper-client",restrict ssh-ed25519 ')));
+  const ciConnection = deployments.getConnection(ci.connectionId);
+  assert.equal(ciConnection.readiness, "ready");
+  assert.deepEqual((ciConnection.metadata as any).publicMetadata.targetContracts, (host.metadata as any).publicMetadata.targetContracts);
+  assert.equal((await service.settled(service.startSetup({ accessId: ci.id, workspaceId: "personal", planDigest: ci.plan.digest, method: "admin-ssh", actor: "test" }).id)).steps.find((step) => step.id === "apply")!.status, "skipped");
+
   // 4. Repeat is a no-op; revocation removes PSM's keys but leaves the server alone.
   const repeat = await service.settled(service.startSetup({ accessId: access.id, workspaceId: "personal", planDigest: access.plan.digest, method: "admin-ssh", actor: "test" }).id);
   assert.equal(repeat.steps.find((step) => step.id === "apply")!.status, "skipped");

@@ -24,7 +24,7 @@ import {
   type HostHelperResponse,
   type HostHelperTransport,
 } from "./adapters/host-helper.ts";
-import type { ObservationAdapters, ResourceDiscoveryResult, WatchObservation } from "./observations.ts";
+import type { ExecutionReadinessCheck, ObservationAdapters, ResourceDiscoveryResult, WatchObservation } from "./observations.ts";
 import type { DeploymentPlanDocument, PlannedActionDocument } from "./planner.ts";
 import type { AdapterObservation, DeploymentActionAdapter, DeploymentAdapterContext } from "./runner.ts";
 import {
@@ -197,7 +197,89 @@ export class DeploymentRuntimeAdapters {
     this.observations = {
       discoverResource: (resource, context) => this.discoverResource(resource, context),
       watch: (definition, context) => this.observeWatch(definition, context),
+      executionReadiness: (unit, context) => this.controllerReadiness(unit, context),
     };
+  }
+
+  /**
+   * Before a release, check what the pinned GitHub release controller will
+   * rely on but PSM does not own: its target file must describe the target as
+   * enrolled, and its Environment must hold the key and host key. Values of
+   * secrets are never read — only their names.
+   */
+  async controllerReadiness(unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest }): Promise<ExecutionReadinessCheck[]> {
+    if (unit.executor.kind !== "github-actions@1" || !unit.executor.releaseController || unit.target.kind !== "ssh-release-directory@1") return [];
+    const targetId = unit.target.targetId;
+    let github: ConnectionProfile;
+    let host: ConnectionProfile;
+    try {
+      github = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.executor.connection, kind: "github-actions@1" });
+      host = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.target.observerConnection, kind: "ssh-host-helper@1" });
+    } catch {
+      return []; // Unbound or unready connections are reported as their own blockers.
+    }
+    const controllers = (github.publicMetadata as { releaseControllers?: unknown })?.releaseControllers;
+    if (!Array.isArray(controllers) || !controllers.some((entry) => object(entry).targetId === targetId)) return [];
+    const adapter = this.#github(github);
+    const checks: ExecutionReadinessCheck[] = [];
+    const ssh = host.constraints.ssh;
+    const contract = object(object(host.publicMetadata?.targetContracts)[targetId]);
+    // The key the controller uses: a CI release key PSM enrolled for this target on this host.
+    const ci = this.#connections.store.listConnections().map(deploymentConnectionProfile).find((profile) =>
+      profile.kind === "ssh-host-helper@1" && object(profile.publicMetadata).role === "ci"
+      && profile.constraints.allowedTargetIds?.includes(targetId) && profile.constraints.ssh?.host === ssh?.host);
+    try {
+      const file = object(await adapter.readControllerJson(targetId, `targets/${targetId.replace(/[:/]/g, "__")}.json`));
+      const expected: Record<string, unknown> = {
+        sshHost: ssh?.host, sshPort: ssh?.port ?? 22, hostKeyFingerprint: ssh?.hostKeyFingerprint, canonicalRoot: unit.target.root,
+        contractRevision: contract.revision, ...(ci ? { sshUser: ci.constraints.ssh?.user } : {}),
+      };
+      const wrong = Object.entries(expected).filter(([key, value]) => value !== undefined && (file[key] ?? (key === "sshPort" ? 22 : undefined)) !== value);
+      checks.push({
+        id: `${unit.id}:controller-target`, purpose: "deploy", title: "Release controller target file",
+        ready: Object.keys(file).length > 0 && wrong.length === 0,
+        detail: !Object.keys(file).length ? `The pinned controller commit has no targets/${targetId.replace(/[:/]/g, "__")}.json.`
+          : wrong.length ? `Update the controller's target file, then pin the new commit: ${wrong.map(([key, value]) => `${key} must be ${JSON.stringify(value)} (is ${JSON.stringify(file[key] ?? null)})`).join("; ")}.`
+          : "Matches the enrolled target.",
+      });
+    } catch (error) {
+      checks.push({ id: `${unit.id}:controller-target`, purpose: "deploy", title: "Release controller target file", ready: false, detail: `Could not read the controller's target file: ${error instanceof Error ? error.message : String(error)}` });
+    }
+    try {
+      const names = await adapter.listEnvironmentSecretNames(targetId);
+      const missing = ["PSM_TARGET_KNOWN_HOSTS", "PSM_TARGET_SSH_PRIVATE_KEY"].filter((name) => !names?.includes(name));
+      checks.push({
+        id: `${unit.id}:controller-credentials`, purpose: "deploy", title: "Release controller credentials",
+        ready: missing.length === 0,
+        detail: missing.length === 0 ? "The controller's GitHub Environment holds the release key and host key."
+          : ci ? `The controller's GitHub Environment is missing ${missing.join(" and ")}. Publish the CI release key from this page.`
+          : `The controller's GitHub Environment is missing ${missing.join(" and ")}. First add a CI release key in Machines, then publish it from this page.`,
+      });
+    } catch (error) {
+      checks.push({ id: `${unit.id}:controller-credentials`, purpose: "deploy", title: "Release controller credentials", ready: false, detail: `Could not list the controller's GitHub Environment secrets: ${error instanceof Error ? error.message : String(error)}` });
+    }
+    return checks;
+  }
+
+  /**
+   * Publish the CI release key and the pinned host key into the pinned
+   * controller's GitHub Environment, so its release job can reach the helper.
+   */
+  async publishControllerCredentials(unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest; projectId: string }): Promise<{ repository: string; environment: string; names: string[]; keyFingerprint: string }> {
+    if (unit.executor.kind !== "github-actions@1" || unit.target.kind !== "ssh-release-directory@1") throw new Error("this unit has no GitHub release controller");
+    const targetId = unit.target.targetId;
+    const github = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.executor.connection, kind: "github-actions@1" });
+    const host = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.target.observerConnection, kind: "ssh-host-helper@1" });
+    const ci = this.#connections.store.listConnections().filter((record) => record.readiness === "ready").map(deploymentConnectionProfile).find((profile) =>
+      profile.kind === "ssh-host-helper@1" && object(profile.publicMetadata).role === "ci" && profile.constraints.allowedTargetIds?.includes(targetId)
+      && profile.constraints.allowedProjectIds?.includes(context.projectId) && profile.constraints.ssh?.host === host.constraints.ssh?.host
+      && profile.constraints.ssh?.hostKeyFingerprint === host.constraints.ssh?.hostKeyFingerprint);
+    if (!ci) throw new Error("No ready CI release key for this target. Add one in Machines first.");
+    const knownHost = ci.publicMetadata?.knownHost;
+    if (typeof knownHost !== "string" || !knownHost) throw new Error("The CI release key has no pinned host key.");
+    const privateKey = await this.#connections.broker.withLease(ci.connectionId, ["privateKey"], (lease) => lease.useUtf8("privateKey", (value) => value), 60_000);
+    const result = await this.#github(github).publishEnvironmentSecrets(targetId, { PSM_TARGET_SSH_PRIVATE_KEY: privateKey, PSM_TARGET_KNOWN_HOSTS: `${knownHost}\n` });
+    return { ...result, keyFingerprint: String(ci.credentialIdentity?.value ?? "") };
   }
 
   #profileForAction(context: DeploymentAdapterContext, kind: string): ConnectionProfile {

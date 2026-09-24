@@ -1,3 +1,4 @@
+import { sealedBox } from "../sealed-box.ts";
 import {
   ExecutorContractError,
   parsePrepareArtifactResult,
@@ -589,7 +590,7 @@ export class GitHubActionsAdapter {
   async #request(
     pathname: string,
     options: {
-      method?: "GET" | "POST";
+      method?: "GET" | "POST" | "PUT";
       body?: unknown;
       signal?: AbortSignal;
       statuses?: readonly number[];
@@ -705,6 +706,75 @@ export class GitHubActionsAdapter {
       );
     }
     return target;
+  }
+
+  #controllerFor(targetId: string): GitHubReleaseControllerPolicy {
+    const controller = this.#metadata.releaseControllers.find((entry) => entry.targetId === targetId);
+    if (!controller) {
+      throw new GitHubExecutorError("github-target-not-allowed", `No reviewed release controller is pinned for ${targetId}`);
+    }
+    return controller;
+  }
+
+  /**
+   * Store secrets in the pinned controller's GitHub Environment for a target,
+   * creating the environment if needed. Only that repository and environment
+   * are reachable; values are sealed to GitHub's key and never returned.
+   */
+  async publishEnvironmentSecrets(
+    targetId: string,
+    secrets: Readonly<Record<string, string>>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ repository: string; environment: string; names: string[] }> {
+    const controller = this.#controllerFor(targetId);
+    const names = Object.keys(secrets).sort();
+    if (!names.length || names.some((name) => !/^[A-Z_][A-Z0-9_]{0,99}$/.test(name) || name.startsWith("GITHUB_"))) {
+      throw new GitHubExecutorError("github-config-invalid", "Secret names must be upper-case identifiers outside GITHUB_*");
+    }
+    const environment = `${repositoryPath(controller.repository)}/environments/${pathSegment(controller.githubEnvironment)}`;
+    await this.#request(environment, { method: "PUT", body: {}, signal: options.signal });
+    const key = plainRecord((await this.#request(`${environment}/secrets/public-key`, { signal: options.signal })).body);
+    const keyId = key?.key_id;
+    const publicKey = typeof key?.key === "string" ? Buffer.from(key.key, "base64") : null;
+    if (typeof keyId !== "string" || !keyId || !publicKey || publicKey.length !== 32) {
+      throw new GitHubExecutorError("github-api-error", "GitHub returned no usable environment public key");
+    }
+    for (const name of names) {
+      const plain = Buffer.from(secrets[name], "utf8");
+      try {
+        const encrypted = Buffer.from(sealedBox(plain, publicKey)).toString("base64");
+        await this.#request(`${environment}/secrets/${pathSegment(name)}`, { method: "PUT", body: { encrypted_value: encrypted, key_id: keyId }, statuses: [201, 204], signal: options.signal });
+      } finally {
+        plain.fill(0);
+      }
+    }
+    return { repository: controller.repository, environment: controller.githubEnvironment, names };
+  }
+
+  /** Names (never values) of the secrets in a target's controller environment. */
+  async listEnvironmentSecretNames(targetId: string, options: { signal?: AbortSignal } = {}): Promise<string[] | null> {
+    const controller = this.#controllerFor(targetId);
+    const result = await this.#request(
+      `${repositoryPath(controller.repository)}/environments/${pathSegment(controller.githubEnvironment)}/secrets?per_page=100`,
+      { statuses: [200, 404], signal: options.signal },
+    );
+    if (result.status === 404) return null;
+    const secrets = plainRecord(result.body)?.secrets;
+    return Array.isArray(secrets) ? secrets.map((entry) => plainRecord(entry)?.name).filter((name): name is string => typeof name === "string").sort() : [];
+  }
+
+  /** A JSON file from the pinned controller commit, e.g. its target description. */
+  async readControllerJson(targetId: string, file: string, options: { signal?: AbortSignal } = {}): Promise<unknown | null> {
+    const controller = this.#controllerFor(targetId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9][A-Za-z0-9._-]*)*\.json$/.test(file)) throw new GitHubExecutorError("github-config-invalid", "Unexpected controller file path");
+    const result = await this.#request(
+      `${repositoryPath(controller.repository)}/contents/${file.split("/").map(pathSegment).join("/")}?ref=${pathSegment(controller.expectedHeadSha)}`,
+      { statuses: [200, 404], signal: options.signal },
+    );
+    if (result.status === 404) return null;
+    const content = plainRecord(result.body)?.content;
+    if (typeof content !== "string") return null;
+    try { return JSON.parse(Buffer.from(content, "base64").toString("utf8")); } catch { return null; }
   }
 
   async verifyWorkflowTrust(

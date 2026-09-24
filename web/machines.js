@@ -74,7 +74,16 @@
         for (const access of machine.access) {
           const row = node("div", "", "machine-access-row");
           const who = access.machineLevel ? (access.role === "admin" ? "PSM administrator" : "Host helper") : `${access.projectName} · ${access.environmentId}`;
-          row.append(node("span", `${who} — ${access.role} as ${access.account}`), node("span", access.state, "cap-badge"));
+          row.append(node("span", `${who} — ${access.role === "ci" ? "CI release key" : access.role} as ${access.account}`), node("span", access.state, "cap-badge"));
+          // The release controller in GitHub Actions gets its own key, revocable on its own.
+          if (access.role === "deploy" && access.state === "ready" && !machine.access.some((other) => other.role === "ci" && other.projectId === access.projectId && other.environmentId === access.environmentId && other.state !== "revoked")) {
+            row.append(button("Add GitHub Actions release key", async () => {
+              try {
+                const { access: ci } = await post(`/api/machine-access/${encodeURIComponent(access.id)}/ci-key`);
+                showReview(machine.id, [{ access: ci, method: machine.adminConnectionId ? "admin-ssh" : "manual-command" }]);
+              } catch (error) { view.error(error.message); }
+            }));
+          }
           if (access.role === "admin" && access.state === "ready") row.append(button("Remove administrator access", async () => {
             if (!window.confirm(`Remove PSM's administrator access to ${machine.name}? Project accounts keep working; setting up new ones will need administrator access again.`)) return;
             try { await post(`/api/machine-access/${encodeURIComponent(access.id)}/release`); showList(); } catch (error) { view.error(error.message); }
@@ -239,7 +248,7 @@
     view.body.append(node("p", "This is exactly what setup will do. Nothing has changed on the server yet."));
     for (const { access } of plans) {
       const card = node("article", "", "machine-card");
-      const title = access.machineLevel ? (access.role === "admin" ? "PSM administrator access" : "Deployment helper") : `${access.projectName} · ${access.environmentId} · ${access.role}`;
+      const title = access.machineLevel ? (access.role === "admin" ? "PSM administrator access" : "Deployment helper") : `${access.projectName} · ${access.environmentId} · ${access.role === "ci" ? "CI release key" : access.role}`;
       card.append(node("h4", title));
       const ops = node("ul", "");
       for (const line of access.plan.operations) ops.append(node("li", line));
@@ -267,7 +276,7 @@
     const results = [];
     for (const plan of plans) {
       const card = node("article", "", "machine-card");
-      const title = plan.access.machineLevel ? (plan.access.role === "admin" ? "PSM administrator access" : "Deployment helper") : `${plan.access.projectName} · ${plan.access.environmentId} · ${plan.access.role}`;
+      const title = plan.access.machineLevel ? (plan.access.role === "admin" ? "PSM administrator access" : "Deployment helper") : `${plan.access.projectName} · ${plan.access.environmentId} · ${plan.access.role === "ci" ? "CI release key" : plan.access.role}`;
       card.append(node("h4", title));
       const steps = node("ol", "", "machine-job-steps");
       const status = node("p", "Starting…", "hint");

@@ -37,7 +37,7 @@ import {
   type DeploymentRelease,
   type JsonValue,
 } from "./store.ts";
-import type { DeploymentManifestV1, EnvironmentManifest } from "./types.ts";
+import type { DeploymentManifestV1, EnvironmentManifest, UnitManifest } from "./types.ts";
 
 export class ManagedDeploymentError extends Error {
   constructor(
@@ -413,6 +413,16 @@ export class DeploymentService {
       slot: unit.target.observerConnection, unitId: unit.id, targetId: unit.target.targetId, root: unit.target.root,
       allowedRootPrefix: unit.target.root.slice(0, unit.target.root.lastIndexOf("/")) || "/", hostname: typeof hostname === "string" ? hostname : null,
     };
+  }
+
+  /** The environment's unit released by a GitHub release controller, with what its adapters need. */
+  releaseControllerUnit(idOrName: string, environmentId: string): { unit: UnitManifest; environment: EnvironmentManifest; checkoutId: string; projectId: string } {
+    const context = this.loadCurrent(idOrName);
+    const environment = context.manifest.environments.find((entry) => entry.id === environmentId);
+    if (!environment) throw new ManagedDeploymentError("deployment environment not found", "environment-not-found", 404);
+    const unit = environment.units.find((entry) => entry.executor.kind === "github-actions@1" && entry.executor.releaseController && entry.target.kind === "ssh-release-directory@1");
+    if (!unit) throw new ManagedDeploymentError("this environment has no GitHub release controller", "release-controller-missing", 404);
+    return { unit, environment, checkoutId: context.source.checkoutId, projectId: context.project.id };
   }
 
   async environmentView(idOrName: string, environmentId: string): Promise<Record<string, unknown>> {

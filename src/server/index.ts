@@ -2332,6 +2332,7 @@ local.use(createDeploymentRouter({
   runner: deploymentEngine.controller,
   preparer: deploymentArtifactPreparer,
   publisher: sourcePublisher,
+  controllerCredentials: (unit, context) => deploymentRuntimeAdapters.publishControllerCredentials(unit, context),
   preparation: deploymentPreparation,
   streamTickets: deploymentStreamTickets,
   agentGeneration: () => agentSecret().createdAt,

@@ -86,3 +86,15 @@ test("a replacement is named by exact digest in both the plan and its script", (
   assert.equal(deploy().publicKey, `ssh-ed25519 ${blob(1)}`);
   assert.throws(() => deploy({ replacesTarget: "abc" }), /SHA-256/);
 });
+
+test("a CI release key extends exactly the release account the deploy plan created", async () => {
+  const { buildReleaseCiKeyPlan, releaseAuthorizedLine } = await import("./roles.ts");
+  const base = deploy();
+  const plan = buildReleaseCiKeyPlan({ machine, deployAccessId: "mac_1", deploy: base, ciPublicKey: `ssh-ed25519 ${blob(9)}`, label: "psm-ci Todo staging", now: 1 });
+  assert.equal(syntax(plan.script).status, 0, syntax(plan.script).stderr.toString());
+  assert.equal(plan.account, base.release.account);
+  assert.match(releaseAuthorizedLine(base), /^command="\/usr\/local\/libexec\/psm-host-helper-client",restrict ssh-ed25519 /);
+  assert.ok(plan.script.includes(`readonly PSM_RELEASE_AUTHORIZED='${releaseAuthorizedLine(base)}'`));
+  assert.match(plan.script, new RegExp(`readonly PSM_CI_AUTHORIZED='command="/usr/local/libexec/psm-host-helper-client",restrict ssh-ed25519 ${blob(9).replace(/[+/]/g, "\\$&")} psm-ci-Todo-staging'`));
+  assert.equal(plan.target.targetId, base.target.targetId);
+});

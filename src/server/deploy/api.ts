@@ -12,6 +12,7 @@ import {
   type ConnectionProfile,
 } from "./connections.ts";
 import { DeploymentManifestValidationError } from "./manifest.ts";
+import type { EnvironmentManifest, UnitManifest } from "./types.ts";
 import { ManagedDeploymentError, DeploymentService } from "./service.ts";
 import {
   DeploymentConflictError,
@@ -46,6 +47,8 @@ export interface DeploymentApiOptions {
   /** When configured, "make ready" runs the whole preparation flow instead of one build. */
   preparation?: DeploymentPreparationController;
   publisher?: SourcePublicationController;
+  /** Publishes the CI release key and host key to the pinned controller's GitHub Environment. */
+  controllerCredentials?: (unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest; projectId: string }) => Promise<Record<string, unknown>>;
   intents?: ApprovalIntentRegistry;
   streamTickets?: DeploymentStreamTicketRegistry;
   /** Rotates when the long-lived pairing token rotates, invalidating outstanding stream tickets. */
@@ -380,6 +383,18 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       if (result.created) await options.runner?.enqueue(result.run.runId);
       res.status(result.created ? 202 : 200).json({ ok: true, run: service.runView(result.run.runId) });
     } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/projects/:id/deployments/:environment/controller-credentials", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      if (!options.controllerCredentials) throw new ManagedDeploymentError("publishing controller credentials is not available", "not-available", 501);
+      const { unit, environment, checkoutId, projectId } = service.releaseControllerUnit(req.params.id, req.params.environment);
+      res.json({ ok: true, published: await options.controllerCredentials(unit, { checkoutId, environment, projectId }) });
+    } catch (error) {
+      if (error instanceof ManagedDeploymentError) return apiError(res, error);
+      apiError(res, new ManagedDeploymentError(error instanceof Error ? error.message : String(error), "controller-credentials-failed", 409));
+    }
   });
 
   router.put("/api/projects/:id/deployments/:environment/connection-bindings/:slot", async (req, res) => {

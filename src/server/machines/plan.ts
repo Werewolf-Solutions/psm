@@ -28,7 +28,7 @@ export class MachinePlanError extends Error {
   }
 }
 
-export type MachineRole = "command" | "helper" | "deploy" | "admin";
+export type MachineRole = "command" | "helper" | "deploy" | "admin" | "ci";
 export type RiskClass = "development" | "staging" | "production";
 
 /** How PSM came to trust a machine's host key. Only the last two allow setup. */

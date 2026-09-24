@@ -4671,6 +4671,27 @@ function renderDeploymentReadiness() {
   const outstanding = rows.filter((item) => item.status !== "ready");
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
   for (const [index, item] of rows.entries()) {
+    // The release controller's GitHub Environment is filled from here, with the CI key PSM enrolled.
+    if (item.status !== "ready" && item.code === "executor-not-ready" && /controller-credentials/.test(item.id) && /Publish the CI release key/.test(item.detail || "")) {
+      const publish = depText("button", "dep-mini-btn", "Publish to GitHub");
+      publish.type = "button";
+      publish.onclick = async () => {
+        publish.disabled = true;
+        publish.textContent = "Publishing…";
+        try {
+          const scope = deploymentRequestScope({ environment: true });
+          const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployments/${encodeURIComponent(state.environment)}/controller-credentials`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          void discoverDeploymentPlan();
+        } catch (error) {
+          publish.disabled = false;
+          publish.textContent = "Publish to GitHub";
+          $("#dep-status").textContent = `Publishing failed: ${error.message}`;
+        }
+      };
+      $("#dep-readiness").children[index]?.append(publish);
+    }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
     const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : item.action === "review-capabilities" ? "Review permissions" : "Review changes");
     button.type = "button";

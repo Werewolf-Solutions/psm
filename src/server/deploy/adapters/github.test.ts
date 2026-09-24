@@ -256,3 +256,47 @@ test("a dispatch that returns no usable run ID is an invalid response, not a suc
   const github = fakeGitHub({ "/dispatches": { body: { workflow_run_id: "not-a-number" } } });
   assert.equal(await codeOf(() => adapter(github).dispatchRelease(releaseDispatch())), "github-response-invalid");
 });
+
+test("controller credentials go only to the pinned controller's environment, sealed to GitHub's key", async () => {
+  const nacl = (await import("tweetnacl")).default;
+  const { blake2b } = await import("../sealed-box.ts");
+  const recipient = nacl.box.keyPair();
+  const bodies = new Map<string, unknown>();
+  const calls: Call[] = [];
+  const fetchStub = (async (url: string | URL | Request, init?: RequestInit) => {
+    const href = String(url);
+    const method = init?.method ?? "GET";
+    calls.push({ url: href, method });
+    if (init?.body) bodies.set(`${method} ${new URL(href).pathname}`, JSON.parse(String(init.body)));
+    const reply = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (href.endsWith("/environments/todo-production-web") && method === "PUT") return reply(200, { name: "todo-production-web" });
+    if (href.endsWith("/secrets/public-key")) return reply(200, { key_id: "k1", key: Buffer.from(recipient.publicKey).toString("base64") });
+    if (href.includes("/secrets/PSM_") && method === "PUT") return reply(201, {});
+    if (href.includes("/secrets?per_page")) return reply(200, { total_count: 1, secrets: [{ name: "PSM_TARGET_KNOWN_HOSTS" }] });
+    return reply(404, { message: "Not Found" });
+  }) as unknown as typeof fetch;
+  const github = new GitHubActionsAdapter({ metadata: metadata(), token: () => TOKEN, fetch: fetchStub });
+
+  const published = await github.publishEnvironmentSecrets("werewolf:todo-production-web", { PSM_TARGET_SSH_PRIVATE_KEY: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n", PSM_TARGET_KNOWN_HOSTS: "203.0.113.4 ssh-ed25519 AAAA\n" });
+  assert.deepEqual(published, { repository: "Werewolf-Solutions/deployment-control", environment: "todo-production-web", names: ["PSM_TARGET_KNOWN_HOSTS", "PSM_TARGET_SSH_PRIVATE_KEY"] });
+  assert.ok(calls.every((call) => call.url.startsWith("https://api.github.com/repos/Werewolf-Solutions/deployment-control/environments/todo-production-web")));
+  const sent = bodies.get("PUT /repos/Werewolf-Solutions/deployment-control/environments/todo-production-web/secrets/PSM_TARGET_SSH_PRIVATE_KEY") as { encrypted_value: string; key_id: string };
+  assert.equal(sent.key_id, "k1");
+  const sealed = Buffer.from(sent.encrypted_value, "base64");
+  const ephemeral = sealed.subarray(0, 32);
+  const opened = nacl.box.open(sealed.subarray(32), blake2b(new Uint8Array([...ephemeral, ...recipient.publicKey]), 24), ephemeral, recipient.secretKey);
+  assert.equal(Buffer.from(opened!).toString("utf8"), "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n");
+  assert.ok(!JSON.stringify([...bodies.values()]).includes("BEGIN OPENSSH"), "no plaintext leaves PSM");
+
+  assert.deepEqual(await github.listEnvironmentSecretNames("werewolf:todo-production-web"), ["PSM_TARGET_KNOWN_HOSTS"]);
+  await assert.rejects(github.publishEnvironmentSecrets("werewolf:other", { PSM_X: "1" }), (error: GitHubExecutorError) => error.code === "github-target-not-allowed");
+  await assert.rejects(github.publishEnvironmentSecrets("werewolf:todo-production-web", { GITHUB_TOKEN: "1" }), (error: GitHubExecutorError) => error.code === "github-config-invalid");
+});
+
+test("the controller's target file is read at the pinned commit", async () => {
+  const file = { schema: "psm.werewolf.solutions/control-target/v1", sshUser: "psm-r-todo" };
+  const github = fakeGitHub({ "/contents/targets/": { body: { content: Buffer.from(JSON.stringify(file)).toString("base64") } } });
+  assert.deepEqual(await adapter(github).readControllerJson("werewolf:todo-production-web", "targets/werewolf__todo-production-web.json"), file);
+  assert.ok(github.calls.at(-1)!.url.endsWith(`/contents/targets/werewolf__todo-production-web.json?ref=${HEAD_SHA}`));
+  await assert.rejects(adapter(github).readControllerJson("werewolf:todo-production-web", "../secrets.json"), /Unexpected controller file path/);
+});

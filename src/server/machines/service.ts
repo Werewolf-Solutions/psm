@@ -36,7 +36,7 @@ import {
   type InspectionReport,
   type MachineIdentity,
 } from "./plan.ts";
-import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan } from "./roles.ts";
+import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, buildReleaseCiKeyPlan, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan, type ReleaseCiKeyPlan } from "./roles.ts";
 import { MachineTransportError, type MachineTransport, type SshEndpoint } from "./ssh.ts";
 import {
   MachineStoreError,
@@ -166,6 +166,7 @@ export class MachineService {
         account: plan.account, workdir: plan.workdir, publicKeyFingerprint: plan.publicKeyFingerprint,
         ...(plan.role === "deploy" ? { release: plan.release, target: plan.target } : {}),
         ...(plan.role === "helper" ? { helper: plan.helper } : {}),
+        ...(plan.role === "ci" ? { deployAccessId: plan.deployAccessId, target: plan.target } : {}),
       },
     };
   }
@@ -526,6 +527,60 @@ export class MachineService {
   }
 
   /**
+   * Plan a second release key for a CI release controller (GitHub Actions),
+   * next to PSM's own, so either can be revoked alone. PSM keeps the private
+   * half in its own connection until it is published to the CI environment.
+   */
+  async planCiKey(deployAccessId: string, workspaceId: string): Promise<MachineAccessRecord> {
+    const deploy = this.getAccess(deployAccessId, workspaceId);
+    if (deploy.plan.role !== "deploy") throw new MachineServiceError("A CI release key belongs to a deployment access.", 400, "not-deploy");
+    if (deploy.state !== "ready") throw new MachineServiceError("Finish setting up the deployment access first.", 409, "deploy-not-ready");
+    const deployPlan = deploy.plan;
+    const machine = this.#store.getMachine(deploy.machineId);
+    this.#requireTrusted(machine);
+    return this.#serialize(machine.id, async () => {
+      const existing = this.#store.findAccess(machine.id, deploy.projectId, deploy.environmentId, "ci");
+      if (existing && existing.state !== "revoked" && (existing.plan as ReleaseCiKeyPlan).deployAccessId === deploy.id) return existing;
+      if (existing) {
+        await this.#discardConnection(existing.connectionId);
+        this.#store.removeAccess(existing.id);
+      }
+      const keys = await this.#transport.generateKeyPair(`psm ci release ${deploy.projectId}/${deploy.environmentId}`);
+      const now = this.#now();
+      const accessId = newId("mac");
+      const connectionId = `machine-ci-${accessId.slice(4, 20)}`;
+      try {
+        const plan = buildReleaseCiKeyPlan({ machine: identity(machine), deployAccessId: deploy.id, deploy: deployPlan, ciPublicKey: keys.publicKey, label: `psm-ci-${deploy.projectName}-${deploy.environmentId}`, now });
+        const release = this.#deployments.getConnection(deploy.releaseConnectionId!);
+        this.#deployments.createConnection({
+          connectionId, kind: HELPER_CONNECTION_KIND, label: `${deploy.projectName} ${deploy.environmentId} CI release key on ${machine.name}`,
+          secretGeneration: 0, readiness: "missing-secret",
+          metadata: {
+            publicMetadata: { knownHost: machine.knownHost, machineId: machine.id, accessId, role: "ci", targetContracts: {}, ...(isIP(machine.host) === 4 ? { address: machine.host } : {}) },
+            credentialIdentity: { kind: "public-key", value: plan.publicKeyFingerprint },
+            requiredSecretSlots: ["privateKey"],
+          },
+          constraints: release.constraints as never,
+          createdAt: now,
+        });
+        const generation = await this.#broker.put(connectionId, "privateKey", keys.privateKey);
+        const connection = this.#deployments.getConnection(connectionId);
+        this.#deployments.updateConnectionSecretStatus({ connectionId, expectedSecretGeneration: connection.secretGeneration, secretGeneration: generation, readiness: "unknown", updatedAt: now });
+        return this.#store.createAccess({
+          id: accessId, machineId: machine.id, projectId: deploy.projectId, projectName: deploy.projectName, environmentId: deploy.environmentId, role: "ci", risk: plan.risk,
+          account: plan.account, workdir: plan.workdir, publicKeyFingerprint: plan.publicKeyFingerprint, connectionId, state: "planned", plan,
+          checks: [], verifiedAt: null, createdAt: now, updatedAt: now,
+        });
+      } catch (error) {
+        await this.#discardConnection(connectionId);
+        throw error;
+      } finally {
+        keys.privateKey.fill(0);
+      }
+    });
+  }
+
+  /**
    * Plan replacing what a setup stopped on: an older helper build, or a target
    * contract enrolled for other accounts. The server is inspected read-only and
    * the plan is rebuilt to name each file's exact current digest, so it applies
@@ -779,6 +834,7 @@ export class MachineService {
       const verified = await step("verify", async () => {
         const observed = access.role === "helper" ? await this.#verifyHelper(machine, access.plan as HelperInstallPlan, signal)
           : access.role === "deploy" ? await this.#verifyDeploy(machine, access, signal)
+          : access.role === "ci" ? await this.#verifyCiKey(machine, access, signal)
           : access.role === "admin" ? { checks: await this.#verifyAdmin(machine, access), targetDigest: null }
           : { checks: await this.#verifyAccess(machine, access, signal), targetDigest: null };
         const failed = observed.checks.filter((check) => !check.ok);
@@ -802,6 +858,7 @@ export class MachineService {
         }
         const pinned = access.plan.role === "deploy" && verified.targetDigest
           ? { [access.plan.target.targetId]: { fingerprint: verified.targetDigest, revision: access.plan.target.revision } }
+          : access.plan.role === "ci" ? this.#deployContracts(access.plan)
           : null;
         for (const connectionId of [access.connectionId, access.releaseConnectionId].filter((value): value is string => Boolean(value))) {
           await this.#markConnectionReady(connectionId, pinned);
@@ -915,6 +972,37 @@ export class MachineService {
    * can do only what its role allows. The contract fingerprint pinned into
    * the connections is the one the helper itself reports.
    */
+  /** The contracts pinned on the deployment access a CI key extends. */
+  #deployContracts(plan: ReleaseCiKeyPlan): Record<string, { fingerprint: string; revision: string }> | null {
+    const deploy = this.#store.getAccess(plan.deployAccessId);
+    const contracts = (this.#deployments.getConnection(deploy.connectionId).metadata as { publicMetadata?: { targetContracts?: Record<string, { fingerprint: string; revision: string }> } }).publicMetadata?.targetContracts;
+    const contract = contracts?.[plan.target.targetId];
+    return contract ? { [plan.target.targetId]: contract } : null;
+  }
+
+  async #verifyCiKey(machine: MachineRecord, access: MachineAccessRecord, signal: AbortSignal): Promise<{ checks: VerificationCheck[]; targetDigest: string | null }> {
+    const plan = access.plan as ReleaseCiKeyPlan;
+    const expected = this.#deployContracts(plan)?.[plan.target.targetId]?.fingerprint ?? null;
+    let observed: { outcome: string; code?: string; detail?: string; data?: unknown };
+    try {
+      observed = await this.#helper.invoke({ connection: profileFromRecord(this.#deployments.getConnection(access.connectionId)), request: hostHelperRequest({ targetId: plan.target.targetId, operation: "observe-target", desired: {} }), signal });
+    } catch (error) {
+      observed = { outcome: "failed", code: error instanceof HostHelperError ? error.code : "transport", detail: error instanceof Error ? error.message : String(error) };
+    }
+    const digest = (observed.data as { targetDigest?: unknown } | undefined)?.targetDigest;
+    let shell = "";
+    try {
+      shell = (await this.#transport.run({ host: machine.host, port: machine.port, user: plan.account, knownHost: machine.knownHost, connectionId: access.connectionId }, "id", "", { signal, timeoutMs: 30_000 })).stdout;
+    } catch { /* refused outright is also no shell */ }
+    return {
+      targetDigest: typeof digest === "string" ? digest : null,
+      checks: [
+        { id: "ci-observe", title: "CI key reaches the helper as the release account", ok: observed.outcome === "succeeded" && Boolean(expected) && digest === expected, detail: observed.outcome === "succeeded" ? `target ${String(digest)}` : `${observed.code}: ${observed.detail}` },
+        { id: "no-shell", title: "The CI key opens no shell", ok: !/uid=\d+/.test(shell), detail: /uid=\d+/.test(shell) ? "a shell command ran" : "the key reaches only the helper client" },
+      ],
+    };
+  }
+
   async #verifyDeploy(machine: MachineRecord, access: MachineAccessRecord, signal: AbortSignal): Promise<{ checks: VerificationCheck[]; targetDigest: string | null }> {
     const plan = access.plan as DeployAccessPlan;
     const profile = (connectionId: string) => profileFromRecord(this.#deployments.getConnection(connectionId));
@@ -1060,6 +1148,7 @@ function inspectDetail(plan: AccessPlan, report: InspectionReport): string {
   if (plan.role === "helper") return `${report.arch}; helper ${values.binary}, service ${values.service}${values.missing_packages ? `; will install ${values.missing_packages}` : ""}.`;
   if (plan.role === "deploy") return `helper ${values.helper}; ${plan.account} ${values.infra}/${values.infra_key}, ${plan.release.account} ${values.release}/${values.release_key}; target ${values.target}.`;
   if (plan.role === "admin") return `account ${values.account}, key ${values.key}, sudoers ${values.sudoers}.`;
+  if (plan.role === "ci") return `${plan.account} ${values.release}, CI key ${values.key}.`;
   return `${report.osId} ${report.osVersion} ${report.arch}; account ${report.account}, key ${report.key}.`;
 }
 
@@ -1068,12 +1157,14 @@ function isAlreadyDone(plan: AccessPlan, report: InspectionReport): boolean {
   if (plan.role === "helper") return values.binary === "match" && values.client === "match" && values.unit === "match" && values.service === "active" && values.socket === "present" && !values.missing_packages;
   if (plan.role === "deploy") return values.infra === "present" && values.infra_key === "match" && values.release === "present" && values.release_key === "match" && values.target === "match";
   if (plan.role === "admin") return values.account === "present" && values.key === "match" && values.sudoers === "match";
+  if (plan.role === "ci") return values.release === "present" && values.key === "match";
   return report.account === "present" && report.key === "match" && report.workdir === "present";
 }
 
 function receiptFor(plan: AccessPlan): string[] {
   if (plan.role === "helper") return [`host helper ${plan.helper.sha256.slice(0, 16)}… and psm-host-helper.service`, "psm-deploy group", "/etc/psm-deploy and /var/lib/psm-deploy"];
   if (plan.role === "admin") return [`administrator account ${plan.account}`, `sudoers entry ${plan.sudoersFile}`, `authorized key ${plan.publicKeyFingerprint}`];
+  if (plan.role === "ci") return [`CI release key ${plan.publicKeyFingerprint} for ${plan.account}`];
   if (plan.role === "deploy") return [`accounts ${plan.account} and ${plan.release.account}`, `authorized keys ${plan.publicKeyFingerprint}, ${plan.release.publicKeyFingerprint}`, `enrolled target ${plan.target.targetId} (${plan.target.revision})`];
   return [`account ${plan.account}`, `directory ${plan.workdir}`, `authorized key ${plan.publicKeyFingerprint}`];
 }
