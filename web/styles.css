@@ -1934,3 +1934,14 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 /* The one step to take next. */
 .dep-row.next { box-shadow: inset 3px 0 0 var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .dep-row.next .dep-row-title::after { content: "Next"; margin-left: 8px; padding: 1px 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 9.5px; font-weight: 700; vertical-align: 1px; }
+/* Source publication review: one column, long text wraps or scrolls inside its own box. */
+.dep-publication { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dep-publication h3 { margin: 0; font-size: 14px; }
+.dep-publication-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 14px; margin: 0; font-size: 12px; }
+.dep-publication-facts dt { color: var(--muted); }
+.dep-publication-facts dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.dep-publication-label { color: var(--muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; margin-top: 4px; }
+.dep-publication-commits { margin: 0; padding-left: 16px; font-size: 12px; line-height: 1.5; }
+.dep-publication-commits code { color: var(--accent); margin-right: 4px; }
+.dep-publication-changes { margin: 0; max-height: 220px; overflow: auto; white-space: pre; font-size: 11px; line-height: 1.45; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.dep-publication-note { margin: 0; color: var(--muted); font-size: 11px; }

@@ -71,3 +71,11 @@ test("the build after an approved publication does not ask GitHub again", async 
   assert.equal(await h.publisher.needsPublication("prj_test", "staging"), false);
   assert.equal(h.remoteCalls(), before);
 });
+
+test("a refused push reports GitHub's reason without the token", async () => {
+  const { publicationDiagnostic } = await import("./source-publication.ts");
+  const token = "github_pat_secretvalue123";
+  const said = publicationDiagnostic({ stderr: `remote: Permission to Werewolf-Solutions/todo-app.git denied to ${token}.\nfatal: unable to access 'https://github.com/Werewolf-Solutions/todo-app.git/': The requested URL returned error: 403\n` }, token);
+  assert.equal(said, "remote: Permission to Werewolf-Solutions/todo-app.git denied to [token]. fatal: unable to access 'https://github.com/Werewolf-Solutions/todo-app.git/': The requested URL returned error: 403");
+  assert.equal(publicationDiagnostic(new Error("spawn failed"), token), "");
+});

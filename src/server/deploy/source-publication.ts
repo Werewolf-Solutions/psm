@@ -32,6 +32,20 @@ function git(root: string, args: string[], env = gitEnv()): string {
 async function gitAsync(root: string, args: string[], env = gitEnv()): Promise<void> {
   await promisify(execFile)("/usr/bin/git", ["-C", root, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", ...args], { env, encoding: "utf8", timeout: 120_000, maxBuffer: 1024 * 1024 });
 }
+/** The lines git and GitHub print about a refused push, without secrets. */
+export function publicationDiagnostic(error: unknown, token: string): string {
+  const stderr = String((error as { stderr?: unknown } | null)?.stderr ?? (error instanceof Error ? error.message : ""));
+  const encoded = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return stderr.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^(remote:|error:|fatal:|! |\[rejected\]|To https)/.test(line) || /denied|protected|rejected|stale info|403/i.test(line))
+    .filter((line) => !/^To https/.test(line))
+    .map((line) => line.split(token).join("[token]").split(encoded).join("[token]"))
+    .filter((line, index, lines) => line && lines.indexOf(line) === index)
+    .join(" ")
+    .slice(0, 400);
+}
+
 export const githubPublicationTransport: PublicationTransport = {
   async remote(context, token) {
     const response = await fetch(`https://api.github.com/repos/${context.unit.executor.sourceRepository}/git/ref/heads/${encodeURIComponent(context.environment.releasePolicy.allowedBranch)}`, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" }, redirect: "error", signal: AbortSignal.timeout(30_000) });
@@ -57,7 +71,12 @@ export const githubPublicationTransport: PublicationTransport = {
       // check above makes this lease a fast-forward-only publication, never a reset.
       const env = { ...gitEnv(), GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`, GIT_CONFIG_KEY_1: "http.followRedirects", GIT_CONFIG_VALUE_1: "false" };
       await gitAsync(bare, ["push", "--porcelain", `--force-with-lease=refs/heads/${plan.branch}:${plan.previousCommit}`, `https://github.com/${plan.repository}.git`, `${plan.commit}:refs/heads/${plan.branch}`], env);
-    } catch { throw new Error("GitHub publication failed. Check Contents: write permission (and Workflows: write when changing workflows), branch protection and whether the remote branch changed. Nothing will retry without a new review."); }
+    } catch (error) {
+      // GitHub's own words ("Permission ... denied", "protected branch", "stale info")
+      // say which of the causes applies; the token is removed before it is shown.
+      const said = publicationDiagnostic(error, token);
+      throw new Error(`GitHub publication failed${said ? `: ${said}` : ""}. Check Contents: write permission (and Workflows: write when changing workflows), branch protection and whether the remote branch changed. Nothing will retry without a new review.`);
+    }
     finally { fs.rmSync(directory, { recursive: true, force: true }); }
   },
 };

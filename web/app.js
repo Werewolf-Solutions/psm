@@ -5529,12 +5529,33 @@ function renderDeploymentPreparation() {
   const publication = job.phase === "publish" && job.state === "awaiting-approval" ? state.preparationPublication : null;
   if (publication) {
     const panel = $("#dep-prep-plan"); panel.hidden = false; panel.replaceChildren();
-    panel.append(depText("h3", "", "Publish source to GitHub"));
-    panel.append(depText("p", "", `${publication.repository} → ${publication.branch}`));
-    panel.append(depText("p", "", `${publication.previousCommit} → ${publication.commit}`));
-    panel.append(depText("pre", "", publication.commits));
-    panel.append(depText("pre", "", publication.changes));
-    panel.append(depText("p", "", "Publishes these commits and may trigger GitHub workflows. The deployment build continues after publication is verified."));
+    const card = depText("div", "dep-publication", "");
+    card.append(depText("h3", "", "Publish source to GitHub"));
+    const facts = depText("dl", "dep-publication-facts", "");
+    const fact = (label, value, title) => {
+      const dd = depText("dd", "", value);
+      if (title) dd.title = title;
+      facts.append(depText("dt", "", label), dd);
+    };
+    fact("Repository", publication.repository);
+    fact("Branch", publication.branch);
+    fact("Moves from", String(publication.previousCommit).slice(0, 12), publication.previousCommit);
+    fact("To", String(publication.commit).slice(0, 12), publication.commit);
+    card.append(facts);
+    const commits = String(publication.commits || "").split("\n").filter(Boolean);
+    card.append(depText("div", "dep-publication-label", `${commits.length} commit${commits.length === 1 ? "" : "s"}`));
+    const list = depText("ul", "dep-publication-commits", "");
+    for (const line of commits) {
+      const item = depText("li", "", "");
+      const [sha, ...subject] = line.split(" ");
+      item.append(depText("code", "", sha), document.createTextNode(` ${subject.join(" ")}`));
+      list.append(item);
+    }
+    card.append(list);
+    card.append(depText("div", "dep-publication-label", "Files changed"));
+    card.append(depText("pre", "dep-publication-changes", publication.changes));
+    card.append(depText("p", "dep-publication-note", "Publishes these commits and may trigger GitHub workflows. The deployment build continues after publication is verified."));
+    panel.append(card);
     $("#dep-prep-approve").hidden = false;
     $("#dep-prep-approve").disabled = publication.state !== "pending" || publication.expiresAt <= Date.now();
     $("#dep-prep-approve").textContent = "Approve source publication";
