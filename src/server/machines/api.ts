@@ -112,6 +112,7 @@ export function machineRouter(options: MachineApiOptions): express.Router {
   }));
   router.get("/api/machine-access/:id", route(false, (req, res, ws) => res.json({ access: service.accessView(service.getAccess(req.params.id, ws)) })));
   router.get("/api/machine-access/:id/script", route(false, (req, res, ws) => res.json(service.setupScript(req.params.id, ws))));
+  router.post("/api/machine-access/:id/replace", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.planReplacement(req.params.id, ws)) })));
   router.post("/api/machine-access/:id/revoke", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.revokeAccess(req.params.id, ws, revision(req))) })));
   router.post("/api/machine-access/:id/setup", route(true, (req, res, ws) => {
     const job = service.startSetup({ accessId: req.params.id, workspaceId: ws, planDigest: req.body?.planDigest, method: req.body?.method, actor: options.actor() });

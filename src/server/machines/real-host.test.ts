@@ -249,6 +249,48 @@ test("host helper install and per-project deploy identities on a systemd server"
   assert.throws(() => deployments.getConnection(access.connectionId), /not found/);
   assert.throws(() => deployments.getConnection(access.releaseConnectionId!), /not found/);
   assert.equal(exec("id", "-un", access.account), access.account);
+
+  // 5. A newer helper build replaces the installed one only through a plan that
+  //    names the installed file's exact digest; so does a target enrolled for
+  //    other accounts (how a hand-bootstrapped host is adopted).
+  const { buildHostHelper } = await import("./roles.ts");
+  const { createHash } = await import("node:crypto");
+  const newer = new MachineService({
+    store: new MachineStore(() => database), deployments, broker, transport,
+    buildHelper: (arch) => {
+      const base = buildHostHelper(arch);
+      const file = `${base.file}.newer`;
+      fs.writeFileSync(file, Buffer.concat([fs.readFileSync(base.file), Buffer.from("\n")]));
+      const bytes = fs.readFileSync(file);
+      return { ...base, file, bytes: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
+    },
+  });
+  const installedSha = exec("sha256sum", "/usr/local/libexec/psm-host-helper").split(" ")[0];
+  const upgrade = await newer.planHelperInstall({ machineId: machine.id, workspaceId: "personal" });
+  const stopped = await newer.settled(newer.startSetup({ accessId: upgrade.id, workspaceId: "personal", planDigest: upgrade.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(stopped.error?.code, "replaceable", JSON.stringify(stopped.error));
+  assert.equal(exec("sha256sum", "/usr/local/libexec/psm-host-helper").split(" ")[0], installedSha, "nothing changed");
+  const replacing = await newer.planReplacement(upgrade.id, "personal");
+  assert.equal((replacing.plan as import("./roles.ts").HelperInstallPlan).replaces?.binary, installedSha);
+  assert.ok(replacing.plan.operations[0].startsWith("Replace the installed /usr/local/libexec/psm-host-helper"));
+  const upgraded = await newer.settled(newer.startSetup({ accessId: upgrade.id, workspaceId: "personal", planDigest: replacing.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(upgraded.state, "succeeded", JSON.stringify(upgraded.error));
+  assert.equal(exec("sha256sum", "/usr/local/libexec/psm-host-helper").split(" ")[0], (replacing.plan as import("./roles.ts").HelperInstallPlan).helper.sha256);
+  assert.equal(exec("stat", "-c", "%U:%G %a", `/var/lib/psm-deploy/replaced/binary.${installedSha}`), "root:root 755");
+  assert.equal(exec("systemctl", "is-active", "psm-host-helper.service"), "active");
+
+  const adopter = { id: "prj_todo2", name: "Todo two", workspaceId: "personal" };
+  const adopt = await newer.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project: adopter, environmentId: "staging", risk: "staging", targetId: plan.target.targetId, hostname: "todo-staging.example.com", certbotEmail: "ops@example.com" });
+  const previous = exec("sha256sum", plan.target.file).split(" ")[0];
+  const held = await newer.settled(newer.startSetup({ accessId: adopt.id, workspaceId: "personal", planDigest: adopt.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(held.error?.code, "replaceable", JSON.stringify(held.error));
+  assert.throws(() => exec("id", adopt.account), "no account was created before the review");
+  const adopting = await newer.planReplacement(adopt.id, "personal");
+  assert.equal((adopting.plan as import("./roles.ts").DeployAccessPlan).target.replaces, previous);
+  const adopted = await newer.settled(newer.startSetup({ accessId: adopt.id, workspaceId: "personal", planDigest: adopting.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(adopted.state, "succeeded", JSON.stringify(adopted.error));
+  assert.match(exec("cat", plan.target.file), new RegExp(`"deployUid": ${exec("id", "-u", adopt.account)},`));
+  assert.equal(exec("stat", "-c", "%a", `/var/lib/psm-deploy/replaced/target.${previous}.json`), "640");
 });
 
 test("one-time administrator handoff when sudo needs a password, then automatic setup and release", { skip: (hostKind !== "lxd") && "set PSM_MACHINE_LXD=1: needs a systemd test host" }, async (t) => {

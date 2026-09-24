@@ -523,6 +523,53 @@ export class MachineService {
     return this.#hostTarget(projectId, environmentId);
   }
 
+  /**
+   * Plan replacing what a setup stopped on: an older helper build, or a target
+   * contract enrolled for other accounts. The server is inspected read-only and
+   * the plan is rebuilt to name each file's exact current digest, so it applies
+   * only if nothing changed in between, and the operator reviews it again.
+   */
+  async planReplacement(id: string, workspaceId: string): Promise<MachineAccessRecord> {
+    const access = this.getAccess(id, workspaceId);
+    if (access.state === "revoked") throw new MachineServiceError("This access was revoked. Plan it again.", 409, "access-revoked");
+    if (access.plan.role !== "helper" && access.plan.role !== "deploy") throw new MachineServiceError("Only the helper and deployment access can replace existing files.", 400, "not-replaceable");
+    const machine = this.#store.getMachine(access.machineId);
+    this.#requireTrusted(machine);
+    const admin = this.#adminEndpoint(machine);
+    return this.#serialize(machine.id, async () => {
+      if (this.#store.listJobs(machine.id).some((job) => job.accessId === access.id && (job.state === "running" || job.state === "waiting"))) {
+        throw new MachineServiceError("Setup for this access is already in progress.", 409, "job-active");
+      }
+      const report = await this.#runScript(admin, access.plan.script, "--inspect");
+      const blocking = report.conflicts.filter((conflict) => !isReplaceableConflict(conflict));
+      if (blocking.length) throw new MachineServiceError(`Other problems need attention first: ${blocking.map(describeConflict).join("; ")}.`, 409, "conflict");
+      const values = report.values;
+      const now = this.#now();
+      let plan: AccessPlan;
+      if (access.plan.role === "helper") {
+        const replaces = Object.fromEntries((["binary", "client", "unit"] as const).filter((name) => values[name] === "differs").map((name) => [name, values[`${name}_sha`]]));
+        if (!Object.keys(replaces).length) throw new MachineServiceError("Nothing installed differs from this plan any more.", 409, "nothing-to-replace");
+        const build = this.#buildHelper(access.plan.helper.arch);
+        plan = buildHelperInstallPlan({ machine: identity(machine), build, replaces, now });
+      } else {
+        const current = access.plan as DeployAccessPlan;
+        if (values.target !== "conflict" || !values.target_sha) throw new MachineServiceError("The target is not enrolled for other accounts any more.", 409, "nothing-to-replace");
+        // Plans made before the keys were recorded still carry them in their script.
+        const authorized = (name: string) => new RegExp(`readonly ${name}='command="[^"']*",restrict (ssh-ed25519 [A-Za-z0-9+/=]+) `).exec(current.script)?.[1];
+        const infraPublicKey = current.publicKey ?? authorized("PSM_INFRA_AUTHORIZED");
+        const releasePublicKey = current.release.publicKey ?? authorized("PSM_RELEASE_AUTHORIZED");
+        if (!infraPublicKey || !releasePublicKey) throw new MachineServiceError("This plan's keys cannot be recovered. Remove it and plan the access again.", 409, "plan-outdated");
+        plan = buildDeployAccessPlan({
+          machine: identity(machine), projectId: access.projectId, projectName: access.projectName, environmentId: access.environmentId, risk: current.risk,
+          unitId: current.target.unitId, targetId: current.target.targetId, hostname: current.target.hostname, certbotEmail: current.target.certbotEmail,
+          canonicalRoot: current.target.canonicalRoot, allowedRootPrefix: current.target.allowedRootPrefix,
+          infraPublicKey, releasePublicKey, replacesTarget: values.target_sha, now,
+        });
+      }
+      return this.#store.updateAccess(access.id, access.revision, (value) => ({ ...value, plan, state: "planned", updatedAt: now }));
+    });
+  }
+
   getAccess(id: string, workspaceId: string): MachineAccessRecord {
     const access = this.#store.getAccess(id);
     this.#store.getMachine(access.machineId, workspaceId);
@@ -682,7 +729,10 @@ export class MachineService {
           const found = await this.#runScript(admin, access.plan.script, "--inspect", signal);
           const compatible = compatibility(found);
           if (!compatible.supported) throw new StepFailure(compatible.reasons.join(" "), "unsupported-host");
-          if (found.conflicts.length) throw new StepFailure(`Stopped before changing anything: ${found.conflicts.map(describeConflict).join("; ")}.`, "conflict");
+          if (found.conflicts.length) {
+            const replaceable = found.conflicts.every(isReplaceableConflict);
+            throw new StepFailure(`Stopped before changing anything: ${found.conflicts.map(describeConflict).join("; ")}.${replaceable ? " PSM can plan replacing exactly what is there now, for you to review first." : ""}`, replaceable ? "replaceable" : "conflict");
+          }
           return { value: found, detail: inspectDetail(access.plan, found) };
         });
         const alreadyDone = isAlreadyDone(access.plan, report);
@@ -826,7 +876,7 @@ export class MachineService {
 
   /** Anything the apply step needs first. The helper binary is uploaded unprivileged; the script checks its digest. */
   async #beforeApply(admin: SshEndpoint, plan: AccessPlan, report: InspectionReport, signal: AbortSignal): Promise<string[]> {
-    if (plan.role !== "helper" || report.values.binary !== "absent") return [];
+    if (plan.role !== "helper" || (report.values.binary !== "absent" && report.values.binary !== "replace")) return [];
     const build = this.#buildHelper(plan.helper.arch);
     if (build.sha256 !== plan.helper.sha256) throw new StepFailure("The helper build changed since this plan was reviewed. Plan the install again.", "plan-changed");
     const result = await this.#transport.run(admin, "umask 077; f=$(mktemp /tmp/psm-host-helper.XXXXXXXX) && cat > \"$f\" && echo \"$f\"", fs.readFileSync(build.file), { signal, timeoutMs: 300_000 });
@@ -970,6 +1020,11 @@ export class MachineService {
   }
 }
 
+/** Conflicts a reviewed plan may overwrite once it names the exact file digest. */
+function isReplaceableConflict(conflict: string): boolean {
+  return conflict.startsWith("helper-differs:") || conflict.startsWith("target-owned-by-other:");
+}
+
 function describeConflict(conflict: string): string {
   const [kind, subject = ""] = conflict.split(/:(.*)/s);
   const text: Record<string, string> = {
@@ -984,6 +1039,8 @@ function describeConflict(conflict: string): string {
     symlink: `${subject} is a symlink`,
     "not-root-owned": `${subject} is not root-owned`,
     "writable-by-others": `${subject} is writable by other users`,
+    "helper-differs": `${subject} is a different build than this plan installs`,
+    "target-owned-by-other": `the target ${subject} is already enrolled for other accounts`,
   };
   return text[kind] ?? conflict;
 }

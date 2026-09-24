@@ -323,6 +323,16 @@
       }
       card2?.remove();
       if (job.state !== "succeeded") {
+        if (job.error?.code === "replaceable") {
+          card.append(button("Review replacing it", async () => {
+            try {
+              const access = (await post(`/api/machine-access/${encodeURIComponent(plan.access.id)}/replace`)).access;
+              const rest = plans.slice(plans.indexOf(plan));
+              rest[0] = { ...plan, access };
+              showReview(machineId, rest, { next });
+            } catch (error) { view.error(error.message); }
+          }, "btn btn-primary"));
+        }
         card.append(button("Retry this step", async () => { try { await post(`/api/machine-setup-jobs/${encodeURIComponent(job.id)}/retry`); showSetup(machineId, plans.slice(plans.indexOf(plan)), { next }); } catch (error) { view.error(error.message); } }));
         return;
       }

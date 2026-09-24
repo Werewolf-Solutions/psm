@@ -65,3 +65,24 @@ test("administrator access is one dedicated account whose sudo rule is validated
   assert.match(plan.script, /printf '%s\\n' "\$PSM_SUDOERS_LINE"/);
   assert.ok(plan.authority[0].startsWith("Full administration"), "the plan says plainly what it grants");
 });
+
+test("a replacement is named by exact digest in both the plan and its script", () => {
+  const plain = buildHelperInstallPlan({ machine, build, now: 1 });
+  assert.equal(plain.replaces, undefined);
+  assert.match(plain.script, /readonly PSM_REPLACE_BINARY=''/);
+  const upgrade = buildHelperInstallPlan({ machine, build, replaces: { binary: "d".repeat(64) }, now: 1 });
+  assert.equal(syntax(upgrade.script).status, 0, syntax(upgrade.script).stderr.toString());
+  assert.deepEqual(upgrade.replaces, { binary: "d".repeat(64) });
+  assert.match(upgrade.script, new RegExp(`readonly PSM_REPLACE_BINARY='${"d".repeat(64)}'`));
+  assert.match(upgrade.operations[0], /^Replace the installed \/usr\/local\/libexec\/psm-host-helper \(sha256 dddddddddddddddd…\)/);
+  assert.notEqual(upgrade.digest, plain.digest);
+  assert.throws(() => buildHelperInstallPlan({ machine, build, replaces: { binary: "*" }, now: 1 }), /SHA-256/);
+
+  const adopt = deploy({ replacesTarget: "e".repeat(64) });
+  assert.equal(syntax(adopt.script).status, 0, syntax(adopt.script).stderr.toString());
+  assert.equal(adopt.target.replaces, "e".repeat(64));
+  assert.match(adopt.operations[0], /which names other accounts; those accounts lose access/);
+  assert.equal(adopt.target.revision, deploy().target.revision, "replacing changes what may be overwritten, not the contract");
+  assert.equal(deploy().publicKey, `ssh-ed25519 ${blob(1)}`);
+  assert.throws(() => deploy({ replacesTarget: "abc" }), /SHA-256/);
+});

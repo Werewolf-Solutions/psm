@@ -37,6 +37,7 @@ export const HELPER_BINARY = "/usr/local/libexec/psm-host-helper";
 export const HELPER_CLIENT = "/usr/local/libexec/psm-host-helper-client";
 export const HELPER_UNIT = "/etc/systemd/system/psm-host-helper.service";
 export const HELPER_SOCKET = "/run/psm-deploy/helper.sock";
+export const REPLACED_DIR = "/var/lib/psm-deploy/replaced";
 export const TARGET_SCHEMA = "psm.werewolf.solutions/host-target/v1";
 const HOSTNAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
 const EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
@@ -106,14 +107,20 @@ interface BasePlan {
   createdAt: number;
 }
 
+/** Installed files a plan may overwrite, each named by its exact current SHA-256. */
+export interface HelperReplacements { binary?: string; client?: string; unit?: string }
+
 export interface HelperInstallPlan extends BasePlan {
   role: "helper";
   helper: { sha256: string; bytes: number; arch: string; sourceDigest: string };
+  replaces?: HelperReplacements;
 }
 
 export interface DeployAccessPlan extends BasePlan {
   role: "deploy";
-  release: { account: string; publicKeyFingerprint: string };
+  /** Public halves of the two keys, so the plan can be rebuilt unchanged except for what is reviewed again. */
+  publicKey: string;
+  release: { account: string; publicKeyFingerprint: string; publicKey: string };
   target: {
     targetId: string;
     unitId: string;
@@ -123,6 +130,7 @@ export interface DeployAccessPlan extends BasePlan {
     certbotEmail: string;
     revision: string;
     file: string;
+    replaces?: string;
   };
 }
 
@@ -169,17 +177,29 @@ mode=\${1:---inspect}
 upload=\${2:-}
 [[ "$mode" == --inspect || "$mode" == --apply ]] || { echo 'usage: helper.sh --inspect | --apply [binary]' >&2; exit 64; }
 
+declare -A states=()
 inspect() {
   conflicts=()
   facts
   [[ -d /run/systemd/system ]] || conflict "no-systemd"
-  local state
-  for pair in "binary:${HELPER_BINARY}:$PSM_HELPER_SHA256" "client:${HELPER_CLIENT}:$PSM_CLIENT_SHA256" "unit:${HELPER_UNIT}:$PSM_UNIT_SHA256"; do
-    IFS=: read -r name file expected <<< "$pair"
+  local state observed
+  states=()
+  # A file that differs is replaced only when the reviewed plan names its exact
+  # current digest; anything else stops, reporting the digest for review.
+  for pair in "binary:${HELPER_BINARY}:$PSM_HELPER_SHA256:$PSM_REPLACE_BINARY" "client:${HELPER_CLIENT}:$PSM_CLIENT_SHA256:$PSM_REPLACE_CLIENT" "unit:${HELPER_UNIT}:$PSM_UNIT_SHA256:$PSM_REPLACE_UNIT"; do
+    IFS=: read -r name file expected replaceable <<< "$pair"
     if [[ -L "$file" ]]; then state=conflict; conflict "symlink:$file"
     elif [[ ! -e "$file" ]]; then state=absent
-    elif [[ $(file_sha "$file") == "$expected" ]]; then state=match
-    else state=differs; conflict "helper-differs:$file"; fi
+    else
+      observed=$(file_sha "$file")
+      if [[ "$observed" == "$expected" ]]; then state=match
+      else
+        report "\${name}_sha" "$observed"
+        if [[ -n "$replaceable" && "$observed" == "$replaceable" ]]; then state=replace
+        else state=differs; conflict "helper-differs:$file"; fi
+      fi
+    fi
+    states[$name]=$state
     report "$name" "$state"
   done
   if systemctl is-active --quiet psm-host-helper.service 2>/dev/null; then report service active
@@ -210,7 +230,7 @@ if (( \${#conflicts[@]} )); then report result conflict; echo 'setup: stopped be
 
 staged=$(mktemp -d /root/.psm-helper.XXXXXX)
 trap 'rm -rf -- "$staged"; [[ -n "$upload" ]] && rm -f -- "$upload"' EXIT
-if [[ ! -e ${HELPER_BINARY} ]]; then
+if [[ \${states[binary]} == absent || \${states[binary]} == replace ]]; then
   [[ "$upload" =~ ${UPLOAD_RE} && -f "$upload" && ! -L "$upload" ]] || { report result missing-binary; echo 'setup: the helper binary was not uploaded' >&2; exit 66; }
   cp -- "$upload" "$staged/helper"
   [[ $(file_sha "$staged/helper") == "$PSM_HELPER_SHA256" ]] || { report result digest-mismatch; echo 'setup: uploaded binary does not match the reviewed digest' >&2; exit 65; }
@@ -226,13 +246,30 @@ fi
 install -d -o root -g root -m 0755 /var/www /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /var/www/certbot
 groupadd --system --force psm-deploy
 install -d -o root -g root -m 0755 /usr/local/libexec
-[[ -e ${HELPER_BINARY} ]] || install -o root -g root -m 0755 "$staged/helper" ${HELPER_BINARY}
-[[ -e ${HELPER_CLIENT} ]] || install -o root -g root -m 0755 "$staged/client" ${HELPER_CLIENT}
-[[ -e ${HELPER_UNIT} ]] || install -o root -g root -m 0644 "$staged/unit" ${HELPER_UNIT}
 install -d -o root -g root -m 0755 /etc/psm-deploy
 install -d -o root -g psm-deploy -m 0750 /etc/psm-deploy/targets /var/lib/psm-deploy
+replaced=0
+place() {
+  local name=$1 source=$2 file=$3 mode=$4
+  case \${states[$name]} in
+    absent) ;;
+    replace)
+      # The previous file is kept, root-only, named by its digest.
+      install -d -o root -g root -m 0700 ${REPLACED_DIR}
+      cp -p -- "$file" "${REPLACED_DIR}/$name.$(file_sha "$file")"
+      replaced=1 ;;
+    *) return 0 ;;
+  esac
+  # Written beside the target and renamed, so a running binary is never truncated.
+  install -o root -g root -m "$mode" "$source" "$file.psm-new"
+  mv -f -- "$file.psm-new" "$file"
+}
+place binary "$staged/helper" ${HELPER_BINARY} 0755
+place client "$staged/client" ${HELPER_CLIENT} 0755
+place unit "$staged/unit" ${HELPER_UNIT} 0644
 systemctl daemon-reload
 systemctl enable --now psm-host-helper.service >/dev/null 2>&1
+if (( replaced )); then systemctl restart psm-host-helper.service; fi
 for _ in $(seq 1 20); do [[ -S ${HELPER_SOCKET} ]] && break; sleep 0.5; done
 inspect
 if (( \${#conflicts[@]} )); then report result conflict; exit 65; fi
@@ -241,7 +278,22 @@ report result applied
 `;
 }
 
-export function buildHelperInstallPlan(input: { machine: MachineIdentity; build: HelperBuild; now?: number }): HelperInstallPlan {
+const SHA256_RE = /^[0-9a-f]{64}$/;
+
+function replacementDigest(value: unknown, field: string): string {
+  if (value === undefined || value === "") return "";
+  if (typeof value !== "string" || !SHA256_RE.test(value)) throw new MachinePlanError(`${field} must be a SHA-256 digest.`, field);
+  return value;
+}
+
+export function buildHelperInstallPlan(input: { machine: MachineIdentity; build: HelperBuild; replaces?: HelperReplacements; now?: number }): HelperInstallPlan {
+  const replaces = {
+    binary: replacementDigest(input.replaces?.binary, "replaces.binary"),
+    client: replacementDigest(input.replaces?.client, "replaces.client"),
+    unit: replacementDigest(input.replaces?.unit, "replaces.unit"),
+  };
+  const replacing = Object.entries(replaces).filter(([, value]) => value);
+  const files: Record<string, string> = { binary: HELPER_BINARY, client: HELPER_CLIENT, unit: HELPER_UNIT };
   const unit = fs.readFileSync(path.join(HELPER_ROOT, "packaging", "psm-host-helper.service"));
   const client = fs.readFileSync(path.join(HELPER_ROOT, "packaging", "psm-host-helper-client.sh"));
   const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
@@ -252,6 +304,9 @@ export function buildHelperInstallPlan(input: { machine: MachineIdentity; build:
     PSM_UNIT_SHA256: sha(unit),
     PSM_CLIENT_B64: client.toString("base64"),
     PSM_UNIT_B64: unit.toString("base64"),
+    PSM_REPLACE_BINARY: replaces.binary,
+    PSM_REPLACE_CLIENT: replaces.client,
+    PSM_REPLACE_UNIT: replaces.unit,
   });
   return finish({
     schema: MACHINE_PLAN_SCHEMA,
@@ -269,7 +324,9 @@ export function buildHelperInstallPlan(input: { machine: MachineIdentity; build:
     comment: "PSM host helper",
     publicKeyFingerprint: "",
     helper: { sha256: input.build.sha256, bytes: input.build.bytes, arch: input.build.arch, sourceDigest: input.build.sourceDigest },
+    ...(replacing.length ? { replaces: Object.fromEntries(replacing) as HelperReplacements } : {}),
     operations: [
+      ...replacing.map(([name, value]) => `Replace the installed ${files[name]} (sha256 ${value.slice(0, 16)}…) and restart psm-host-helper.service; the previous file is kept in ${REPLACED_DIR}.`),
       "Install nginx and certbot with apt, if either is missing.",
       `Install the PSM host helper (${input.build.arch}, sha256 ${input.build.sha256.slice(0, 16)}…) at ${HELPER_BINARY}, after checking its digest on the server.`,
       `Install its forced-command client ${HELPER_CLIENT} and systemd unit, and create the psm-deploy group.`,
@@ -296,6 +353,7 @@ ${parameters(values)}
 mode=\${1:---inspect}
 [[ $# -le 1 && ( "$mode" == --inspect || "$mode" == --apply ) ]] || { echo 'usage: deploy.sh [--inspect|--apply]' >&2; exit 64; }
 
+target_state=
 account_state() {
   local account=$1 authorized=$2 prefix=$3 row _ uid gid comment home shell
   local keys="/home/$account/.ssh/authorized_keys"
@@ -326,6 +384,7 @@ account_state() {
 
 inspect() {
   conflicts=()
+  target_state=
   facts
   if [[ -x ${HELPER_BINARY} ]] && systemctl is-active --quiet psm-host-helper.service 2>/dev/null && getent group psm-deploy >/dev/null; then
     report helper active
@@ -344,7 +403,13 @@ inspect() {
     elif [[ -n "$infra_uid" ]] && grep -q "\\"deployUid\\": $infra_uid," "$PSM_TARGET_FILE"; then
       report target revision-differs
     else
-      report target conflict; conflict "target-owned-by-other:$PSM_TARGET_ID"
+      # Enrolled for other accounts: replaced only when the reviewed plan names
+      # this exact contract's digest.
+      local observed
+      observed=$(file_sha "$PSM_TARGET_FILE")
+      report target_sha "$observed"
+      if [[ -n "$PSM_REPLACE_TARGET" && "$observed" == "$PSM_REPLACE_TARGET" ]]; then target_state=replace; report target replace
+      else report target conflict; conflict "target-owned-by-other:$PSM_TARGET_ID"; fi
     fi
   fi
   for item in "\${conflicts[@]}"; do report conflict "$item"; done
@@ -385,6 +450,10 @@ infra_uid=$(id -u "$PSM_INFRA"); infra_gid=$(id -g "$PSM_INFRA"); release_uid=$(
 contract=$(mktemp)
 trap 'rm -f -- "$contract"' EXIT
 printf '%s' "$PSM_CONTRACT_B64" | base64 -d | sed -e "s/\\"__INFRA_UID__\\"/$infra_uid/g" -e "s/\\"__INFRA_GID__\\"/$infra_gid/g" -e "s/\\"__RELEASE_UID__\\"/$release_uid/g" > "$contract"
+if [[ "$target_state" == replace ]]; then
+  install -d -o root -g root -m 0700 ${REPLACED_DIR}
+  cp -p -- "$PSM_TARGET_FILE" "${REPLACED_DIR}/target.$(file_sha "$PSM_TARGET_FILE").json"
+fi
 ${HELPER_BINARY} enroll < "$contract" >/dev/null
 inspect
 if (( \${#conflicts[@]} )); then report result conflict; exit 65; fi
@@ -406,6 +475,8 @@ export interface DeployAccessRequest {
   allowedRootPrefix?: unknown;
   infraPublicKey: string;
   releasePublicKey: string;
+  /** The exact SHA-256 of a contract enrolled for other accounts, which this plan may replace. */
+  replacesTarget?: unknown;
   now?: number;
 }
 
@@ -449,6 +520,7 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
   const revision = `psm-${digest(JSON.stringify(template)).slice(7, 19)}`;
   template.revision = revision;
   const file = `/etc/psm-deploy/targets/${createHash("sha256").update(targetId).digest("hex")}.json`;
+  const replacesTarget = replacementDigest(request.replacesTarget, "replacesTarget");
   const forced = (key: { line: string }, account: string) => `command="${HELPER_CLIENT}",restrict ${key.line} ${account}`;
   const script = deployAccessScript({
     PSM_PLAN: `${machine.id}:${projectId}:${environmentId}:deploy`,
@@ -461,6 +533,7 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     PSM_TARGET_FILE: file,
     PSM_REVISION: revision,
     PSM_CONTRACT_B64: Buffer.from(JSON.stringify(template)).toString("base64"),
+    PSM_REPLACE_TARGET: replacesTarget,
   });
   return finish({
     schema: MACHINE_PLAN_SCHEMA,
@@ -477,9 +550,11 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     workdir: canonicalRoot,
     comment,
     publicKeyFingerprint: infraKey.fingerprint,
-    release: { account: release, publicKeyFingerprint: releaseKey.fingerprint },
-    target: { targetId, unitId, hostname, canonicalRoot, allowedRootPrefix, certbotEmail, revision, file },
+    publicKey: infraKey.line,
+    release: { account: release, publicKeyFingerprint: releaseKey.fingerprint, publicKey: releaseKey.line },
+    target: { targetId, unitId, hostname, canonicalRoot, allowedRootPrefix, certbotEmail, revision, file, ...(replacesTarget ? { replaces: replacesTarget } : {}) },
     operations: [
+      ...(replacesTarget ? [`Replace the contract already enrolled for ${targetId} (sha256 ${replacesTarget.slice(0, 16)}…), which names other accounts; those accounts lose access to it. The previous contract is kept in ${REPLACED_DIR}.`] : []),
       `Create ${infra} (infrastructure) and ${release} (release), each with its own group, no password and no sudo, in psm-deploy.`,
       `Authorize one PSM-generated key per account, forced to the host-helper client (${infraKey.fingerprint}, ${releaseKey.fingerprint}).`,
       `Enroll helper target ${targetId} for ${hostname} at ${canonicalRoot}, revision ${revision}, certificate notices to ${certbotEmail}.`,
