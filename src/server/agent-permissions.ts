@@ -55,6 +55,18 @@ export class ReviewRequiredError extends PermissionError {
   constructor(readonly decision: Decision, readonly permission: string, readonly context: DecisionContext, readonly summary: string) { super(decision.reason); this.name = "ReviewRequiredError"; }
 }
 
+/**
+ * Nothing decided this operation either way. Unlike an explicit Deny, the
+ * operator can grant it from the request, and the agent continues.
+ */
+export class GrantRequiredError extends ReviewRequiredError {
+  constructor(decision: Decision, permission: string, context: DecisionContext, summary: string, message: string) {
+    super(decision, permission, context, summary);
+    this.name = "GrantRequiredError";
+    this.message = message;
+  }
+}
+
 /** Standing grants are unscoped, permanent Allow rules. */
 function grantRules(snapshot: PermissionSnapshot): PolicyRule[] {
   return Object.entries(snapshot.grants).filter(([, grant]) => grant?.granted).map(([permission, grant]) => ({
@@ -98,6 +110,9 @@ export class AgentPermissionStore {
   check(snapshot: PermissionSnapshot, permission: AgentPermission, context: DecisionContext = {}, summary: string = permission): Decision {
     const decision = this.decide(snapshot, permission, context);
     if (decision.effect === "ask") throw new ReviewRequiredError(decision, permission, context, summary);
+    if (decision.effect === "deny" && !decision.rule && !decision.workspace && AGENT_PERMISSIONS.some((entry) => entry.id === permission && entry.supported)) {
+      throw new GrantRequiredError(decision, permission, context, summary, `Project ${snapshot.project.name} has not granted ${permission}. Review Agent permissions in Capabilities.`);
+    }
     if (decision.effect === "deny") {
       throw new PermissionError(decision.rule || decision.workspace
         ? `${decision.reason} Review Agent permissions in Capabilities.`

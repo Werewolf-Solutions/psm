@@ -5,7 +5,7 @@ import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import { ReviewRequiredError, type AgentPermissionStore, type PermissionSnapshot } from "./agent-permissions.ts";
+import { GrantRequiredError, ReviewRequiredError, type AgentPermissionStore, type PermissionSnapshot } from "./agent-permissions.ts";
 import type { OperationReviews } from "./agent-reviews.ts";
 import type { MachineCommands } from "./machines/commands.ts";
 
@@ -59,7 +59,8 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
         const snapshot = repositories.get(id)?.snapshot;
         if (snapshot && input.policy.reviews) {
           const review = input.policy.reviews.request(snapshot, error.permission, error.context, error.summary, error.message);
-          return { isError: true, content: [{ type: "text" as const, text: `Operator review needed (${review.id}): ${error.summary}\n${error.message}\nTell the operator what you want to do and why, ask them to answer the review in Capabilities → Agent permissions, then call this tool again with the same arguments.` }] };
+          const kind = error instanceof GrantRequiredError ? "Access request" : "Operator review";
+          return { isError: true, content: [{ type: "text" as const, text: `${kind} needed (${review.id}): ${error.summary}\n${error.message}\nTell the operator what you want to do and why, ask them to answer it in Capabilities → Agent permissions (once, for this task, or always), then call this tool again with the same arguments.` }] };
         }
       }
       // Never relay raw subprocess stderr, which may contain credential/config values.

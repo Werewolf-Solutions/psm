@@ -96,3 +96,22 @@ test("workspace denials apply to every project in that workspace", (t) => {
   assert.throws(() => store.check(granted, "git.push"), /Denied by workspace policy/);
   assert.equal(store.check({ ...granted, project: { ...granted.project, workspaceId: "business:0123456789abcdef01234567" } }, "git.push").effect, "allow");
 });
+
+test("an undecided operation is a grant request the operator can answer; an explicit deny is final", async (t) => {
+  const { store, project, database } = fixture(t);
+  const { GrantRequiredError } = await import("./agent-permissions.ts");
+  const { OperationReviews } = await import("./agent-reviews.ts");
+  const reviews = new OperationReviews(store, () => database);
+  const turn = { ...store.changeMany(project, ["repo.read"], true, 0, "operator"), task: taskKey("room") };
+  const undecided = (() => { try { store.check(turn, "git.push", { connectionId: "origin" }, "Push abc to origin/main"); } catch (error) { return error; } })();
+  assert.ok(undecided instanceof GrantRequiredError);
+  assert.match((undecided as Error).message, /has not granted git.push/);
+  const request = reviews.request(turn, (undecided as any).permission, (undecided as any).context, (undecided as any).summary, (undecided as Error).message);
+  reviews.decide(project, request.id, "task", "operator");
+  assert.equal(store.check(turn, "git.push", { connectionId: "origin" }).effect, "allow", "granted for this task; the running turn continues");
+  store.addRule(project, { permission: "repo.delete", effect: "deny", source: "custom", actor: "operator" }, store.snapshot(project).revision);
+  const fresh = { ...store.snapshot(project), task: taskKey("room") };
+  const denied = (() => { try { store.check(fresh, "repo.delete"); } catch (error) { return error; } })();
+  assert.ok(!(denied instanceof GrantRequiredError), "an explicit deny is not offered as a request");
+  assert.match((denied as Error).message, /Denied by deny repo.delete/);
+});
