@@ -13,13 +13,20 @@ export interface AttachedCall {
   state: "pending" | "running" | "succeeded" | "failed" | "rejected";
   actor?: string; result?: unknown;
 }
-export type McpConnection = { client: Pick<Client, "listTools" | "callTool">; close: () => Promise<void> };
-export async function connectAttachedMcp(capability: McpCapability): Promise<McpConnection> {
+/** `secrets` are values the server was given; they are redacted from anything it returns. */
+export type McpConnection = { client: Pick<Client, "listTools" | "callTool">; close: () => Promise<void>; secrets?: string[] };
+/**
+ * Start or connect to an attached MCP server. Credentials come from the
+ * secret broker when the operator stored them there (`credentials`), and only
+ * otherwise from PSM's own environment.
+ */
+export async function connectAttachedMcp(capability: McpCapability, credentials: Record<string, string> | null = null): Promise<McpConnection> {
+  const value = (name: string) => credentials?.[name] ?? process.env[name];
   const client = new Client({ name: "psm-managed", version: "1" });
   const wire = capability.mcp;
   if (wire.transport === "stdio") {
     const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", ...wire.env };
-    for (const name of capability.requiredEnv) { if (process.env[name]) env[name] = process.env[name]!; }
+    for (const name of capability.requiredEnv) { const found = value(name); if (found) env[name] = found; }
     const launch = wire.launch;
     const transport = new StdioClientTransport({
       command: launch.type === "npm-script" ? "npm" : launch.command,
@@ -30,14 +37,14 @@ export async function connectAttachedMcp(capability: McpCapability): Promise<Mcp
   } else {
     const headers = { ...wire.headers };
     if (wire.bearerTokenEnvVar) {
-      const token = process.env[wire.bearerTokenEnvVar];
+      const token = value(wire.bearerTokenEnvVar);
       if (!token) throw new Error("The attached MCP credential is missing.");
       headers.Authorization = `Bearer ${token}`;
     }
     const transport = new StreamableHTTPClientTransport(new URL(wire.url), { requestInit: { headers, redirect: "error" } });
     try { await client.connect(transport); } catch { await transport.close(); throw new Error("Attached MCP server could not connect. Check its URL and required credentials."); }
   }
-  return { client, close: () => client.close() };
+  return { client, close: () => client.close(), secrets: Object.values(credentials ?? {}) };
 }
 
 /**
@@ -128,11 +135,16 @@ export class ManagedMcpTools {
         const result = await connection.client.callTool({ name: call.tool, arguments: call.arguments });
         let text = JSON.stringify(result);
         // Credential values stay in the broker even if an integration echoes them.
-        const values = [...capability.requiredEnv.map((name) => process.env[name]), ...(capability.mcp.transport === "http" ? Object.values(capability.mcp.headers ?? {}) : Object.values(capability.mcp.env))].filter((value): value is string => !!value && value.length > 3);
+        const values = [...(connection.secrets ?? []), ...capability.requiredEnv.map((name) => process.env[name]), ...(capability.mcp.transport === "http" ? Object.values(capability.mcp.headers ?? {}) : Object.values(capability.mcp.env))].filter((value): value is string => !!value && value.length > 3);
         for (const value of values) text = text.replaceAll(value, "[redacted]");
         call.result = text.slice(0, 64_000); call.state = result.isError ? "failed" : "succeeded";
       } finally { await connection.close(); }
     } catch { call.state = "failed"; call.result = "Attached MCP call failed. Check the integration connection and review a new call if needed."; }
     this.save(call); return call;
   }
+}
+
+/** The broker connection that holds an attached capability's credentials. */
+export function mcpConnectionId(ref: string): string {
+  return `mcp-${createHash("sha256").update(ref).digest("hex").slice(0, 16)}`;
 }

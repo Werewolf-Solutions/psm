@@ -62,3 +62,18 @@ test("an allow rule runs a tool directly, an explicit deny refuses it, and 'alwa
   await assert.rejects(h.tools.request(h.store.snapshot(h.project), "workspace:test", "write_service", { n: 3 }), /Denied/);
   assert.equal(h.calls(), 2);
 });
+test("credentials handed to an attached server are redacted from what it returns", async (t) => {
+  const directory = fs.mkdtempSync(`${os.tmpdir()}/psm-mcp-cred-`); const database = openDatabase(":memory:");
+  t.after(() => { database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const store = new AgentPermissionStore(() => database); const project = { id: "prj_cred", name: "cred", path: directory };
+  store.changeMany(project, ["mcp.use", "mcp.call"], true, 0, "operator");
+  const capability = { ref: "workspace:svc", title: "Svc", ready: true, manifestDigest: "sha256:x", requiredEnv: ["SVC_TOKEN"], mcp: { transport: "stdio", env: {}, launch: { type: "command", command: "never", args: [] } } } as unknown as McpCapability;
+  const tools = new ManagedMcpTools(store, () => [capability], () => database, async () => ({
+    client: { listTools: async () => ({ tools: [{ name: "whoami", inputSchema: { type: "object" } }] }), callTool: async () => ({ content: [{ type: "text", text: "token is broker-held-token-value" }] }) },
+    close: async () => {}, secrets: ["broker-held-token-value"],
+  } as McpConnection));
+  const call = await tools.request(store.snapshot(project), "workspace:svc", "whoami", {});
+  assert.equal(call.state, "succeeded");
+  assert.ok(!String(call.result).includes("broker-held-token-value"));
+  assert.match(String(call.result), /\[redacted\]/);
+});

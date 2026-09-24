@@ -1,5 +1,5 @@
 import { SourcePublicationController } from "./deploy/source-publication.ts";
-import { ManagedMcpTools } from "./agent-mcp-tools.ts";
+import { connectAttachedMcp, ManagedMcpTools, mcpConnectionId } from "./agent-mcp-tools.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
 import os from "node:os";
 import { databaseFile, db } from "./db.ts";
@@ -2183,11 +2183,23 @@ function preparationCheckoutGap(projectId: string): string | null {
   catch (error) { return `Check the Git checkout — ${error instanceof PermissionError ? error.message : "Managed Git needs an ordinary checkout with an existing commit and an attached branch."}`; }
   return null;
 }
+/**
+ * Credentials for an attached MCP server, from the secret broker when the
+ * operator stored them in the connection `mcp-<hash of ref>` (one slot per
+ * required variable); null means fall back to PSM's own environment.
+ */
+async function mcpCredentials(capability: import("../types.ts").McpCapability): Promise<Record<string, string> | null> {
+  const names = [...capability.requiredEnv, ...(capability.mcp.transport === "http" && capability.mcp.bearerTokenEnvVar ? [capability.mcp.bearerTokenEnvVar] : [])];
+  if (!names.length) return null;
+  const connectionId = mcpConnectionId(capability.ref);
+  try { deploymentStore.getConnection(connectionId); } catch { return null; }
+  return deploymentSecretBroker.withLease(connectionId, names, (lease) => Object.fromEntries(names.map((name) => [name, lease.useUtf8(name, (value) => value)])));
+}
 const managedMcp = new ManagedMcpTools(agentPermissions, (snapshot) => {
   const project = getProjects().find((entry) => entry.id === snapshot.project.id && fs.realpathSync(entry.path) === snapshot.project.path);
   if (!project) return [];
   return currentCatalog().filter((capability): capability is import("../types.ts").McpCapability => capability.kind === "mcp" && capability.providerProject !== project.name && project.attachments.some((attachment) => attachment.capabilityRef === capability.ref && attachment.manifestDigest === capability.manifestDigest));
-});
+}, undefined, async (capability) => connectAttachedMcp(capability, await mcpCredentials(capability)));
 configureManagedAgents((scope) => {
   const projects = getProjects();
   const snapshots = [scope.cwd, ...scope.extraDirs].map((directory) => {
