@@ -22,6 +22,8 @@ export function codexManagedConfig(inherited: Record<string, unknown>, directory
     // workspace is an empty disposable directory; repository access is brokered.
     "permissions.psm.filesystem": { "/": "deny", [directory]: "read" },
     "permissions.psm.network.enabled": false,
+    // app-server 0.156 refuses a config that defines permission profiles without naming the default.
+    default_permissions: "psm",
   };
 }
 
@@ -51,15 +53,20 @@ export class CodexRpc {
         else pending.resolve(message.result);
       }
     });
+    // Only the first "Error:" line is kept, so a startup failure (an unsupported
+    // config after a Codex update, say) names its cause; nothing else is retained.
+    let reason = "";
+    createInterface({ input: child.stderr }).on("line", (line) => {
+      const plain = line.replace(/\u001b\[[0-9;]*m/g, "").trim();
+      if (!reason && /^Error:/.test(plain)) reason = plain.slice(0, 300);
+    });
     const fail = () => {
-      const error = new Error("Codex app-server stopped before the managed turn completed.");
+      const error = new Error(`Codex app-server stopped before the managed turn completed.${reason ? ` ${reason}` : ""}`);
       for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
       this.pending.clear(); this.onFailure(error);
     };
-    child.on("error", fail); child.on("exit", fail);
+    child.on("error", fail); child.on("close", fail);
     child.stdin.on("error", () => {});
-    // Drain diagnostic output without leaking authentication/configuration data.
-    child.stderr.resume();
   }
   private write(value: unknown): void { if (!this.child.stdin.destroyed) this.child.stdin.write(JSON.stringify(value) + "\n"); }
   notify(method: string, params?: unknown): void { this.write({ method, ...(params ? { params } : {}) }); }

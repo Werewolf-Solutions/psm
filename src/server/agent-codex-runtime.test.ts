@@ -14,6 +14,18 @@ test("Codex policy disables inherited servers including dotted names and denies 
   assert.deepEqual(config.mcp_servers, { "server.with.dots": { command: "evil", enabled: false } });
   assert.equal(config["features.shell_tool"], false); assert.equal(config.web_search, "disabled");
   assert.deepEqual(config["permissions.psm.filesystem"], { "/": "deny", "/tmp/empty": "read" });
+  assert.equal(config.default_permissions, "psm", "app-server 0.156 refuses profiles without a named default");
+});
+test("A Codex app-server that exits during startup reports its own error line", async () => {
+  const abort = new AbortController();
+  const database = openDatabase(":memory:"); const store = new AgentPermissionStore(() => database);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "psm-codex-test-"));
+  const server = createManagedRepositoryServer({ store, snapshots: [store.snapshot({ id: "prj_test", name: "test", path: root })], protectedRoots: [] }, abort);
+  const script = "process.stderr.write('\\u001b[2mnoise\\u001b[0m\\nError: error loading default config after config error: config defines profiles\\nmore\\n'); setTimeout(() => process.exit(1), 50);";
+  await assert.rejects(
+    runCodexManaged({ server, model: null, message: "hi", context: "", signal: abort, event: () => {}, launch: (_args, cwd) => spawn(process.execPath, ["-e", script], { cwd, stdio: ["pipe", "pipe", "pipe"] }) }),
+    /stopped before the managed turn completed\. Error: error loading default config after config error: config defines profiles$/,
+  );
 });
 test("Codex dynamic tools use the shared broker and deny approval requests and self-grants", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "psm-codex-test-"));
