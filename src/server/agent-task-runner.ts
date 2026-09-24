@@ -135,6 +135,19 @@ export class ManagedTaskRunner {
     const output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady);
     this.store.check(this.repository.snapshot, "test.run"); return output;
   }
+  /** Any package.json script — build, typecheck, lint — in the same offline sandbox. */
+  script(name: string): Promise<string> { return this.serialize(() => this.runScript(name)); }
+  private async runScript(name: string): Promise<string> {
+    this.store.check(this.repository.snapshot, "script.run");
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(name)) throw new Error("Give the name of a script in package.json.");
+    let scripts: Record<string, unknown> = {};
+    try { scripts = JSON.parse(this.repository.read("package.json")).scripts ?? {}; } catch { throw new Error("This project has no readable package.json."); }
+    if (typeof scripts[name] !== "string") throw new Error(`package.json has no script named ${name}. Available: ${Object.keys(scripts).join(", ") || "none"}.`);
+    const directory = this.snapshot();
+    const output = await this.container(directory, ["npm", "run", name], this.packagesReady);
+    this.store.check(this.repository.snapshot, "script.run");
+    return `${this.packagesReady ? "" : "Dependencies were not installed in this sandbox; if the script needs them, run install_packages first.\n"}${output}`;
+  }
   install(): Promise<string> { return this.serialize(() => this.installPackages()); }
   private async installPackages(): Promise<string> {
     this.store.check(this.repository.snapshot, "pkg.install");

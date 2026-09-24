@@ -28,7 +28,7 @@ test("each gap names its cause: grant, review, connection, runner or unsupported
   assert.equal(status(items, "tests"), "needs-runner");
   assert.equal(status(items, "attached-tools"), "needs-connection");
   assert.equal(status(items, "server-commands"), "needs-grant");
-  assert.equal(status(items, "build"), "unsupported");
+  assert.equal(status(items, "build"), "needs-runner", "builds are a tool now; this one lacks the runner");
   assert.equal(status(items, "local-shell"), "unsupported");
   assert.equal(status(items, "deploy"), "needs-review");
   assert.equal(status(explainAccess({ ...base, snapshot: store.applyPreset(project, "operate-staging", develop.revision, "operator"), store }), "deploy"), "ready");

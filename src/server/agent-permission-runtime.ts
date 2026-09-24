@@ -81,6 +81,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       tool("access_status", "Explain what you can and cannot do in a project right now, and for each gap whether it needs a grant, a review, a connection or a runner, or is unsupported. Check this before telling the operator something is impossible.", { project }, ({ project }) => invoke(project, (repo) => policy.explain!(repo.snapshot))),
     ] : []),
     tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
+    tool("run_script", "Run a package.json script (build, typecheck, lint, …) offline in the disposable sandbox and return its output. Install dependencies first if it needs them.", { project, script: z.string() }, ({ project, script }) => invoke(project, () => tasks.get(project)!.script(script))),
     tool("install_packages", "Install the public npm lockfile into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project }, ({ project }) => invoke(project, () => tasks.get(project)!.install())),
     tool("files", "List ordinary project files.", { project }, ({ project }) => invoke(project, (repo) => repo.list())),
     tool("read", "Read one project text file.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.read(file))),

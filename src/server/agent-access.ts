@@ -40,7 +40,6 @@ export interface AccessInputs {
 }
 
 const UNSUPPORTED: ReadonlyArray<[string, string, string]> = [
-  ["build", "Build, typecheck and lint", "Not an agent tool yet: only test scripts run in the sandbox."],
   ["dev-server", "Run a development server and preview it", "Not an agent tool yet."],
   ["browser", "Check pages in a browser", "Not an agent tool yet."],
   ["local-shell", "Run arbitrary commands on this computer", "Managed agents have no shell here by design. Use a connected server's command account instead."],
@@ -70,6 +69,7 @@ export function explainAccess(input: AccessInputs): AccessItem[] {
     decided("fetch", "Fetch from remotes", "git.fetch", {}, [[hasRemote, "needs-connection", "This checkout has no Git remote.", "Add a remote to the repository."]]),
     decided("push", "Push branches", "git.push", { connectionId: input.remotes[0] ?? "origin" }, [[hasRemote, "needs-connection", "This checkout has no Git remote.", "Add a remote to the repository."]]),
     decided("tests", "Run tests", "test.run", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
+    decided("build", "Build, typecheck and lint", "script.run", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
     decided("install", "Install dependencies", "pkg.install", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
     decided("attached-tools", "Use attached tools", "mcp.use", {}, [[input.attachedTools > 0, "needs-connection", "No tools are attached to this project.", "Attach a capability in Capabilities."]]),
   ];

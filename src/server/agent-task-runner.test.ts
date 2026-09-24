@@ -149,3 +149,23 @@ test("a genuine test failure is passed through untouched", () => {
     );
   }
 });
+
+test("project scripts need script.run, must exist in package.json, and run offline in the sandbox", async (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.directory, "package.json"), JSON.stringify({ scripts: { test: "node --test", build: "node build.js", "type:check": "tsc --noEmit" } }));
+  const calls: string[][] = [];
+  const executor: TaskExecutor = async (args) => { calls.push(args); return "built"; };
+  const runner = new ManagedTaskRunner(new RepositoryTools(h.store.snapshot(h.project), h.store), h.store, h.abort.signal, executor);
+  t.after(() => runner.close());
+  await assert.rejects(runner.script("build"), /has not granted script.run/);
+  h.store.change(h.project, "script.run", true, h.store.snapshot(h.project).revision, "operator");
+  const granted = new ManagedTaskRunner(new RepositoryTools(h.store.snapshot(h.project), h.store), h.store, h.abort.signal, executor);
+  t.after(() => granted.close());
+  assert.match(await granted.script("build"), /run install_packages first[\s\S]*built/);
+  const run = calls.find((args) => args[0] === "run")!;
+  assert.ok(run.includes("--network=none") && run.includes("--read-only"));
+  assert.match(run.at(-1)!, /\["npm","run","build"\]/);
+  assert.match(await granted.script("type:check"), /built/);
+  await assert.rejects(granted.script("deploy"), /no script named deploy. Available: test, build, type:check/);
+  await assert.rejects(granted.script("build; rm -rf /"), /name of a script/);
+});

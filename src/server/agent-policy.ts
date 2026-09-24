@@ -144,10 +144,10 @@ export interface Preset {
   limits: readonly string[];
 }
 
-const DEVELOP = ["repo.read", "repo.edit", "repo.delete", "git.commit", "git.branch", "git.switch", "git.merge", "git.fetch", "test.run", "pkg.install", "mcp.use"] as const;
+const DEVELOP = ["repo.read", "repo.edit", "repo.delete", "git.commit", "git.branch", "git.switch", "git.merge", "git.fetch", "test.run", "script.run", "pkg.install", "mcp.use"] as const;
 const COMMON_LIMITS = [
   "No general shell on your computer: the agent works through PSM tools only.",
-  "Builds, typechecks, dev servers and browser checks are not available as agent tools yet.",
+  "Builds and checks run offline in a disposable container; nothing they produce reaches your checkout.",
 ];
 
 export const PRESETS: readonly Preset[] = [
