@@ -12,6 +12,7 @@
  */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import { isIP } from "node:net";
 
 import { HostHelperError, hostHelperRequest, SshHostHelperTransport, type HostHelperTransport } from "../deploy/adapters/host-helper.ts";
 import type { SecretBroker } from "../deploy/connections.ts";
@@ -388,7 +389,8 @@ export class MachineService {
             connectionId, kind: HELPER_CONNECTION_KIND, label: `${input.project.name} ${environmentId} ${role} on ${machine.name}`,
             secretGeneration: 0, readiness: "missing-secret",
             metadata: {
-              publicMetadata: { knownHost: machine.knownHost, machineId: machine.id, accessId, role, targetContracts: {} },
+              // DNS records point at the address PSM itself connects to.
+              publicMetadata: { knownHost: machine.knownHost, machineId: machine.id, accessId, role, targetContracts: {}, ...(isIP(machine.host) === 4 ? { address: machine.host } : {}) },
               credentialIdentity: { kind: "public-key", value: fingerprint },
               requiredSecretSlots: ["privateKey"],
             },
