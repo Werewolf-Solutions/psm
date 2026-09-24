@@ -934,6 +934,7 @@ function emptyManagedDeploymentState() {
     preparationPlan: null,
     preparationPoll: null,
     preparationSignature: "",
+    preparationObserved: false,
     preparationEngine: null,
     preparationModel: null,
     preparationEffort: null,
@@ -5117,6 +5118,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       state.preparationPlan = null;
       state.preparationPublication = null;
       state.preparationSignature = "";
+      state.preparationObserved = false;
       state.preparationEngine = null;
       state.preparationModel = null;
       state.preparationEffort = null;
@@ -5128,6 +5130,8 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       WS.depEs.close();
       WS.depEs = null;
     }
+    // Show the last answer instead of checking every provider again on each visit.
+    if (!state.readiness || state.readinessEnvironment !== state.environment) await restoreDeploymentReadiness(scope);
     renderManagedDeploy();
     loadDeploymentConnectionSetup();
     scheduleDeploymentPreparationPoll(0);
@@ -5259,6 +5263,23 @@ async function prepareDeploymentArtifact() {
   }
 }
 
+async function restoreDeploymentReadiness(scope) {
+  const state = scope.state;
+  const environmentId = state.environment;
+  if (!environmentId) return;
+  try {
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(environmentId)}/readiness`);
+    const body = response.ok ? await response.json() : null;
+    if (!body?.readiness || !deploymentRequestIsCurrent(scope) || state.environment !== environmentId) return;
+    state.readiness = body.readiness;
+    state.readinessEnvironment = environmentId;
+    if (body.plan) {
+      state.plan = body.plan;
+      state.planEnvironment = environmentId;
+    }
+  } catch {}
+}
+
 async function checkDeploymentReadiness(makeReady = false) {
   const scope = deploymentRequestScope({ environment: true });
   const state = scope.state;
@@ -5294,6 +5315,7 @@ async function checkDeploymentReadiness(makeReady = false) {
       state.preparationPlan = null;
       state.preparationPublication = null;
       state.preparationSignature = preparationStep(body.preparation);
+      state.preparationObserved = true;
       if (body.preparation?.active) scheduleDeploymentPreparationPoll();
     }
     const index = state.data.environments.findIndex((item) => item.id === scope.environmentId);
@@ -5393,7 +5415,10 @@ async function pollDeploymentPreparation(scope) {
   }
   if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
   const job = body.preparation || null;
-  const moved = preparationStep(job) !== state.preparationSignature;
+  // Only a step that changes while the page watches it calls for a new check;
+  // the first answer after opening the page is where it already was.
+  const moved = state.preparationObserved && preparationStep(job) !== state.preparationSignature;
+  state.preparationObserved = true;
   state.preparation = job;
   state.preparationPlan = body.plan || null;
   state.preparationPublication = body.publication || null;

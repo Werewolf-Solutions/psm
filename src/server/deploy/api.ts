@@ -168,6 +168,14 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     try { res.json({ managed: true, environment: await service.environmentView(req.params.id, req.params.environment) }); } catch (error) { apiError(res, error); }
   });
 
+  // The last answer, so reopening the page shows it instead of checking every provider again.
+  router.get("/api/projects/:id/deployments/:environment/readiness", (req, res) => {
+    try {
+      const last = service.lastReadiness(req.params.id, req.params.environment);
+      res.json(last ? addCapabilityReview(last, service.resolveProject(req.params.id).id, null) : { readiness: null });
+    } catch (error) { apiError(res, error); }
+  });
+
   router.post("/api/projects/:id/deployments/:environment/readiness", async (req, res) => {
     try {
       const checked = await service.checkReadiness(req.params.id, req.params.environment, {

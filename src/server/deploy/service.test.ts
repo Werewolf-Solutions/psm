@@ -242,7 +242,12 @@ test("readiness for a real project names what is missing, not that something is"
   // blockers into the checklist the deploy pane shows. Nothing is bound in a
   // fixture workspace, which is exactly the state an operator starts from.
   const kit = workspace();
+  assert.equal(kit.service.lastReadiness(DAPP, "production"), null, "nothing is answered before a check");
   const { readiness } = await kit.service.checkReadiness(DAPP, "production");
+  const kept = kit.service.lastReadiness(DAPP, "production")!;
+  assert.deepEqual(kept.readiness, readiness, "the last answer is kept for the page to show again");
+  kept.readiness.items.length = 0;
+  assert.ok(kit.service.lastReadiness(DAPP, "production")!.readiness.items.length > 0, "callers get a copy");
 
   assert.equal(readiness.ready, false);
   assert.equal(readiness.environmentId, "production");

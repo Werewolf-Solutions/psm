@@ -596,6 +596,14 @@ export class DeploymentService {
     return this.store.listArtifacts({ projectId: project.id });
   }
 
+  readonly #lastReadiness = new Map<string, { readiness: DeploymentReadiness; plan: Record<string, unknown>; environment: Record<string, unknown> }>();
+
+  /** The most recent readiness check for an environment, as it was answered; never a new check. */
+  lastReadiness(idOrName: string, environmentId: string) {
+    const last = this.#lastReadiness.get(`${this.resolveProject(idOrName).id}\0${environmentId}`);
+    return last ? structuredClone(last) : null;
+  }
+
   async checkReadiness(idOrName: string, environmentId: string, options: {
     artifactId?: string | null;
     preparationAvailable?: boolean;
@@ -640,6 +648,7 @@ export class DeploymentService {
     for (const item of readiness.items) {
       if (item.ownerProjectId) item.ownerProjectName = this.#projects().find((project) => project.id === item.ownerProjectId)?.name;
     }
+    this.#lastReadiness.set(`${context.project.id}\0${environmentId}`, structuredClone({ ...result, readiness }));
     return { ...result, readiness };
   }
 
