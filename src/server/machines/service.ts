@@ -35,7 +35,7 @@ import {
   type InspectionReport,
   type MachineIdentity,
 } from "./plan.ts";
-import { buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan } from "./roles.ts";
+import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan } from "./roles.ts";
 import { MachineTransportError, type MachineTransport, type SshEndpoint } from "./ssh.ts";
 import {
   MachineStoreError,
@@ -411,6 +411,103 @@ export class MachineService {
     });
   }
 
+  /**
+   * Plan PSM's own administrator access to a machine: the one-time handoff for
+   * a server whose administrator needs a password. Once verified it becomes
+   * the machine's administrator connection; release it after setup.
+   */
+  async planAdminAccess(input: { machineId: string; workspaceId: string }): Promise<MachineAccessRecord> {
+    const machine = this.#store.getMachine(input.machineId, input.workspaceId);
+    this.#requireTrusted(machine);
+    return this.#serialize(machine.id, async () => {
+      const existing = this.#store.findAccess(machine.id, MACHINE_PROJECT, "admin", "admin");
+      if (existing && existing.state !== "revoked") return existing;
+      if (existing) this.#store.removeAccess(existing.id);
+      const keys = await this.#transport.generateKeyPair("psm administrator");
+      const now = this.#now();
+      const accessId = newId("mac");
+      const connectionId = `machine-admin-${accessId.slice(4, 20)}`;
+      let plan: AdminAccessPlan;
+      try {
+        plan = buildAdminAccessPlan({ machine: identity(machine), publicKey: keys.publicKey, now });
+        this.#deployments.createConnection({
+          connectionId, kind: ADMIN_CONNECTION_KIND, label: `PSM administrator on ${machine.name}`, secretGeneration: 0, readiness: "missing-secret",
+          metadata: { publicMetadata: { knownHost: machine.knownHost, machineId: machine.id, accessId, account: plan.account }, credentialIdentity: { kind: "public-key", value: plan.publicKeyFingerprint }, requiredSecretSlots: ["privateKey"] },
+          constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: machine.host, user: plan.account, port: machine.port, hostKeyFingerprint: machine.hostKeyFingerprint } },
+          createdAt: now,
+        });
+        const generation = await this.#broker.put(connectionId, "privateKey", keys.privateKey);
+        const connection = this.#deployments.getConnection(connectionId);
+        this.#deployments.updateConnectionSecretStatus({ connectionId, expectedSecretGeneration: connection.secretGeneration, secretGeneration: generation, readiness: "unknown", updatedAt: now });
+      } catch (error) {
+        await this.#discardConnection(connectionId);
+        throw error;
+      } finally {
+        keys.privateKey.fill(0);
+      }
+      return this.#store.createAccess({
+        id: accessId, machineId: machine.id, projectId: MACHINE_PROJECT, projectName: machine.name, environmentId: "admin", role: "admin", risk: "production",
+        account: plan.account, workdir: "/", publicKeyFingerprint: plan.publicKeyFingerprint, connectionId, state: "planned", plan,
+        checks: [], verifiedAt: null, createdAt: now, updatedAt: now,
+      });
+    });
+  }
+
+  /**
+   * Remove PSM's administrator access: delete its sudoers entry and key on the
+   * server (using that access one last time), then forget the connection.
+   */
+  async releaseAdminAccess(id: string, workspaceId: string): Promise<MachineAccessRecord> {
+    const access = this.getAccess(id, workspaceId);
+    if (access.plan.role !== "admin") throw new MachineServiceError("Only administrator access can be released this way.", 400, "not-admin");
+    const plan = access.plan;
+    const machine = this.#store.getMachine(access.machineId);
+    return this.#serialize(machine.id, async () => {
+      if (access.state === "ready") {
+        const endpoint: SshEndpoint = { host: machine.host, port: machine.port, user: plan.account, knownHost: machine.knownHost, connectionId: access.connectionId };
+        const result = await this.#transport.run(endpoint, `sudo -n rm -f -- '${plan.sudoersFile}' '/home/${plan.account}/.ssh/authorized_keys' && echo released`, "", { timeoutMs: 30_000 });
+        if (!result.stdout.includes("released")) throw new MachineServiceError(`The server did not confirm removal: ${result.stderr || "no diagnostic"}`, 502, "release-failed");
+      }
+      const latest = this.#store.getMachine(machine.id);
+      if (latest.adminConnectionId === access.connectionId) {
+        this.#store.updateMachine(machine.id, latest.revision, (value) => ({ ...value, adminConnectionId: null, updatedAt: this.#now() }));
+      }
+      const current = this.#store.getAccess(access.id);
+      const revoked = this.#store.updateAccess(access.id, current.revision, (value) => ({ ...value, state: "revoked", updatedAt: this.#now() }));
+      await this.#discardConnection(access.connectionId);
+      return revoked;
+    });
+  }
+
+  /**
+   * For a job waiting on the copyable command: check quietly whether the
+   * machine is set up now, and if so continue the job. Safe to call often.
+   */
+  async probeManualSetup(jobId: string, workspaceId: string): Promise<SetupJobRecord> {
+    const job = this.#store.getJob(jobId);
+    const machine = this.#store.getMachine(job.machineId, workspaceId);
+    if (job.method !== "manual-command" || job.state !== "waiting") return job;
+    const access = this.#store.getAccess(job.accessId);
+    const observed = access.role === "admin" ? await this.#verifyAdmin(machine, access) : access.role === "deploy" ? (await this.#verifyDeploy(machine, access, new AbortController().signal)).checks : await this.#verifyAccess(machine, access, new AbortController().signal);
+    if (!observed.every((check) => check.ok)) return this.#store.getJob(jobId);
+    return this.confirmManualSetup(jobId, workspaceId);
+  }
+
+  async #verifyAdmin(machine: MachineRecord, access: MachineAccessRecord): Promise<VerificationCheck[]> {
+    const endpoint: SshEndpoint = { host: machine.host, port: machine.port, user: access.account, knownHost: machine.knownHost, connectionId: access.connectionId };
+    try {
+      const result = await this.#transport.run(endpoint, "printf 'user=%s\\n' \"$(id -un)\"; if sudo -n true 2>/dev/null; then echo sudo=yes; else echo sudo=no; fi", "", { timeoutMs: 30_000 });
+      const values = new Map(result.stdout.split("\n").map((line) => line.trim().split("=", 2) as [string, string]).filter((pair) => pair.length === 2));
+      return [
+        { id: "login", title: "Log in with the new key", ok: true, detail: `Authenticated with host key ${machine.hostKeyFingerprint}.` },
+        { id: "identity", title: "Runs as the PSM administrator account", ok: values.get("user") === access.account, detail: `user ${values.get("user") ?? "unknown"}` },
+        { id: "sudo", title: "Has administrator authority", ok: values.get("sudo") === "yes", detail: values.get("sudo") === "yes" ? "sudo -n works" : "sudo -n refused" },
+      ];
+    } catch (error) {
+      return [{ id: "login", title: "Log in with the new key", ok: false, detail: this.#failure(error).message }];
+    }
+  }
+
   getAccess(id: string, workspaceId: string): MachineAccessRecord {
     const access = this.#store.getAccess(id);
     this.#store.getMachine(access.machineId, workspaceId);
@@ -463,6 +560,9 @@ export class MachineService {
     if (input.planDigest !== access.plan.digest) throw new MachineServiceError("The setup plan changed since it was reviewed. Review it again.", 409, "plan-changed");
     const method: SetupMethod = input.method === "manual-command" ? "manual-command" : "admin-ssh";
     if (method === "admin-ssh") this.#adminEndpoint(machine);
+    if (method === "admin-ssh" && access.role === "admin" && machine.adminConnectionId === access.connectionId) {
+      throw new MachineServiceError("This is already the machine's administrator connection.", 409, "already-admin");
+    }
     if (method === "manual-command" && access.role === "helper") {
       throw new MachineServiceError("Installing the helper uploads its binary, so it needs an administrator connection for now.", 409, "admin-connection-required");
     }
@@ -604,6 +704,7 @@ export class MachineService {
       const verified = await step("verify", async () => {
         const observed = access.role === "helper" ? await this.#verifyHelper(machine, access.plan as HelperInstallPlan, signal)
           : access.role === "deploy" ? await this.#verifyDeploy(machine, access, signal)
+          : access.role === "admin" ? { checks: await this.#verifyAdmin(machine, access), targetDigest: null }
           : { checks: await this.#verifyAccess(machine, access, signal), targetDigest: null };
         const failed = observed.checks.filter((check) => !check.ok);
         if (failed.length) throw new StepFailure(`Verification failed: ${failed.map((check) => `${check.title}: ${check.detail}`).join("; ")}.`, "verification-failed");
@@ -612,6 +713,12 @@ export class MachineService {
       await step("save", async () => {
         const current = this.#store.getAccess(access.id);
         this.#store.updateAccess(access.id, current.revision, (value) => ({ ...value, state: "ready", checks: verified.checks, verifiedAt: this.#now(), updatedAt: this.#now() }));
+        if (access.plan.role === "admin") {
+          await this.#markConnectionReady(access.connectionId, null);
+          const latest = this.#store.getMachine(machine.id);
+          this.#store.updateMachine(machine.id, latest.revision, (value) => ({ ...value, adminConnectionId: access.connectionId, updatedAt: this.#now() }));
+          return { value: null, detail: `PSM now administers ${machine.name} as ${access.account}. Remove this access after setup if you prefer.` };
+        }
         if (access.plan.role === "helper") {
           const plan = access.plan;
           const latest = this.#store.getMachine(machine.id);
@@ -870,6 +977,7 @@ function inspectDetail(plan: AccessPlan, report: InspectionReport): string {
   const values = report.values;
   if (plan.role === "helper") return `${report.arch}; helper ${values.binary}, service ${values.service}${values.missing_packages ? `; will install ${values.missing_packages}` : ""}.`;
   if (plan.role === "deploy") return `helper ${values.helper}; ${plan.account} ${values.infra}/${values.infra_key}, ${plan.release.account} ${values.release}/${values.release_key}; target ${values.target}.`;
+  if (plan.role === "admin") return `account ${values.account}, key ${values.key}, sudoers ${values.sudoers}.`;
   return `${report.osId} ${report.osVersion} ${report.arch}; account ${report.account}, key ${report.key}.`;
 }
 
@@ -877,11 +985,13 @@ function isAlreadyDone(plan: AccessPlan, report: InspectionReport): boolean {
   const values = report.values;
   if (plan.role === "helper") return values.binary === "match" && values.client === "match" && values.unit === "match" && values.service === "active" && values.socket === "present" && !values.missing_packages;
   if (plan.role === "deploy") return values.infra === "present" && values.infra_key === "match" && values.release === "present" && values.release_key === "match" && values.target === "match";
+  if (plan.role === "admin") return values.account === "present" && values.key === "match" && values.sudoers === "match";
   return report.account === "present" && report.key === "match" && report.workdir === "present";
 }
 
 function receiptFor(plan: AccessPlan): string[] {
   if (plan.role === "helper") return [`host helper ${plan.helper.sha256.slice(0, 16)}… and psm-host-helper.service`, "psm-deploy group", "/etc/psm-deploy and /var/lib/psm-deploy"];
+  if (plan.role === "admin") return [`administrator account ${plan.account}`, `sudoers entry ${plan.sudoersFile}`, `authorized key ${plan.publicKeyFingerprint}`];
   if (plan.role === "deploy") return [`accounts ${plan.account} and ${plan.release.account}`, `authorized keys ${plan.publicKeyFingerprint}, ${plan.release.publicKeyFingerprint}`, `enrolled target ${plan.target.targetId} (${plan.target.revision})`];
   return [`account ${plan.account}`, `directory ${plan.workdir}`, `authorized key ${plan.publicKeyFingerprint}`];
 }

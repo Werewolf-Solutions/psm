@@ -53,3 +53,15 @@ test("the certificate contact is required and never invented, and paths stay ins
   assert.throws(() => deploy({ canonicalRoot: "/var/www/../etc" }), /canonical/);
   assert.throws(() => deploy({ machine: { ...machine, hostKeySource: "scanned-unverified" } }), /Confirm/);
 });
+
+test("administrator access is one dedicated account whose sudo rule is validated before install", async () => {
+  const { buildAdminAccessPlan } = await import("./roles.ts");
+  const plan = buildAdminAccessPlan({ machine, publicKey: `ssh-ed25519 ${blob(3)}`, now: 1 });
+  assert.equal(syntax(plan.script).status, 0, syntax(plan.script).stderr.toString());
+  assert.match(plan.account, /^psm-a-psm-admin-[0-9a-f]{6}$/);
+  assert.equal(plan.sudoersFile, `/etc/sudoers.d/${plan.account}`);
+  assert.match(plan.script, new RegExp(`readonly PSM_SUDOERS_LINE='${plan.account} ALL=\\(ALL\\) NOPASSWD:ALL'`));
+  assert.match(plan.script, /visudo -cf "\$staged"/);
+  assert.match(plan.script, /printf '%s\\n' "\$PSM_SUDOERS_LINE"/);
+  assert.ok(plan.authority[0].startsWith("Full administration"), "the plan says plainly what it grants");
+});

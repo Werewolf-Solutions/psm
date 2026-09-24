@@ -250,3 +250,54 @@ test("host helper install and per-project deploy identities on a systemd server"
   assert.throws(() => deployments.getConnection(access.releaseConnectionId!), /not found/);
   assert.equal(exec("id", "-un", access.account), access.account);
 });
+
+test("one-time administrator handoff when sudo needs a password, then automatic setup and release", { skip: (hostKind !== "lxd") && "set PSM_MACHINE_LXD=1: needs a systemd test host" }, async (t) => {
+  const database = openDatabase(":memory:");
+  const deployments = new DeploymentStore(database);
+  const broker = new SecretBroker();
+  const transport = new SshMachineTransport({ broker });
+  const service = new MachineService({ store: new MachineStore(() => database), deployments, broker, transport });
+  const adminKey = await transport.generateKeyPair("psm test admin");
+  const target = startTestHost("lxd", adminKey.publicKey);
+  t.after(() => { target.close(); database.close(); });
+  const [candidate] = (await waitFor("sshd", () => service.discover(target.address, target.port))).candidates.filter((entry) => entry.keyType === "ssh-ed25519");
+  const fingerprint = target.exec("ssh-keygen", "-lf", "/etc/ssh/ssh_host_ed25519_key.pub").split(" ")[1];
+  let machine = service.register({ workspaceId: "personal", name: "handoff host", host: target.address, port: target.port, knownHost: candidate.knownHost, confirmFingerprint: fingerprint });
+  // The operator's own login needs a password for sudo, so PSM cannot set up on its own.
+  deployments.createConnection({
+    connectionId: "admin-pass", kind: ADMIN_CONNECTION_KIND, label: "admin", secretGeneration: 0, readiness: "missing-secret",
+    metadata: { publicMetadata: { knownHost: candidate.knownHost }, credentialIdentity: null, requiredSecretSlots: ["privateKey"] },
+    constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: target.address, user: "admin-pass", port: target.port, hostKeyFingerprint: fingerprint } },
+    createdAt: Date.now(),
+  });
+  await broker.put("admin-pass", "privateKey", Buffer.from(adminKey.privateKey));
+  machine = service.setAdminConnection(machine.id, "personal", machine.revision, "admin-pass");
+  const helperFirst = await service.planHelperInstall({ machineId: machine.id, workspaceId: "personal" }).catch((error) => error);
+  assert.match(String(helperFirst?.message ?? helperFirst), /needs a password for sudo|sudo/i, "inspection itself needs root and says why");
+
+  // 1. PSM plans its own administrator access; the operator pastes one command.
+  const admin = await service.planAdminAccess({ machineId: machine.id, workspaceId: "personal" });
+  assert.ok(admin.plan.authority[0].startsWith("Full administration"));
+  const waiting = service.startSetup({ accessId: admin.id, workspaceId: "personal", planDigest: admin.plan.digest, method: "manual-command", actor: "test" });
+  const card = await waitFor("waiting", async () => { const job = service.getJob(waiting.id, "personal"); if (job.state !== "waiting") throw new Error(job.state); return job; });
+  assert.equal((await service.probeManualSetup(waiting.id, "personal")).state, "waiting", "nothing has run yet");
+  target.exec("bash", "-c", card.command!);
+  // 2. The probe notices on its own, verifies, and adopts the new administrator connection.
+  const done = await service.probeManualSetup(waiting.id, "personal");
+  assert.equal(done.state, "succeeded", JSON.stringify(done.error));
+  machine = service.getMachine(machine.id, "personal") as typeof machine;
+  assert.equal(machine.adminConnectionId, admin.connectionId);
+
+  // 3. Everything else is now automatic: the helper installs over the new access.
+  const helper = await service.planHelperInstall({ machineId: machine.id, workspaceId: "personal" });
+  const installed = await service.settled(service.startSetup({ accessId: helper.id, workspaceId: "personal", planDigest: helper.plan.digest, method: "admin-ssh", actor: "test" }).id);
+  assert.equal(installed.state, "succeeded", JSON.stringify(installed.error));
+
+  // 4. Releasing removes the sudoers entry and key on the server, and PSM forgets the connection.
+  await service.releaseAdminAccess(admin.id, "personal");
+  assert.throws(() => target.exec("test", "-e", `/etc/sudoers.d/${admin.account}`));
+  assert.throws(() => target.exec("test", "-e", `/home/${admin.account}/.ssh/authorized_keys`));
+  assert.equal(service.getMachine(machine.id, "personal").adminConnectionId, null);
+  assert.throws(() => deployments.getConnection(admin.connectionId), /not found/);
+  assert.equal(target.exec("systemctl", "is-active", "psm-host-helper.service"), "active", "what it set up keeps working");
+});

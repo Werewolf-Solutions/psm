@@ -10,9 +10,9 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import type { CommandAccessPlan, HostKeySource, InspectionReport, MachineRole, RiskClass } from "./plan.ts";
-import type { DeployAccessPlan, HelperInstallPlan } from "./roles.ts";
+import type { AdminAccessPlan, DeployAccessPlan, HelperInstallPlan } from "./roles.ts";
 
-export type AccessPlan = CommandAccessPlan | HelperInstallPlan | DeployAccessPlan;
+export type AccessPlan = CommandAccessPlan | HelperInstallPlan | DeployAccessPlan | AdminAccessPlan;
 
 export class MachineStoreError extends Error {
   constructor(message: string, readonly status: number, readonly code: string) {

@@ -28,7 +28,7 @@ export class MachinePlanError extends Error {
   }
 }
 
-export type MachineRole = "command" | "helper" | "deploy";
+export type MachineRole = "command" | "helper" | "deploy" | "admin";
 export type RiskClass = "development" | "staging" | "production";
 
 /** How PSM came to trust a machine's host key. Only the last two allow setup. */
@@ -178,8 +178,8 @@ export function commandAccountName(machineId: string, projectId: string, project
   return roleAccountName("x", machineId, projectId, projectName, environmentId);
 }
 
-/** `psm-<role letter>-<slug>-<hash>`: x = command, i = infrastructure, r = release. */
-export function roleAccountName(letter: "x" | "i" | "r", machineId: string, projectId: string, projectName: string, environmentId: string): string {
+/** `psm-<role letter>-<slug>-<hash>`: x = command, i = infrastructure, r = release, a = administrator. */
+export function roleAccountName(letter: "x" | "i" | "r" | "a", machineId: string, projectId: string, projectName: string, environmentId: string): string {
   const suffix = createHash("sha256").update(`${machineId}\0${projectId}\0${environmentId}`).digest("hex").slice(0, 6);
   const readable = slug(`${projectName}-${environmentId}`, 32 - `psm-${letter}--`.length - suffix.length) || "app";
   const name = `psm-${letter}-${readable}-${suffix}`;
