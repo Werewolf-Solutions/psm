@@ -5453,7 +5453,12 @@ async function approvePreparationPublication() {
 
 function renderDeploymentPreparation() {
   const state = WS.managedDeploy;
-  const job = state.preparation;
+  const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
+  // A stopped preparation's external blockers describe the environment as it was then; a
+  // readiness check made since is the current answer, so the old banner is not repeated.
+  const superseded = state.preparation && !state.preparation.active && state.preparation.state === "blocked"
+    && state.preparation.blockedBy === "external" && Number(readiness?.checkedAt) > Number(state.preparation.updatedAt);
+  const job = superseded ? null : state.preparation;
   const section = $("#dep-preparation");
   section.hidden = !job;
   if (!job) return;
