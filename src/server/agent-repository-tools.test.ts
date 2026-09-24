@@ -136,7 +136,11 @@ test("managed SDK tools exclude shell, inherited config and external integration
   assert.deepEqual(options.settingSources, []);
   assert.equal(options.permissionMode, "dontAsk");
   assert.equal(options.strictMcpConfig, true);
-  assert.equal(options.persistSession, false);
+  // Persisted so a later turn can resume it (P02/P05 decision, 2026-09-24). Tools,
+  // settings and the deny hook are set on every turn, never read from the session.
+  assert.equal(options.persistSession, true);
+  assert.equal(options.resume, undefined);
+  assert.equal(managedAgentOptions(createSdkMcpServer({ name: "psm", tools: [] }), new AbortController(), "session-1").resume, "session-1");
   const hook = options.hooks!.PreToolUse![0].hooks[0];
   const input = { session_id: "test", transcript_path: "", cwd: "/tmp", hook_event_name: "PreToolUse" as const, tool_use_id: "tool", tool_input: {} };
   for (const tool_name of ["Bash", "Write", "WebFetch", "mcp__other__grant"]) {
