@@ -4698,8 +4698,10 @@ function renderDeploymentReadiness() {
     if (item.status !== "ready" && item.action === "prepare-artifact" && item.automatic) {
       const build = depText("button", "dep-mini-btn", "Prepare build");
       build.type = "button";
-      build.title = "Run the build workflow on GitHub Actions for the committed source, then verify the artifact";
-      build.onclick = () => { build.disabled = true; void prepareDeploymentArtifact(); };
+      // The full preparation flow, not a bare build: a commit that is not on GitHub yet
+      // is shown for review and published first, which a bare build can only refuse.
+      build.title = "Review and publish the source if needed, build it on GitHub Actions, then verify the artifact";
+      build.onclick = () => { build.disabled = true; void checkDeploymentReadiness(true); };
       $("#dep-readiness").children[index]?.append(build);
     }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
@@ -4770,6 +4772,14 @@ function renderDeploymentReadiness() {
   $("#dep-approve").textContent = state.plan?.operation === "rollback" ? "Deploy rollback" : "Deploy";
   $("#dep-error").hidden = !state.error;
   $("#dep-error").textContent = state.error || "";
+  // An error that names the next step offers it, even when the readiness it came from was cleared.
+  if (state.error && /Make ready to deploy/.test(state.error) && !state.loading) {
+    const next = depText("button", "dep-mini-btn primary", "Make ready to deploy");
+    next.type = "button";
+    next.style.marginLeft = "10px";
+    next.onclick = () => { state.error = null; void checkDeploymentReadiness(true); };
+    $("#dep-error").append(next);
+  }
   if (state.readinessTimer) clearTimeout(state.readinessTimer);
   if (readiness && !expired && WS.pane === "deploy") {
     state.readinessTimer = setTimeout(() => {
