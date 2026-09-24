@@ -844,12 +844,15 @@ function renderScopeSummary(name) {
 
 /** The same promise, kept in view beside the composer. */
 function renderScopeChip() {
-  const extra = WS.extraProjects || [];
+  // The server-resolved directories a turn is spawned with, not the saved names:
+  // a project that moved or disappeared is not in the scope, so it is not shown.
+  const dirs = WS.scopeDirs || [];
+  const names = dirs.map((dir) => STATE.projects.find((project) => project.path === dir)?.name || dir.split("/").pop());
   for (const node of aiControlNodes("scope")) {
-    node.hidden = !extra.length;
-    node.textContent = `+${extra.length} repo${extra.length === 1 ? "" : "s"}`;
-    node.title = extra.length
-      ? `This AI may also edit ${extra.join(", ")}. No other project is writable.`
+    node.hidden = !dirs.length;
+    node.textContent = `+${dirs.length} repo${dirs.length === 1 ? "" : "s"}`;
+    node.title = dirs.length
+      ? `This AI may also edit ${names.join(", ")} (${dirs.join(", ")}). No other project is writable.`
       : "";
   }
 }
@@ -896,6 +899,7 @@ async function saveDrawer() {
       // The scope chip is a promise about the open conversation, so it has to
       // follow the save rather than wait for the cockpit to be reopened.
       WS.extraProjects = projectByName(name)?.aiExtraProjects || [];
+      WS.scopeDirs = projectByName(name)?.aiScopeDirs || [];
       renderScopeChip();
     }
     toast("Saved");
@@ -1241,6 +1245,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   WS.actualModel = null;
   WS.fullAccess = !!p.aiFullAccess;
   WS.extraProjects = p.aiExtraProjects || [];
+  WS.scopeDirs = p.aiScopeDirs || [];
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
   WS.depTarget = "staging";
   WS.depArmed = false;

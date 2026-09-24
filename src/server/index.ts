@@ -336,7 +336,9 @@ app.get("/api/projects", (_req, res) => {
   // The mode rides along too: the dashboard shows a different empty state when
   // nothing is scanned implicitly, and hides what this posture cannot do.
   res.json({
-    projects: getProjects(),
+    // aiScopeDirs is what a turn actually gets, from the same resolution the
+    // spawn uses, so the scope chip cannot promise something else.
+    projects: getProjects().map((project) => ({ ...project, aiScopeDirs: extraDirsFor(project) })),
     statusMeta: STATUS_META,
     version: APP_VERSION,
     mode: psmMode(),
