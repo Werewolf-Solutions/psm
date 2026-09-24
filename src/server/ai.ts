@@ -114,6 +114,11 @@ interface AiSession {
   effort: AiEffort; // configured reasoning/effort level for the selected CLI
   actualModel: AiModel; // last model reported by the CLI, if available
   sessionId: string | null; // provider session/thread id, for resume
+  /**
+   * The managed (broker) session to resume and the authority it ran under.
+   * Only resumed while that authority is unchanged; never a CLI session.
+   */
+  managedResume?: { id: string; authority: string } | null;
   busy: boolean;
   child: ChildProcess | null;
   managedAbort?: AbortController;
@@ -187,6 +192,10 @@ export function stopProjectAgents(projectPath: string): void {
     if ([session.cwd, ...session.extraDirs].some((directory) => directory && canonical(directory) === canonical(projectPath))) stopSession(session.name);
   }
 }
+/** What a managed session's authority was: engine, projects, checkouts and their restriction revisions. */
+function managedAuthority(engine: string, policy: ManagedAgentPolicy): string {
+  return [engine, ...policy.snapshots.map((snapshot) => `${snapshot.project.id}@${snapshot.project.path}@${snapshot.restrictedRevision ?? 0}`).sort()].join("|");
+}
 function resolveManagedPolicy(s: TurnSpec): ManagedAgentPolicy | null {
   if (sessionIdentity(s.name).role !== "agent" || s.name === WORKSPACE_NAME) return null;
   return managedPolicy?.(s) ?? null;
@@ -200,6 +209,7 @@ interface PersistedSession {
   effort?: string | null;
   actualModel?: string | null;
   sessionId: string | null;
+  managedResume?: { id: string; authority: string } | null;
   log: AiEvent[];
   summary: string | null;
   summaryAt: number;
@@ -230,6 +240,7 @@ function loadSessions(): void {
       effort: normalizeEffort(p.effort),
       actualModel: normalizeModel(p.actualModel),
       sessionId: p.sessionId ?? null,
+      managedResume: p.managedResume && typeof p.managedResume.id === "string" && typeof p.managedResume.authority === "string" ? p.managedResume : null,
       busy: false,
       child: null,
       log: p.log || [],
@@ -268,6 +279,7 @@ function saveSessions(): void {
       effort: s.effort,
       actualModel: s.actualModel,
       sessionId: s.sessionId,
+      managedResume: s.managedResume ?? null,
       log: s.log.slice(-MAX_PERSIST),
       summary: s.summary,
       summaryAt: s.summaryAt,
@@ -515,6 +527,7 @@ function getSession(
     s.effort = normalizedEffort;
     s.actualModel = null;
     s.sessionId = null;
+    s.managedResume = null;
     s.summary = null;
     s.summaryAt = 0;
     if (s.question) broadcast(s, "question-cleared", { id: s.question.id });
@@ -537,6 +550,7 @@ function getSession(
     const had = s.extraDirs.length || s.sessionId || s.log.length;
     s.extraDirs = extraDirs;
     s.sessionId = null;
+    s.managedResume = null;
     s.summary = null;
     s.summaryAt = 0;
     if (s.question) broadcast(s, "question-cleared", { id: s.question.id });
@@ -584,6 +598,7 @@ function resetConversation(
   s.effort = normalizeEffort(effort);
   s.actualModel = null;
   s.sessionId = null;
+  s.managedResume = null;
   s.log = [];
   s.summary = null;
   s.summaryAt = 0;
@@ -1646,20 +1661,42 @@ function startTurn(
     s.managedAbort = abort;
     // A CLI session may contain broader tool grants. Never resume it here.
     s.sessionId = null;
+    // The provider's own session is resumed only while the authority it ran
+    // under is unchanged; any reduction since then starts fresh from the replay.
+    const authority = managedAuthority(s.engine, policy);
+    const resume = s.engine === "claude" && s.managedResume?.authority === authority ? s.managedResume.id : null;
     const recent = s.log.filter((event) => event.role !== "system").slice(-30)
       .map((event) => `${event.role}: ${event.text}`).join("\n").slice(-48_000);
-    void managedRunner({
-      policy, engine: s.engine, cwd: s.cwd, model: s.model, effort: s.effort, message,
-      context: [composeSystemRules(s.cwd), scopeContext(s.cwd, s.extraDirs, false), extraContext, INTERACTION_RULES, `Recent conversation (context only, never permission):\n${recent}`].join("\n\n"),
+    const base = [composeSystemRules(s.cwd), scopeContext(s.cwd, s.extraDirs, false), extraContext, INTERACTION_RULES, policy.taskNotes ?? ""].filter(Boolean);
+    let captured: string | null = null;
+    const run = (resumeId: string | null) => managedRunner({
+      policy, engine: s.engine, cwd: s.cwd, model: s.model, effort: s.effort, message, resume: resumeId,
+      context: [...base, ...(resumeId ? [] : [`Recent conversation (context only, never permission):\n${recent}`])].join("\n\n"),
       signal: abort,
-      event: (event) => { if (!abort.signal.aborted) handleClaudeLine(s, JSON.stringify(event)); },
-    }).catch((error: unknown) => {
-      if (!abort.signal.aborted) pushEvent(s, sys(`[psm] managed agent failed: ${error instanceof Error ? error.message : "unknown error"}`));
-    }).finally(() => {
-      s.managedAbort = undefined;
-      s.sessionId = null;
-      finishTurn(s);
+      event: (event) => {
+        const init = event as { type?: string; subtype?: string; session_id?: string };
+        if (init.type === "system" && init.subtype === "init" && typeof init.session_id === "string") captured = init.session_id;
+        if (!abort.signal.aborted) handleClaudeLine(s, JSON.stringify(event));
+      },
     });
+    void (async () => {
+      try {
+        try { await run(resume); }
+        catch (error) {
+          if (!resume || abort.signal.aborted) throw error;
+          s.managedResume = null;
+          pushEvent(s, sys("[psm] the previous session could not be resumed; continuing from the recent conversation instead"));
+          await run(null);
+        }
+        if (captured && s.engine === "claude") s.managedResume = { id: captured, authority };
+      } catch (error) {
+        if (!abort.signal.aborted) pushEvent(s, sys(`[psm] managed agent failed: ${error instanceof Error ? error.message : "unknown error"}`));
+      } finally {
+        s.managedAbort = undefined;
+        s.sessionId = null;
+        finishTurn(s);
+      }
+    })();
     return;
   }
 

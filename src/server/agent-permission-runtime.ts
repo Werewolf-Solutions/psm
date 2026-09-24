@@ -21,8 +21,10 @@ export interface ManagedAgentPolicy {
   machines?: MachineCommands;
   /** What the agent can do per project, and why not; the same answer the operator sees. */
   explain?: (snapshot: PermissionSnapshot) => Promise<unknown>;
+  /** The operator's decisions for this task, carried into every turn. */
+  taskNotes?: string;
 }
-export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController): Options {
+export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController, resume: string | null = null): Options {
   return {
     env: childEnv(),
     tools: [],
@@ -32,7 +34,9 @@ export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer
     strictMcpConfig: true,
     mcpServers: { psm: server },
     plugins: [],
-    persistSession: false,
+    // Kept so the next turn can resume it while its authority is unchanged.
+    persistSession: true,
+    ...(resume ? { resume } : {}),
     abortController: signal,
     // A policy guard is independent of automatic approval and inherited settings.
     hooks: { PreToolUse: [{ hooks: [async (input) => {
@@ -109,6 +113,8 @@ export async function runManagedAgent(input: {
   policy: ManagedAgentPolicy; engine?: string; cwd: string; model: string | null; effort?: string | null;
   message: string; context: string; signal: AbortController;
   event: (event: unknown) => void;
+  /** A managed Claude session to resume; the caller checked its authority is unchanged. */
+  resume?: string | null;
 }): Promise<void> {
   const server = createManagedRepositoryServer(input.policy, input.signal);
   const scope = input.policy.snapshots.map(({ project, grants }) => `${project.name}: ${project.id}; grants: ${Object.entries(grants).filter(([, value]) => value?.granted).map(([name]) => name).join(", ") || "none"}`).join("\n");
@@ -118,7 +124,7 @@ export async function runManagedAgent(input: {
     // SDK MCP servers require streaming input, including for a single user turn.
     prompt: (async function* () { yield { type: "user" as const, session_id: "", parent_tool_use_id: null, message: { role: "user" as const, content: input.message } }; })(),
     options: {
-      ...managedAgentOptions(server, input.signal), cwd: input.cwd,
+      ...managedAgentOptions(server, input.signal, input.resume ?? null), cwd: input.cwd,
       ...(input.model ? { model: input.model } : {}),
       ...(["low", "medium", "high", "xhigh", "max"].includes(input.effort ?? "") ? { effort: input.effort as "low" | "medium" | "high" | "xhigh" | "max" } : {}),
       systemPrompt: context,

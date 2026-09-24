@@ -39,3 +39,44 @@ test("revocation aborts the managed turn, clears its queue and blocks resume bef
   assert.match(send().error!, /requires git.commit/);
   assert.equal(running.length, 1, "neither queued nor resumed work was spawned");
 });
+
+test("a managed Claude session resumes while its authority is unchanged, and restarts after a reduction", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-resume-"));
+  const database = openDatabase(":memory:");
+  const store = new AgentPermissionStore(() => database);
+  const project = { id: "prj_resume", name: "resume", path: directory };
+  store.changeMany(project, ["repo.read", "repo.edit", "git.commit"], true, 0, "operator");
+  const calls: Array<{ resume: string | null; context: string }> = [];
+  let failResume = false;
+  ai.configureManagedAgents(() => ({ store, snapshots: [store.snapshot(project)], protectedRoots: [], taskNotes: "Operator decisions in this task: none yet" }), async (input) => {
+    calls.push({ resume: input.resume ?? null, context: input.context });
+    if (input.resume && failResume) throw new Error("No conversation found with session ID");
+    input.event({ type: "system", subtype: "init", session_id: `session-${calls.length}` });
+  });
+  t.after(() => { ai.stopSession("resume"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const turn = async (message: string) => {
+    assert.equal(ai.send("resume", directory, "claude", null, null, message, false).ok, true);
+    for (let i = 0; i < 50 && ai.aiState("resume").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  };
+  await turn("first");
+  assert.equal(calls[0].resume, null);
+  assert.match(calls[0].context, /Recent conversation/);
+  assert.match(calls[0].context, /Operator decisions in this task/);
+  await turn("second");
+  assert.equal(calls[1].resume, "session-1", "same authority: resume the provider's own session");
+  assert.doesNotMatch(calls[1].context, /Recent conversation/, "a resumed session already has it");
+  // An added grant does not change the authority key's restriction revision.
+  store.changeMany(project, ["repo.delete"], true, store.snapshot(project).revision, "operator");
+  await turn("third");
+  assert.equal(calls[2].resume, "session-2");
+  // A reduction does.
+  store.changeMany(project, ["repo.delete"], false, store.snapshot(project).revision, "operator");
+  await turn("fourth");
+  assert.equal(calls[3].resume, null, "authority was reduced: start fresh from the replay");
+  // A resume that fails falls back within the same turn.
+  failResume = true;
+  await turn("fifth");
+  assert.equal(calls[4].resume, "session-4");
+  assert.equal(calls[5].resume, null);
+  assert.match(calls[5].context, /Recent conversation/);
+});

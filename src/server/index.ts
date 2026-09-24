@@ -2205,7 +2205,7 @@ configureManagedAgents((scope) => {
   // An attached executable provider cannot also be edited by this managed turn.
   const attachedRefs = new Set(projects.filter((project) => snapshots.some((snapshot) => snapshot.project.id === project.id)).flatMap((project) => project.attachments.map((attachment) => attachment.capabilityRef)));
   const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
-  return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, explain: (snapshot: PermissionSnapshot) => projectAccess(snapshot, scope.engine), projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+  return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, taskNotes: operationReviews.taskNotes(taskKey(scope.name)), explain: (snapshot: PermissionSnapshot) => projectAccess(snapshot, scope.engine), projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
 });
 /** The access explanation for one project, as the operator and the agent both see it. */
 async function projectAccess(snapshot: PermissionSnapshot, engine: string) {

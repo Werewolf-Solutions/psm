@@ -115,3 +115,20 @@ test("an undecided operation is a grant request the operator can answer; an expl
   assert.ok(!(denied instanceof GrantRequiredError), "an explicit deny is not offered as a request");
   assert.match((denied as Error).message, /Denied by deny repo.delete/);
 });
+
+test("a task's decisions are carried into its turns as a note", async (t) => {
+  const { store, project, database } = fixture(t);
+  const { OperationReviews } = await import("./agent-reviews.ts");
+  const reviews = new OperationReviews(store, () => database);
+  const turn = { ...store.changeMany(project, ["repo.read"], true, 0, "operator"), task: taskKey("room") };
+  assert.equal(reviews.taskNotes(taskKey("room")), "");
+  const push = reviews.request(turn, "git.push", { connectionId: "origin" }, "Push abc to origin/main\nmore", "no rule");
+  const drop = reviews.request(turn, "repo.delete", {}, "Delete src/legacy.ts", "no rule");
+  reviews.decide(project, push.id, "task", "operator");
+  reviews.decide(project, drop.id, "reject", "operator");
+  const notes = reviews.taskNotes(taskKey("room"));
+  assert.match(notes, /Push abc to origin\/main: approved \(for this task\)/);
+  assert.match(notes, /Delete src\/legacy.ts: REJECTED/);
+  assert.ok(!notes.includes("more"), "one line per decision");
+  assert.equal(reviews.taskNotes(taskKey("other room")), "", "notes belong to their task");
+});

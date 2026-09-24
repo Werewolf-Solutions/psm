@@ -73,6 +73,22 @@ export class OperationReviews {
   }
 
   /**
+   * What the operator decided in one task, as a note the agent gets every
+   * turn: decisions survive a fresh provider session.
+   */
+  taskNotes(task: string): string {
+    const rows = (this.database().prepare("SELECT document FROM agent_tool_requests WHERE json_extract(document, '$.kind') = 'operation' AND json_extract(document, '$.task') = ? ORDER BY rowid DESC LIMIT 30").all(task) as { document: string }[])
+      .map((row) => JSON.parse(row.document) as OperationReview);
+    if (!rows.length) return "";
+    const lines = rows.reverse().map((review) => {
+      const outcome = review.state === "approved" ? `approved (${review.answer === "once" ? "once" : review.answer === "task" ? "for this task" : "always"})`
+        : review.state === "rejected" ? "REJECTED — do not ask again without new information" : review.state === "expired" || review.expiresAt <= Date.now() ? "expired unanswered" : "still waiting for the operator";
+      return `- ${review.summary.split("\n")[0].slice(0, 200)}: ${outcome}`;
+    });
+    return `Operator decisions in this task (authoritative; permission is still checked on every call):\n${lines.join("\n")}`;
+  }
+
+  /**
    * The operator's answer. "once" binds the allow to this exact operation;
    * "task" to the managed session that asked; "standing" to the operation's
    * scope (its environment, connection or tool), never wider than that.
