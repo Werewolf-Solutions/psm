@@ -270,6 +270,7 @@ test("controller credentials go only to the pinned controller's environment, sea
     if (init?.body) bodies.set(`${method} ${new URL(href).pathname}`, JSON.parse(String(init.body)));
     const reply = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     if (href.endsWith("/environments/todo-production-web") && method === "PUT") return reply(200, { name: "todo-production-web" });
+    if (href.endsWith("/environments/todo-production-web")) return reply(404, { message: "Not Found" });
     if (href.endsWith("/secrets/public-key")) return reply(200, { key_id: "k1", key: Buffer.from(recipient.publicKey).toString("base64") });
     if (href.includes("/secrets/PSM_") && method === "PUT") return reply(201, {});
     if (href.includes("/secrets?per_page")) return reply(200, { total_count: 1, secrets: [{ name: "PSM_TARGET_KNOWN_HOSTS" }] });

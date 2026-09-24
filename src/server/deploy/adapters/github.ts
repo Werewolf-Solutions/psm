@@ -732,7 +732,9 @@ export class GitHubActionsAdapter {
       throw new GitHubExecutorError("github-config-invalid", "Secret names must be upper-case identifiers outside GITHUB_*");
     }
     const environment = `${repositoryPath(controller.repository)}/environments/${pathSegment(controller.githubEnvironment)}`;
-    await this.#request(environment, { method: "PUT", body: {}, signal: options.signal });
+    // Creating an environment needs repository administration; an existing one does not.
+    const existing = await this.#request(environment, { statuses: [200, 404], signal: options.signal });
+    if (existing.status === 404) await this.#request(environment, { method: "PUT", body: {}, signal: options.signal });
     const key = plainRecord((await this.#request(`${environment}/secrets/public-key`, { signal: options.signal })).body);
     const keyId = key?.key_id;
     const publicKey = typeof key?.key === "string" ? Buffer.from(key.key, "base64") : null;
