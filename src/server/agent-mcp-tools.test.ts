@@ -22,7 +22,7 @@ function fixture(t: test.TestContext) {
 }
 test("attached tools require exact one-use review even when annotations claim read-only", async (t) => {
   const h = fixture(t); await h.tools.list(h.snapshot);
-  const args = { value: "reviewed" }; const request = h.tools.request(h.snapshot, "workspace:test", "write_service", args);
+  const args = { value: "reviewed" }; const request = await h.tools.request(h.snapshot, "workspace:test", "write_service", args);
   args.value = "changed";
   assert.equal(h.calls(), 0);
   await assert.rejects(h.tools.decide(h.project.id, request.id, "forged", true, "operator"), /stale/);
@@ -32,16 +32,33 @@ test("attached tools require exact one-use review even when annotations claim re
   assert.equal(h.tools.history(h.project.id)[0].actor, "operator");
 });
 test("detaching and revoking prevent pending external calls", async (t) => {
-  const h = fixture(t); const request = h.tools.request(h.snapshot, "workspace:test", "write_service", {});
+  const h = fixture(t); const request = await h.tools.request(h.snapshot, "workspace:test", "write_service", {});
   h.detach(); await assert.rejects(h.tools.decide(h.project.id, request.id, request.digest, true, "operator"), /attachment changed/);
   assert.equal(h.calls(), 0);
-  const other = fixture(t); const pending = other.tools.request(other.snapshot, "workspace:test", "write_service", {});
+  const other = fixture(t); const pending = await other.tools.request(other.snapshot, "workspace:test", "write_service", {});
   other.store.change(other.project, "mcp.use", false, 1, "operator");
   await assert.rejects(other.tools.decide(other.project.id, pending.id, pending.digest, true, "operator"), /permissions changed/);
   assert.equal(other.calls(), 0);
 });
 test("rejection records the operator without invoking the service", async (t) => {
-  const h = fixture(t); const request = h.tools.request(h.snapshot, "workspace:test", "write_service", {});
+  const h = fixture(t); const request = await h.tools.request(h.snapshot, "workspace:test", "write_service", {});
   const result = await h.tools.decide(h.project.id, request.id, request.digest, false, "operator");
   assert.equal(result.state, "rejected"); assert.equal(h.calls(), 0);
+});
+test("an allow rule runs a tool directly, an explicit deny refuses it, and 'always' approves future calls", async (t) => {
+  const h = fixture(t);
+  // No rule: the long-standing review, nothing runs yet.
+  const reviewed = await h.tools.request(h.snapshot, "workspace:test", "write_service", { n: 1 });
+  assert.equal(reviewed.state, "pending"); assert.equal(h.calls(), 0);
+  // "Always allow this tool" answers the review and adds a standing rule for it.
+  const approved = await h.tools.decide(h.project.id, reviewed.id, reviewed.digest, true, "operator", true, h.project);
+  assert.equal(approved.state, "succeeded"); assert.equal(h.calls(), 1);
+  const direct = await h.tools.request(h.store.snapshot(h.project), "workspace:test", "write_service", { n: 2 });
+  assert.equal(direct.state, "succeeded", "the rule lets the next call run at once"); assert.equal(h.calls(), 2);
+  assert.match(String(direct.actor), /^rule:/);
+  // A more specific Deny wins over that Allow.
+  h.store.addRule(h.project, { permission: "mcp.call", effect: "deny", scope: { capability: "workspace:test", tool: "write_service", environmentId: "production" }, source: "custom", actor: "operator" }, h.store.snapshot(h.project).revision);
+  h.store.addRule(h.project, { permission: "mcp.call", effect: "deny", scope: { capability: "workspace:test", tool: "write_service" }, source: "custom", actor: "operator" }, h.store.snapshot(h.project).revision);
+  await assert.rejects(h.tools.request(h.store.snapshot(h.project), "workspace:test", "write_service", { n: 3 }), /Denied/);
+  assert.equal(h.calls(), 2);
 });

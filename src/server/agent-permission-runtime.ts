@@ -5,7 +5,9 @@ import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import type { AgentPermissionStore, PermissionSnapshot } from "./agent-permissions.ts";
+import { ReviewRequiredError, type AgentPermissionStore, type PermissionSnapshot } from "./agent-permissions.ts";
+import type { OperationReviews } from "./agent-reviews.ts";
+import type { MachineCommands } from "./machines/commands.ts";
 
 export interface ManagedAgentPolicy {
   store: AgentPermissionStore;
@@ -13,6 +15,10 @@ export interface ManagedAgentPolicy {
   protectedRoots: string[];
   projectBoundaries?: string[];
   mcp?: ManagedMcpTools;
+  /** Where Ask decisions become operator reviews. */
+  reviews?: OperationReviews;
+  /** Commands on servers connected to the scoped projects. */
+  machines?: MachineCommands;
 }
 export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController): Options {
   return {
@@ -47,6 +53,13 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       const result = await action(repository);
       return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
     } catch (error) {
+      if (error instanceof ReviewRequiredError) {
+        const snapshot = repositories.get(id)?.snapshot;
+        if (snapshot && input.policy.reviews) {
+          const review = input.policy.reviews.request(snapshot, error.permission, error.context, error.summary, error.message);
+          return { isError: true, content: [{ type: "text" as const, text: `Operator review needed (${review.id}): ${error.summary}\n${error.message}\nTell the operator what you want to do and why, ask them to answer the review in Capabilities → Agent permissions, then call this tool again with the same arguments.` }] };
+        }
+      }
       // Never relay raw subprocess stderr, which may contain credential/config values.
       const message = error instanceof Error && error.name !== "Error" ? error.message : "The repository operation failed. Check the file path, Git state and local Git author configuration.";
       return { isError: true, content: [{ type: "text" as const, text: error instanceof Error && !("stderr" in error) ? error.message : message }] };
@@ -57,6 +70,10 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       tool("attached_tools", "List reviewed project attachments and their MCP tools.", { project }, ({ project }) => invoke(project, (repo) => policy.mcp!.list(repo.snapshot))),
       tool("request_attached_call", "Request an exact attached MCP call for operator approval in Capabilities. Ask the operator to review, then use attached_call_result.", { project, capability: z.string(), tool: z.string(), arguments: z.record(z.string(), z.unknown()) }, (args) => invoke(args.project, (repo) => policy.mcp!.request(repo.snapshot, args.capability, args.tool, args.arguments))),
       tool("attached_call_result", "Read the outcome of an operator-reviewed attached MCP call.", { project, request: z.string() }, ({ project, request }) => invoke(project, (repo) => policy.mcp!.result(repo.snapshot, request))),
+    ] : []),
+    ...(policy.machines ? [
+      tool("server_environments", "List servers connected to a project, by environment, with the unprivileged account and directory commands run as.", { project }, ({ project }) => invoke(project, () => policy.machines!.environments(project))),
+      tool("server_command", "Run one shell command on a project's connected server for an environment, as that environment's own command account (no sudo, its own working directory). May need operator review.", { project, environment: z.string(), command: z.string(), timeoutSeconds: z.number().int().min(5).max(600).optional() }, ({ project, environment, command, timeoutSeconds }) => invoke(project, (repo) => policy.machines!.run({ snapshot: repo.snapshot, permissions: input.policy.store, environmentId: environment, command, timeoutSeconds, signal: input.signal.signal }))),
     ] : []),
     tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
     tool("install_packages", "Install the public npm lockfile into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project }, ({ project }) => invoke(project, () => tasks.get(project)!.install())),

@@ -1,4 +1,5 @@
 import type { ManagedMcpTools } from "./agent-mcp-tools.ts";
+import type { OperationReviews } from "./agent-reviews.ts";
 import fs from "node:fs";
 import path from "node:path";
 import { userInfo } from "node:os";
@@ -48,7 +49,7 @@ export interface PermissionSnapshot {
 export class PermissionError extends Error {}
 /** The operation is allowed only after an operator reviews it. */
 export class ReviewRequiredError extends PermissionError {
-  constructor(readonly decision: Decision) { super(decision.reason); this.name = "ReviewRequiredError"; }
+  constructor(readonly decision: Decision, readonly permission: string, readonly context: DecisionContext, readonly summary: string) { super(decision.reason); this.name = "ReviewRequiredError"; }
 }
 
 /** Standing grants are unscoped, permanent Allow rules. */
@@ -90,9 +91,10 @@ export class AgentPermissionStore {
       rules: [...grantRules(current), ...(current.rules ?? [])], workspaceRules: this.workspaceRules(snapshot.project.workspaceId),
     });
   }
-  check(snapshot: PermissionSnapshot, permission: AgentPermission, context: DecisionContext = {}): Decision {
+  /** `summary` describes the exact operation for a review, in the operator's terms. */
+  check(snapshot: PermissionSnapshot, permission: AgentPermission, context: DecisionContext = {}, summary: string = permission): Decision {
     const decision = this.decide(snapshot, permission, context);
-    if (decision.effect === "ask") throw new ReviewRequiredError(decision);
+    if (decision.effect === "ask") throw new ReviewRequiredError(decision, permission, context, summary);
     if (decision.effect === "deny") {
       throw new PermissionError(decision.rule || decision.workspace
         ? `${decision.reason} Review Agent permissions in Capabilities.`
@@ -232,6 +234,7 @@ export function agentPermissionRouter(options: {
    */
   changed: (project: PermissionProject, change: { restrictive: boolean }) => unknown;
   mcp?: ManagedMcpTools;
+  reviews?: OperationReviews;
 }): express.Router {
   const router = express.Router();
   const view = (project: PermissionProject) => ({
@@ -269,7 +272,22 @@ export function agentPermissionRouter(options: {
     if (!isPermissionOperatorRequest(req)) { res.status(403).json({ error: "Review attached tool calls from the local cockpit." }); return; }
     try {
       if (!options.mcp || typeof req.body?.approve !== "boolean") throw new Error("Invalid MCP review.");
-      res.json(await options.mcp.decide(options.project(req.params.id).id, req.params.request, req.body.digest, req.body.approve, `local:${userInfo().username}`));
+      const project = options.project(req.params.id);
+      res.json(await options.mcp.decide(project.id, req.params.request, req.body.digest, req.body.approve, `local:${userInfo().username}`, req.body?.always === true, project));
+    } catch (error) { res.status(409).json({ error: (error as Error).message }); }
+  });
+  router.get("/api/projects/:id/agent-reviews", (req, res) => {
+    try { res.json({ reviews: options.reviews?.list(options.project(req.params.id).id) ?? [] }); }
+    catch { res.status(400).json({ error: "Project is not available." }); }
+  });
+  router.post("/api/projects/:id/agent-reviews/:review/decision", (req, res) => {
+    if (!isPermissionOperatorRequest(req)) { res.status(403).json({ error: "Answer reviews from the local cockpit." }); return; }
+    try {
+      if (!options.reviews) throw new Error("Reviews are not available.");
+      const project = options.project(req.params.id);
+      const review = options.reviews.decide(project, req.params.review, req.body?.answer, `local:${userInfo().username}`);
+      // Approving only adds authority, so running turns continue and can retry.
+      res.json({ review, permissions: view(project) });
     } catch (error) { res.status(409).json({ error: (error as Error).message }); }
   });
   return router;

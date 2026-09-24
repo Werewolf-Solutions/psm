@@ -5,7 +5,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpCapability } from "../types.ts";
 import { db } from "./db.ts";
-import { AgentPermissionStore, type PermissionSnapshot } from "./agent-permissions.ts";
+import { AgentPermissionStore, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
 
 export interface AttachedCall {
   id: string; snapshot: PermissionSnapshot; capability: string; manifestDigest: string;
@@ -40,8 +40,12 @@ export async function connectAttachedMcp(capability: McpCapability): Promise<Mcp
   return { client, close: () => client.close() };
 }
 
-/** Tool annotations are descriptive, not authority. Every external invocation
- * receives an exact, expiring operator review, including tools claiming read-only. */
+/**
+ * Tool annotations are descriptive, not authority. A call runs directly only
+ * when an `mcp.call` rule allows that capability (and tool); an explicit Deny
+ * refuses it; otherwise it waits for an exact, expiring operator review,
+ * including tools claiming to be read-only.
+ */
 export class ManagedMcpTools {
   constructor(private readonly permissions: AgentPermissionStore,
     private readonly resolve: (snapshot: PermissionSnapshot) => McpCapability[],
@@ -60,22 +64,36 @@ export class ManagedMcpTools {
       try {
         const tools = await connection.client.listTools();
         this.check(snapshot, capability.ref, capability.manifestDigest);
-        result.push({ capability: capability.ref, title: capability.title, tools: tools.tools, approval: "Each call requires operator review in Capabilities." });
+        const decision = this.permissions.decide(snapshot, "mcp.call", { capability: capability.ref });
+        result.push({ capability: capability.ref, title: capability.title, tools: tools.tools, approval: decision.effect === "allow" ? "Calls run directly under the project's rules." : "Calls wait for operator review in Capabilities unless a rule allows the tool." });
       } finally { await connection.close(); }
     }
     return result;
   }
   private save(call: AttachedCall): void { this.database().prepare("INSERT INTO agent_tool_requests(id, project_id, document) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET document=excluded.document").run(call.id, call.snapshot.project.id, JSON.stringify(call)); }
-  history(projectId: string): AttachedCall[] { return (this.database().prepare("SELECT document FROM agent_tool_requests WHERE project_id=? ORDER BY rowid DESC LIMIT 100").all(projectId) as { document: string }[]).map((row) => JSON.parse(row.document)); }
+  history(projectId: string): AttachedCall[] {
+    // The table also holds operation reviews (agent-reviews.ts); they are not calls.
+    return (this.database().prepare("SELECT document FROM agent_tool_requests WHERE project_id=? ORDER BY rowid DESC LIMIT 200").all(projectId) as { document: string }[])
+      .map((row) => JSON.parse(row.document)).filter((entry) => entry.kind !== "operation").slice(0, 100);
+  }
   private get(id: string): AttachedCall {
     const row = this.database().prepare("SELECT document FROM agent_tool_requests WHERE id=?").get(id) as { document: string } | undefined;
     if (!row) throw new Error("MCP review not found."); return JSON.parse(row.document);
   }
-  request(snapshot: PermissionSnapshot, ref: string, tool: string, args: Record<string, unknown>): AttachedCall {
+  async request(snapshot: PermissionSnapshot, ref: string, tool: string, args: Record<string, unknown>): Promise<AttachedCall> {
     const capability = this.check(snapshot, ref).find((capability) => capability.ref === ref)!;
     if (!/^[a-zA-Z0-9_.:/-]{1,200}$/.test(tool) || JSON.stringify(args).length > 32_000) throw new Error("Invalid MCP tool request.");
     const call: AttachedCall = JSON.parse(JSON.stringify({ id: `mcp_${randomUUID()}`, snapshot, capability: ref, manifestDigest: capability.manifestDigest, tool, arguments: args, expiresAt: Date.now() + 10 * 60_000, state: "pending" }));
     call.digest = createHash("sha256").update(JSON.stringify(call)).digest("hex");
+    const context = { capability: ref, tool };
+    const decision = this.permissions.decide(snapshot, "mcp.call", context);
+    if (decision.effect === "deny" && decision.rule) throw new PermissionError(`${decision.reason} Review Agent permissions in Capabilities.`);
+    if (decision.effect === "allow") {
+      this.permissions.check(snapshot, "mcp.call", context); // consumes a one-time allow
+      call.state = "running"; call.actor = `rule:${decision.rule?.id ?? "grant"}`; this.save(call);
+      return this.#execute(call, capability);
+    }
+    // Ask, or no rule at all: the long-standing exact per-call review.
     this.save(call); return call;
   }
   result(snapshot: PermissionSnapshot, id: string): AttachedCall {
@@ -83,12 +101,23 @@ export class ManagedMcpTools {
     if (call.snapshot.project.id !== snapshot.project.id || call.snapshot.project.path !== snapshot.project.path) throw new Error("MCP review is outside this project.");
     return call;
   }
-  async decide(projectId: string, id: string, digest: string, approve: boolean, actor: string): Promise<AttachedCall> {
+  /**
+   * Answer a pending call review. `always` also adds a standing Allow rule for
+   * this capability's tool, so later calls to it run without review.
+   */
+  async decide(projectId: string, id: string, digest: string, approve: boolean, actor: string, always = false, project?: PermissionProject): Promise<AttachedCall> {
     const call = this.get(id);
     if (call.snapshot.project.id !== projectId || call.digest !== digest || call.state !== "pending" || call.expiresAt <= Date.now()) throw new Error("MCP review is stale or already consumed. Request a fresh review.");
     if (!approve) { call.state = "rejected"; call.actor = actor; this.save(call); return call; }
     const capability = this.check(call.snapshot, call.capability, call.manifestDigest).find((capability) => capability.ref === call.capability)!;
     call.state = "running"; call.actor = actor; this.save(call); // consume before awaiting transport
+    if (always && project) {
+      this.permissions.addRule(project, { permission: "mcp.call", effect: "allow", scope: { capability: call.capability, tool: call.tool }, source: `review:${call.id}`, actor }, this.permissions.snapshot(project).revision);
+    }
+    return this.#execute(call, capability);
+  }
+
+  async #execute(call: AttachedCall, capability: McpCapability): Promise<AttachedCall> {
     try {
       const connection = await this.connect(capability);
       try {

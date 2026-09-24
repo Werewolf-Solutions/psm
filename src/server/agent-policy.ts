@@ -27,6 +27,8 @@ export interface PolicyScope {
   tool?: string;
   /** A managed session (task); a rule scoped to it ends with the task. */
   task?: string;
+  /** Digest of one exact operation, for approvals that cover only it. */
+  operation?: string;
 }
 
 export interface PolicyRule {
@@ -50,6 +52,7 @@ export interface DecisionContext {
   capability?: string;
   tool?: string;
   task?: string;
+  operation?: string;
 }
 
 export interface Decision {
@@ -61,7 +64,7 @@ export interface Decision {
   reason: string;
 }
 
-const SCOPE_KEYS: readonly (keyof PolicyScope)[] = ["environmentId", "connectionId", "capability", "tool", "task"];
+const SCOPE_KEYS: readonly (keyof PolicyScope)[] = ["environmentId", "connectionId", "capability", "tool", "task", "operation"];
 const EFFECT_ORDER: Record<PolicyEffect, number> = { deny: 3, ask: 2, allow: 1 };
 
 function matches(rule: PolicyRule, permission: string, context: DecisionContext, now: number): boolean {
@@ -106,7 +109,7 @@ export function makeRule(input: { permission: string; effect: PolicyEffect; scop
   for (const key of Object.keys(scope) as (keyof PolicyScope)[]) {
     const value = scope[key];
     if (value === undefined) delete scope[key];
-    else if (typeof value !== "string" || !/^[A-Za-z0-9._:@/-]{1,200}$/.test(value)) throw new Error(`Invalid rule scope ${key}.`);
+    else if (typeof value !== "string" || !/^[A-Za-z0-9._:@/+=-]{1,200}$/.test(value)) throw new Error(`Invalid rule scope ${key}.`);
   }
   if (!/^(\*|[a-z]+(\.[a-z-]+)+)$/.test(input.permission)) throw new Error("Invalid rule permission.");
   if (!["allow", "ask", "deny"].includes(input.effect)) throw new Error("Invalid rule effect.");
@@ -199,4 +202,9 @@ export function presetRules(preset: Preset, actor: string, now = Date.now()): Po
 /** A stable, rule-safe key for one managed session, whatever its display name. */
 export function taskKey(sessionName: string): string {
   return `task_${createHash("sha256").update(sessionName).digest("hex").slice(0, 24)}`;
+}
+
+/** Digest binding a one-time approval to exactly one operation. */
+export function operationDigest(permission: string, details: unknown): string {
+  return `op_${createHash("sha256").update(JSON.stringify([permission, details])).digest("hex").slice(0, 32)}`;
 }

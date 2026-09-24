@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { AgentPermission, PermissionSnapshot } from "./agent-permissions.ts";
 import { AgentPermissionStore, PermissionError } from "./agent-permissions.ts";
+import { operationDigest } from "./agent-policy.ts";
 
 const MAX_FILE = 1024 * 1024;
 const PROTECTED = /^(?:\.git|\.claude|\.codex|\.agents|\.ssh|\.psm-data|\.psm-sessions\.json|\.env(?:\..*)?|\.npmrc|\.netrc|\.mcp\.json|.*\.(?:pem|key|p12|pfx))$/i;
@@ -259,9 +260,11 @@ export class RepositoryTools {
     return result || `Fetched ${name}.`;
   }
   push(remote = "origin", branch?: string): string {
-    this.allow("git.push");
     const name = this.remoteName(remote);
     const target = this.branchName(branch || this.git(["branch", "--show-current"]).trim());
+    const head = this.git(["rev-parse", "HEAD"]).trim();
+    // A one-time approval covers exactly this commit to exactly this branch.
+    this.store.check(this.snapshot, "git.push", { connectionId: name, operation: operationDigest("git.push", [name, target, head]) }, `Push ${head.slice(0, 12)} to ${name}/${target} in ${this.snapshot.project.name}`);
     const result = this.git(["push", "--porcelain", name, `HEAD:refs/heads/${target}`], undefined, true);
     return result || `Pushed HEAD to ${name}/${target}.`;
   }

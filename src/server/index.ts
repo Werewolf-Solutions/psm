@@ -4,6 +4,8 @@ import { RepositoryTools } from "./agent-repository-tools.ts";
 import os from "node:os";
 import { databaseFile, db } from "./db.ts";
 import { taskKey } from "./agent-policy.ts";
+import { OperationReviews } from "./agent-reviews.ts";
+import { MachineCommands } from "./machines/commands.ts";
 import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
 import express from "express";
 import type { Request, Response } from "express";
@@ -2148,6 +2150,9 @@ const deploymentArtifactPreparer = new GitHubArtifactPreparer({
  * at all, only offered to the operator as the exact plan they already approve.
  */
 const agentPermissions = new AgentPermissionStore();
+const operationReviews = new OperationReviews(agentPermissions);
+// Assigned once the machine store exists, further down; read only per request.
+let machineCommands: MachineCommands | undefined;
 const psmCodeRoot = fs.realpathSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../.."));
 function permissionProject(id: string): PermissionProject {
   const project = getProjects().find((entry) => entry.id === id || entry.name === id);
@@ -2196,10 +2201,10 @@ configureManagedAgents((scope) => {
   // An attached executable provider cannot also be edited by this managed turn.
   const attachedRefs = new Set(projects.filter((project) => snapshots.some((snapshot) => snapshot.project.id === project.id)).flatMap((project) => project.attachments.map((attachment) => attachment.capabilityRef)));
   const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
-  return { store: agentPermissions, snapshots, mcp: managedMcp, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+  return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
 });
 local.use(agentPermissionRouter({
-  store: agentPermissions, mcp: managedMcp, project: permissionProject,
+  store: agentPermissions, mcp: managedMcp, reviews: operationReviews, project: permissionProject,
   changed: (project, { restrictive }) => {
     // Reduced authority stops running turns; added authority lets them continue.
     if (restrictive) stopProjectAgents(project.path);
@@ -2297,12 +2302,11 @@ local.use(createDeploymentRouter({
 
 /* ---------- deployment machines ---------- */
 
-const machines = new MachineService({
-  store: new MachineStore(db),
-  deployments: deploymentStore,
-  broker: deploymentSecretBroker,
-  transport: new SshMachineTransport({ broker: deploymentSecretBroker }),
-});
+const machineStore = new MachineStore(db);
+const machineTransport = new SshMachineTransport({ broker: deploymentSecretBroker });
+const machines = new MachineService({ store: machineStore, deployments: deploymentStore, broker: deploymentSecretBroker, transport: machineTransport });
+// Managed agents reach connected servers only through this, as each project's command account.
+machineCommands = new MachineCommands(machineStore, machineTransport);
 // A setup this process was running when it stopped is failed as uncertain; its
 // retry re-inspects the server rather than replaying a privileged step.
 machines.recoverInterrupted();

@@ -5,11 +5,16 @@
  * container on the homelab. The ordinary test run stays hermetic and skips it.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
+import { AgentPermissionStore } from "../agent-permissions.ts";
 import { SecretBroker } from "../deploy/connections.ts";
 import { DeploymentStore } from "../deploy/store.ts";
 import { openDatabase } from "../db.ts";
+import { MachineCommands } from "./commands.ts";
 import { commandAccountName } from "./plan.ts";
 import { ADMIN_CONNECTION_KIND, MachineService } from "./service.ts";
 import { SshMachineTransport } from "./ssh.ts";
@@ -31,7 +36,8 @@ test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !hos
   const deployments = new DeploymentStore(database);
   const broker = new SecretBroker();
   const transport = new SshMachineTransport({ broker });
-  const service = new MachineService({ store: new MachineStore(() => database), deployments, broker, transport });
+  const machineStore = new MachineStore(() => database);
+  const service = new MachineService({ store: machineStore, deployments, broker, transport });
 
   const adminKey = await transport.generateKeyPair("psm test admin");
   const target = startTestHost(hostKind!, adminKey.publicKey);
@@ -84,6 +90,18 @@ test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !hos
   assert.equal(exec("id", "-un", access.account), access.account);
   assert.equal(exec("stat", "-c", "%U:%G %a", `/home/${access.account}/.ssh/authorized_keys`), `root:${access.account} 640`);
   assert.equal(deployments.getConnection(access.connectionId).readiness, "ready");
+
+  // A managed agent's server command runs as that account, in its directory, without sudo.
+  const checkout = fs.mkdtempSync(path.join(os.tmpdir(), "psm-real-host-"));
+  t.after(() => fs.rmSync(checkout, { recursive: true, force: true }));
+  const permissions = new AgentPermissionStore(() => database);
+  const agentView = permissions.applyPreset({ id: todo.id, name: todo.name, path: checkout }, "operate-staging", 0, "test");
+  const ran = await new MachineCommands(machineStore, transport).run({
+    snapshot: agentView, permissions, environmentId: "staging",
+    command: `id -un; pwd; sudo -n true 2>/dev/null && echo SUDO || echo nosudo; printf '%s\\n' "quote'test"; exit 3`,
+  });
+  assert.deepEqual(ran.stdout.trim().split("\n"), [access.account, access.workdir, "nosudo", "quote'test"]);
+  assert.equal(ran.exitCode, 3);
 
   // 4. Repeat: the same access is reused and setup finds nothing to do.
   const again = await service.planCommandAccess({ machineId: machine.id, workspaceId: "personal", project: todo, environmentId: "staging", risk: "staging" });
