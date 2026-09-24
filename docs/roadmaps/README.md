@@ -10,7 +10,7 @@ or treating every document as a separate project needing another kickoff.
 | Field | Value |
 | --- | --- |
 | Next phase | **P07 — First complete hosted-to-staging deployment** (P00–P02, P04–P06 verified locally; P03 live hosted acceptance blocked) |
-| Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
+| Execution state | Merged to `dev`. P07: werewolf-alpha adopted through the Machines flow on 2026-09-24; waiting on the controller target-file push, the GitHub App, the controller pin and release approval (see the latest evidence entry). |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
 | First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
@@ -453,4 +453,35 @@ Left untouched: uncommitted work already in those copies (dapp 0.5.5 bump and
   migrate-script docs; todo .psm/deployments.json retainReleases 3 -> 5).
 Blocked (exact): deploying werewolf-dapp to staging.werewolf.solutions and Todo to
   staging — needs approval for the shared host; staging still serves dapp 0.5.1.
+```
+
+### 2026-09-24 — P07 host adoption and controller credentials
+```text
+Phase / step: P07
+State: in progress — werewolf-alpha adopted through the product flow; blocked on the
+  controller repository change, the GitHub App and a controller pin.
+Changed (psm dev): 55943de, be81c8a replace an older helper / adopt a target enrolled
+  for other accounts only through a re-plan naming the file's exact SHA-256 (old copy
+  kept root-only in /var/lib/psm-deploy/replaced); 82708c5 helper connections record
+  the machine's IPv4 for DNS; 1fb15d9 CI release key (second forced-command key on the
+  release account, own connection), "Publish to GitHub" (sealed-box environment
+  secrets), and deploy-time checks of the controller's target file and secrets.
+Live (user, 2026-09-24, Machines wizard with admin-ssh): helper upgraded to 92ecb675…,
+  werewolf:todo-staging-web re-enrolled for psm-i/psm-r-todo-app-staging-a73cc3,
+  contract psm-b19f21dd11b4 pinned; host slot rebound to machine-infra-e0dff33566fb00fd.
+  Readiness afterwards: dns/directory/ingress/certificate = create, dependencies ready,
+  only blocker release-controller-unpinned. Old psm-infra/psm-release now unauthorized.
+Verification: npm test 617 pass / 0 fail; tsc clean; LXD systemd host: helper
+  replacement + target adoption passed (220 s); the CI-key LXD run is pending (homelab
+  link down). Sealed box opened by PyNaCl; BLAKE2b matched hashlib/Node.
+Remaining blockers (exact):
+  1. deployment-control targets/werewolf__todo-staging-web.json: sshUser
+     psm-r-todo-app-staging-a73cc3, contractRevision psm-b19f21dd11b4 — push needs the
+     user's approval (the tool refused it as a production-deploy action).
+  2. Register + install the artifact-reader GitHub App (org owner, web UI).
+  3. Restart PSM; Machines → "Add GitHub Actions release key"; pin the controller commit
+     on the github connection (adds deployment-control to allowedRepositories);
+     Deploy page → "Publish to GitHub".
+  4. Approve the first staging release (creates DNS, directory, nginx, certificate).
+Next action: re-run PSM_MACHINE_LXD=1 real-host test when the homelab is back.
 ```
