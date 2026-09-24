@@ -9,7 +9,7 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P04 — Complete machine onboarding in the web app** (P00–P02 verified; P03 implemented and verified locally, live hosted acceptance blocked) |
+| Next phase | **P05 — Practical agent tools, discovery and task continuity** (P00–P02, P04 verified locally; P03 live hosted acceptance blocked) |
 | Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
@@ -61,8 +61,8 @@ local to those documents; they are not additional competing sequences.
 | **P01 · verified** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
 | **P02 · verified** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
 | **P03 · blocked (live)** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
-| **P04 · in progress** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
-| **P05 · pending** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
+| **P04 · verified (local)** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
+| **P05 · in progress** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
 | **P06 · pending** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
 | **P07 · pending** | First complete hosted-to-staging deployment | P04–P06 | Adopt/verify the selected host roles, resolve enrollment/controller/App/credential prerequisites through the product flows, publish the intended source, build off-host and deploy through the managed engine. Verify DNS/TLS, exact served version, staging login/workspaces and rollback. Laptop disconnected. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
 | **P08 · pending** | General application deployment and operations | P07 | Frontend + API + worker + database recipes, configuration, migrations, diagnostics, restart/scale, backups and recovery work for a representative app. Typed integrations plus custom API/MCP/CLI adapters cover extensibility. [Application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
@@ -382,4 +382,28 @@ Blocked (exact): running psm-control and runners on hosted infrastructure —
   psm-web registration (deferred). Not attempted: no infrastructure was created.
 Independent next work: P04 wizard against the local control service; P05
   hosted-independent parts.
+```
+
+### 2026-09-24 — P04 machine onboarding in the web app
+
+```text
+Phase / step: P04
+State: verified against the local cockpit and a real systemd server; the hosted
+  variant (wizard served by the hosted page, intents claimed over HTTPS, command
+  expiry/regeneration) waits on P03's live deployment.
+What exists now: Machines panel + Connect → Choose access → Set up → Ready;
+  administrator access via an existing key or one reviewed setup command
+  (dedicated psm-a-* account, sudoers checked by visudo, removable afterwards),
+  detected automatically; deploy access follows the deployment manifest's target;
+  setup follows live, continues after reload, retries a step; verified connection
+  bound to the deployment's host slot; entry point from Deploy's missing host.
+Verification (2026-09-24): npm test 605 pass, 0 fail, 4 opt-in skipped;
+  PSM_MACHINE_LXD=1 real-host suite (three tests incl. the handoff) passes;
+  browser run end to end against the LXD host: host key compared with the server's
+  own fingerprint, one command pasted, PSM detected its admin access, helper +
+  deploy + command access verified, Deploy reported "host connected".
+Found and fixed in the browser run: generated deploy target could not bind to the
+  manifest's; admin command route skipped the review; no-shell check wording.
+Noted for P07: todo-app's committed manifest has retainReleases 3 (invalid); its
+  working copy has 5 but is uncommitted.
 ```
