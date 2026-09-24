@@ -195,3 +195,17 @@ func TestRequestExpiryAndCorrelationAreFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestShareRuntimeDirectoryRefusesSharedDirectories(t *testing.T) {
+	for _, directory := range []string{"/", "/run", "/tmp", "/var/run/", "/dev/shm"} {
+		if err := shareRuntimeDirectory(directory, 998); err == nil {
+			t.Fatalf("%s was accepted", directory)
+		}
+	}
+	// A directory this (non-root) test process owns is not root-owned either.
+	if os.Geteuid() != 0 {
+		if err := shareRuntimeDirectory(t.TempDir(), 998); err == nil {
+			t.Fatal("a non-root-owned directory was accepted")
+		}
+	}
+}

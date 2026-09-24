@@ -142,6 +142,11 @@ func serve(args []string) {
 		if err := os.Chown(*socket, 0, resolvedSocketGID); err != nil {
 			fatalf("set socket group: %v", err)
 		}
+		// systemd creates RuntimeDirectory as root:root; the group must also be
+		// able to traverse it, or the socket's own mode never matters.
+		if err := shareRuntimeDirectory(filepath.Dir(*socket), resolvedSocketGID); err != nil {
+			fatalf("set runtime directory group: %v", err)
+		}
 	}
 	if err := os.Chmod(*socket, 0660); err != nil {
 		fatalf("set socket mode: %v", err)
@@ -185,4 +190,28 @@ func client(args []string) {
 	if err := <-done; err != nil {
 		fatalf("send request: %v", err)
 	}
+}
+
+// shareRuntimeDirectory gives the socket's dedicated directory to the socket
+// group (root-owned, 0750). It refuses shared system directories and anything
+// that is not a real root-owned directory, so a misconfigured --socket cannot
+// open /run or /tmp to the group.
+func shareRuntimeDirectory(directory string, gid int) error {
+	cleaned := filepath.Clean(directory)
+	switch cleaned {
+	case "/", "/run", "/var/run", "/tmp", "/var/tmp", "/dev/shm":
+		return fmt.Errorf("refusing to change shared directory %s", cleaned)
+	}
+	info, err := os.Lstat(cleaned)
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != 0 {
+		return fmt.Errorf("%s is not a root-owned directory", cleaned)
+	}
+	if err := os.Chown(cleaned, 0, gid); err != nil {
+		return err
+	}
+	return os.Chmod(cleaned, 0750)
 }
