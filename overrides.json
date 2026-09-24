@@ -394,7 +394,9 @@
     "aiEngine": "codex",
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high",
-    "next": "Deploy staging at todo.werewolf.solutions through PSM: re-enroll its host root, finish the release controller, publish the validated 0.5.2 source, then verify browser sign-in and rollback. Resolve business sharing before external rollout."
+    "next": "Deploy staging at todo.werewolf.solutions through PSM: re-enroll its host root, finish the release controller, publish the validated 0.5.2 source, then verify browser sign-in and rollback. Resolve business sharing before external rollout.",
+    "workingOn": true,
+    "workingOnAt": 1790263696551
   },
   "proteus": {
     "category": "AI & automation",

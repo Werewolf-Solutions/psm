@@ -238,7 +238,8 @@ export class DeploymentRuntimeAdapters {
       checks.push({
         id: `${unit.id}:controller-target`, purpose: "deploy", title: "Release controller target file",
         ready: Object.keys(file).length > 0 && wrong.length === 0,
-        detail: !Object.keys(file).length ? `The pinned controller commit has no targets/${targetId.replace(/[:/]/g, "__")}.json.`
+        // GitHub answers 404 both for a missing file and for a private repository the token cannot see.
+        detail: !Object.keys(file).length ? `PSM's GitHub token cannot read targets/${targetId.replace(/[:/]/g, "__")}.json at the pinned controller commit: the file is missing there, or the token has no access to ${String(controllers.map(object).find((entry) => entry.targetId === targetId)?.repository)}.`
           : wrong.length ? `Update the controller's target file, then pin the new commit: ${wrong.map(([key, value]) => `${key} must be ${JSON.stringify(value)} (is ${JSON.stringify(file[key] ?? null)})`).join("; ")}.`
           : "Matches the enrolled target.",
       });
@@ -252,6 +253,7 @@ export class DeploymentRuntimeAdapters {
         id: `${unit.id}:controller-credentials`, purpose: "deploy", title: "Release controller credentials",
         ready: missing.length === 0,
         detail: missing.length === 0 ? "The controller's GitHub Environment holds the release key and host key."
+          : names === null ? `PSM's GitHub token cannot see the controller's GitHub Environment: it does not exist yet, or the token has no access to the controller repository. ${ci ? "Publishing the CI release key creates it." : "Add a CI release key in Machines, then publish it from this page."}`
           : ci ? `The controller's GitHub Environment is missing ${missing.join(" and ")}. Publish the CI release key from this page.`
           : `The controller's GitHub Environment is missing ${missing.join(" and ")}. First add a CI release key in Machines, then publish it from this page.`,
       });
