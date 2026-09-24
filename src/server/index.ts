@@ -3,6 +3,7 @@ import { ManagedMcpTools } from "./agent-mcp-tools.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
 import os from "node:os";
 import { databaseFile, db } from "./db.ts";
+import { taskKey } from "./agent-policy.ts";
 import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
 import express from "express";
 import type { Request, Response } from "express";
@@ -2152,7 +2153,7 @@ function permissionProject(id: string): PermissionProject {
   const project = getProjects().find((entry) => entry.id === id || entry.name === id);
   if (!project) throw new PermissionError("Project is no longer registered.");
   if (!project.id) throw new PermissionError("Assign a project identity before granting agent permissions.");
-  return { id: project.id, name: project.name, path: fs.realpathSync(project.path) };
+  return { id: project.id, name: project.name, path: fs.realpathSync(project.path), workspaceId: projectWorkspaceRef(loadWorkspaceState(), project.id) };
 }
 /** Grants a preparation room needs. These, and only these, are answered in Capabilities. */
 function preparationPermissionGap(projectId: string, engine: string | null, workroomId?: string | null): string | null {
@@ -2185,7 +2186,8 @@ configureManagedAgents((scope) => {
     if (root === psmCodeRoot) throw new PermissionError("PSM cannot modify its own running permission broker. Use a separate development checkout.");
     const project = projects.find((entry) => fs.realpathSync(entry.path) === root);
     if (!project) throw new PermissionError("Every managed agent directory must be a registered project.");
-    return agentPermissions.snapshot(permissionProject(project.name));
+    // Task-scoped rules ("allow for this task") match this session only.
+    return { ...agentPermissions.snapshot(permissionProject(project.name)), task: taskKey(scope.name) };
   });
   const preparation = scope.name.startsWith("__psm_work__:")
     && workSessions.get(scope.name.slice("__psm_work__:".length)).permissionProfile === "deployment-preparation";
@@ -2198,8 +2200,9 @@ configureManagedAgents((scope) => {
 });
 local.use(agentPermissionRouter({
   store: agentPermissions, mcp: managedMcp, project: permissionProject,
-  changed: (project) => {
-    stopProjectAgents(project.path);
+  changed: (project, { restrictive }) => {
+    // Reduced authority stops running turns; added authority lets them continue.
+    if (restrictive) stopProjectAgents(project.path);
     // A preparation stopped only for this project's grants continues as soon as
     // they are enough. `deploymentPreparation` is declared below; this callback
     // runs per request, long after startup.

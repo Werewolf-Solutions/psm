@@ -421,6 +421,13 @@ const MIGRATIONS: readonly string[] = [
      document TEXT NOT NULL CHECK(json_valid(document))
    );
    CREATE INDEX machine_setup_jobs_machine ON machine_setup_jobs(machine_id, updated_at DESC);`,
+  // Scoped Allow/Ask/Deny rules beside the standing grants. Existing grants are
+  // untouched, so migrated projects keep exactly the authority they had.
+  // restricted_revision is the last revision that reduced authority; only those
+  // invalidate running turns, so granting or approving more never kills a task.
+  `ALTER TABLE agent_permissions ADD COLUMN rules TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(rules));
+   ALTER TABLE agent_permissions ADD COLUMN restricted_revision INTEGER NOT NULL DEFAULT 0;
+   UPDATE agent_permissions SET restricted_revision = revision;`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */
