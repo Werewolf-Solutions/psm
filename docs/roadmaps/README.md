@@ -9,7 +9,7 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P02 — Unified access policies and credential lifecycle** (P00 verified 2026-09-23, P01 verified 2026-09-24) |
+| Next phase | **P03 — Hosted control service and isolated runners** (P00–P02 verified; P03 live acceptance blocked on the runner provider) |
 | Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
@@ -59,8 +59,8 @@ local to those documents; they are not additional competing sequences.
 | --- | --- | --- | --- |
 | **P00 · verified** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
 | **P01 · verified** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
-| **P02 · in progress** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
-| **P03 · pending** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
+| **P02 · verified** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
+| **P03 · in progress** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
 | **P04 · pending** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
 | **P05 · pending** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
 | **P06 · pending** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
@@ -319,4 +319,45 @@ Incident: a privileged systemd Docker container froze the desktop twice
   (2026-09-23). Systemd tests now run only in the homelab LXD host.
 Next action: P02 — start with honest access (rename the managed "Full access"
   button, report blocker causes), then scoped Allow/Ask/Deny policies.
+```
+
+### 2026-09-24 — P02 unified access policies
+
+```text
+Phase / step: P02
+State: verified (delegation between people carried to P03, which provides hosted auth)
+Commits: b643879 rules + presets, 075a08e reviews + MCP rules + server commands,
+  cccdc32 access explanation + UI + sandbox-off guard, 09e2ff2 standing deployment
+  approval, then the scope chip from resolved directories.
+What exists now:
+  - Standing grants unchanged (identical authority after migration 13) and read as
+    unscoped Allow rules. Scoped Allow/Ask/Deny rules with environment, connection,
+    attached tool, task and exact-operation scopes; once/task/until/standing.
+    Most specific wins; Deny > Ask > Allow; workspace Deny beats project.
+  - Only reductions invalidate running turns (restricted_revision); approvals and
+    extra grants let a task continue.
+  - Ask → operator review of the exact operation; answers once/task/always/reject.
+  - Applies to commands (machine.command via P01 command accounts), integrations
+    (mcp.call; no rule keeps per-call review) and deployment (deploy.approve for
+    Make-ready plans; acknowledgement-requiring plans only via an exact-environment
+    rule; recorded as policy:<rule>@r<revision>).
+  - Credential leases: server commands and deployment use the broker's bounded
+    leases. Attached MCP servers still take credentials from PSM's environment
+    (unchanged; tracked for P05).
+  - Honest access: per-task explanation (ready / needs review / grant / connection /
+    runner / provider restricted / unsupported) in Capabilities and as the agents'
+    access_status tool; versioned presets replace "Grant full access"; workspace
+    chat's toggle is "Unrestricted" and confirmed.
+  - Workroom rule: sandbox-off is structurally limited to workspace chat and never
+    combined with a multi-project scope; the scope chip shows the directories the
+    spawn resolves (extraDirsFor), not the saved names.
+Verification (2026-09-24): typecheck 0; npm test 591 pass, 0 fail, 2 real-host
+  skipped; real-host suite (Docker) passes incl. a live server_command as the
+  command account; browser check of Capabilities on a throwaway server (presets,
+  rules, access list) — it caught a worktree remote-reading bug, fixed.
+Delivery state: committed (not pushed, not deployed)
+Next action: P03 — per the 2026-09-23 decisions: a provider-neutral hosted control
+  API, durable job queue and runner protocol with a local Docker backend,
+  bring-your-own model keys in the secret broker, workspace auth against the local
+  dapp. Live hosted acceptance stays blocked until a runner provider is chosen.
 ```
