@@ -4673,11 +4673,13 @@ function renderDeploymentReadiness() {
   for (const [index, item] of rows.entries()) {
     // The release controller's GitHub Environment is filled from here, with the CI key PSM enrolled.
     if (item.status !== "ready" && item.code === "executor-not-ready" && /controller-credentials/.test(item.id) && /Publish the CI release key/.test(item.detail || "")) {
-      const publish = depText("button", "dep-mini-btn", "Publish to GitHub");
+      const publish = depText("button", "dep-mini-btn primary", "Publish to GitHub");
       publish.type = "button";
+      const row = $("#dep-readiness").children[index];
       publish.onclick = async () => {
         publish.disabled = true;
         publish.textContent = "Publishing…";
+        row?.querySelector(".dep-row-error")?.remove();
         try {
           const scope = deploymentRequestScope({ environment: true });
           const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployments/${encodeURIComponent(state.environment)}/controller-credentials`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -4686,11 +4688,11 @@ function renderDeploymentReadiness() {
           void discoverDeploymentPlan();
         } catch (error) {
           publish.disabled = false;
-          publish.textContent = "Publish to GitHub";
-          $("#dep-status").textContent = `Publishing failed: ${error.message}`;
+          publish.textContent = "Try again";
+          row?.append(depText("div", "dep-row-error", `Publishing failed: ${error.message}`));
         }
       };
-      $("#dep-readiness").children[index]?.append(publish);
+      row?.append(publish);
     }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
     const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : item.action === "review-capabilities" ? "Review permissions" : "Review changes");
@@ -4709,6 +4711,12 @@ function renderDeploymentReadiness() {
       });
       $("#dep-readiness").children[index]?.append(machine);
     }
+  }
+  // Highlight the first step the operator can act on right here.
+  const next = [...$("#dep-readiness").children].find((row) => row.dataset.state !== "ready" && row.querySelector(".dep-mini-btn"));
+  if (next) {
+    next.classList.add("next");
+    next.querySelector(".dep-mini-btn")?.classList.add("primary");
   }
   const expired = readiness && Number(readiness.expiresAt) <= Date.now();
   const preparing = !!state.preparation?.active;

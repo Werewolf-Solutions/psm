@@ -263,14 +263,16 @@ test("controller credentials go only to the pinned controller's environment, sea
   const recipient = nacl.box.keyPair();
   const bodies = new Map<string, unknown>();
   const calls: Call[] = [];
+  let created = false;
   const fetchStub = (async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(url);
     const method = init?.method ?? "GET";
     calls.push({ url: href, method });
     if (init?.body) bodies.set(`${method} ${new URL(href).pathname}`, JSON.parse(String(init.body)));
     const reply = (status: number, body?: unknown) => new Response(body === undefined ? null : JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
-    if (href.endsWith("/environments/todo-production-web") && method === "PUT") return reply(200, { name: "todo-production-web" });
-    if (href.endsWith("/environments/todo-production-web")) return reply(404, { message: "Not Found" });
+    if (href.endsWith("/environments/todo-production-web") && method === "PUT") { created = true; return reply(200, { name: "todo-production-web" }); }
+
+    if (href.endsWith("/secrets/public-key") && !created) return reply(404, { message: "Not Found" });
     if (href.endsWith("/secrets/public-key")) return reply(200, { key_id: "k1", key: Buffer.from(recipient.publicKey).toString("base64") });
     if (href.includes("/secrets/PSM_") && method === "PUT") return reply(201, {});
     if (href.includes("/secrets?per_page")) return reply(200, { total_count: 1, secrets: [{ name: "PSM_TARGET_KNOWN_HOSTS" }] });
@@ -290,6 +292,11 @@ test("controller credentials go only to the pinned controller's environment, sea
   assert.ok(!JSON.stringify([...bodies.values()]).includes("BEGIN OPENSSH"), "no plaintext leaves PSM");
 
   assert.deepEqual(await github.listEnvironmentSecretNames("werewolf:todo-production-web"), ["PSM_TARGET_KNOWN_HOSTS"]);
+  const refusing = new GitHubActionsAdapter({ metadata: metadata(), token: () => TOKEN, fetch: (async (url: string | URL | Request, init?: RequestInit) =>
+    String(url).endsWith("/secrets/public-key") ? new Response(JSON.stringify({ key_id: "k1", key: Buffer.from(recipient.publicKey).toString("base64") }), { status: 200 })
+      : new Response(JSON.stringify({ message: "Resource not accessible by personal access token" }), { status: 403 })) as unknown as typeof fetch });
+  await assert.rejects(refusing.publishEnvironmentSecrets("werewolf:todo-production-web", { PSM_TARGET_KNOWN_HOSTS: "x" }),
+    /Writing PSM_TARGET_KNOWN_HOSTS: GitHub API 403: Resource not accessible by personal access token\. The token needs Environments: read and write on Werewolf-Solutions\/deployment-control\./);
   await assert.rejects(github.publishEnvironmentSecrets("werewolf:other", { PSM_X: "1" }), (error: GitHubExecutorError) => error.code === "github-target-not-allowed");
   await assert.rejects(github.publishEnvironmentSecrets("werewolf:todo-production-web", { GITHUB_TOKEN: "1" }), (error: GitHubExecutorError) => error.code === "github-config-invalid");
 });

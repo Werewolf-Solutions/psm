@@ -1926,3 +1926,11 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .machine-job-steps .step-failed, .machine-job-steps .step-uncertain { color: var(--st-blocked, #e5534b); }
 .machine-job-steps .step-done { color: var(--text); }
 .machine-job-steps .step-pending { color: var(--muted); }
+/* Actions sit under a readiness row's text, never in its icon column. */
+.dep-row > .dep-mini-btn { grid-column: 2; justify-self: start; margin-top: -2px; }
+.dep-row > .dep-row-error { grid-column: 2 / -1; color: #f85149; font-size: 10.8px; line-height: 1.35; }
+.dep-mini-btn.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; font-weight: 650; font-size: 11px; padding: 5px 11px; }
+.dep-mini-btn:disabled { opacity: .6; cursor: default; }
+/* The one step to take next. */
+.dep-row.next { box-shadow: inset 3px 0 0 var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.dep-row.next .dep-row-title::after { content: "Next"; margin-left: 8px; padding: 1px 6px; border-radius: 999px; background: var(--accent); color: var(--accent-ink); font-size: 9.5px; font-weight: 700; vertical-align: 1px; }

@@ -732,10 +732,27 @@ export class GitHubActionsAdapter {
       throw new GitHubExecutorError("github-config-invalid", "Secret names must be upper-case identifiers outside GITHUB_*");
     }
     const environment = `${repositoryPath(controller.repository)}/environments/${pathSegment(controller.githubEnvironment)}`;
-    // Creating an environment needs repository administration; an existing one does not.
-    const existing = await this.#request(environment, { statuses: [200, 404], signal: options.signal });
-    if (existing.status === 404) await this.#request(environment, { method: "PUT", body: {}, signal: options.signal });
-    const key = plainRecord((await this.#request(`${environment}/secrets/public-key`, { signal: options.signal })).body);
+    // Each call names what it needed, so a refusal says which token permission is missing.
+    const step = async <T>(what: string, permission: string, call: () => Promise<T>): Promise<T> => {
+      try {
+        return await call();
+      } catch (error) {
+        if (!(error instanceof GitHubExecutorError)) throw error;
+        const hint = error.status === 403 || error.status === 404 ? ` The token needs ${permission} on ${controller.repository}.` : "";
+        throw new GitHubExecutorError(error.code, `${what}: ${error.message}.${hint}`, { status: error.status ?? undefined, retryable: error.retryable });
+      }
+    };
+    // The key lookup doubles as the existence check. Creating an environment
+    // needs repository administration; an existing one does not.
+    let keyResponse = await step("Reading the environment's encryption key", "Environments: read", () =>
+      this.#request(`${environment}/secrets/public-key`, { statuses: [200, 404], signal: options.signal }));
+    if (keyResponse.status === 404) {
+      await step(`Creating the ${controller.githubEnvironment} environment`, "Administration: read and write (or create the environment in the repository settings)", () =>
+        this.#request(environment, { method: "PUT", body: {}, signal: options.signal }));
+      keyResponse = await step("Reading the environment's encryption key", "Environments: read", () =>
+        this.#request(`${environment}/secrets/public-key`, { signal: options.signal }));
+    }
+    const key = plainRecord(keyResponse.body);
     const keyId = key?.key_id;
     const publicKey = typeof key?.key === "string" ? Buffer.from(key.key, "base64") : null;
     if (typeof keyId !== "string" || !keyId || !publicKey || publicKey.length !== 32) {
@@ -745,7 +762,8 @@ export class GitHubActionsAdapter {
       const plain = Buffer.from(secrets[name], "utf8");
       try {
         const encrypted = Buffer.from(sealedBox(plain, publicKey)).toString("base64");
-        await this.#request(`${environment}/secrets/${pathSegment(name)}`, { method: "PUT", body: { encrypted_value: encrypted, key_id: keyId }, statuses: [201, 204], signal: options.signal });
+        await step(`Writing ${name}`, "Environments: read and write", () =>
+          this.#request(`${environment}/secrets/${pathSegment(name)}`, { method: "PUT", body: { encrypted_value: encrypted, key_id: keyId }, statuses: [201, 204], signal: options.signal }));
       } finally {
         plain.fill(0);
       }
