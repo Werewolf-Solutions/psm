@@ -148,6 +148,35 @@ export class ManagedTaskRunner {
     this.store.check(this.repository.snapshot, "script.run");
     return `${this.packagesReady ? "" : "Dependencies were not installed in this sandbox; if the script needs them, run install_packages first.\n"}${output}`;
   }
+  /**
+   * Start a project script (a dev or preview server) inside the same offline
+   * sandbox, wait for its port, fetch the given paths from inside the
+   * container, then stop it. Nothing listens outside the container.
+   */
+  preview(script: string, port: number, paths: string[]): Promise<string> { return this.serialize(() => this.runPreview(script, port, paths)); }
+  private async runPreview(script: string, port: number, paths: string[]): Promise<string> {
+    this.store.check(this.repository.snapshot, "script.run");
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(script)) throw new Error("Give the name of a script in package.json.");
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Give the port the script listens on (1024–65535).");
+    const wanted = (paths.length ? paths : ["/"]).slice(0, 10);
+    if (wanted.some((entry) => !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,300}$/.test(entry))) throw new Error("Paths start with / and contain no spaces.");
+    let scripts: Record<string, unknown> = {};
+    try { scripts = JSON.parse(this.repository.read("package.json")).scripts ?? {}; } catch { throw new Error("This project has no readable package.json."); }
+    if (typeof scripts[script] !== "string") throw new Error(`package.json has no script named ${script}.`);
+    const probe = `
+const cp=require('child_process');
+const server=cp.spawn('npm',['run',${JSON.stringify(script)}],{detached:true,stdio:['ignore','pipe','pipe'],env:{...process.env,PORT:'${port}',HOST:'127.0.0.1',BROWSER:'none'}});
+let log='';server.stdout.on('data',d=>log=(log+d).slice(-4000));server.stderr.on('data',d=>log=(log+d).slice(-4000));
+const stop=()=>{try{process.kill(-server.pid,'SIGKILL')}catch{}};
+(async()=>{const paths=${JSON.stringify(wanted)};const deadline=Date.now()+90000;let up=false;
+while(Date.now()<deadline&&!up){try{await fetch('http://127.0.0.1:${port}/');up=true}catch{await new Promise(r=>setTimeout(r,500))}if(server.exitCode!==null)break}
+const results=[];if(up)for(const p of paths){try{const r=await fetch('http://127.0.0.1:${port}'+p);const t=await r.text();results.push({path:p,status:r.status,type:r.headers.get('content-type'),body:t.slice(0,2000)})}catch(e){results.push({path:p,error:String(e)})}}
+console.log(JSON.stringify({listening:up,results,serverLog:log.slice(-2000)},null,1));stop();process.exit(0)})();`;
+    const directory = this.snapshot();
+    const output = await this.container(directory, ["node", "-e", probe], this.packagesReady);
+    this.store.check(this.repository.snapshot, "script.run");
+    return output;
+  }
   install(): Promise<string> { return this.serialize(() => this.installPackages()); }
   private async installPackages(): Promise<string> {
     this.store.check(this.repository.snapshot, "pkg.install");
