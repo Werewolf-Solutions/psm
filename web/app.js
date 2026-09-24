@@ -4694,6 +4694,14 @@ function renderDeploymentReadiness() {
       };
       row?.append(publish);
     }
+    // Building the release is one click from its own row.
+    if (item.status !== "ready" && item.action === "prepare-artifact" && item.automatic) {
+      const build = depText("button", "dep-mini-btn", "Prepare build");
+      build.type = "button";
+      build.title = "Run the build workflow on GitHub Actions for the committed source, then verify the artifact";
+      build.onclick = () => { build.disabled = true; void prepareDeploymentArtifact(); };
+      $("#dep-readiness").children[index]?.append(build);
+    }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
     const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : item.action === "review-capabilities" ? "Review permissions" : "Review changes");
     button.type = "button";
@@ -4736,7 +4744,7 @@ function renderDeploymentReadiness() {
   // ready is something it has a next move on.
   $("#dep-make-ready").hidden = !readiness || readiness.ready;
   $("#dep-make-ready").disabled = state.loading || preparing;
-  $("#dep-make-ready").textContent = state.preparation && !preparing && state.preparation.state !== "succeeded"
+  $("#dep-make-ready").textContent = state.preparation && !preparing && state.preparation.state !== "succeeded" && !preparationSuperseded(state)
     ? "Resume preparation"
     : "Make ready to deploy";
   $("#dep-make-ready").title = preparing
@@ -5459,14 +5467,24 @@ async function approvePreparationPublication() {
   finally { if (deploymentRequestIsCurrent(scope)) { scheduleDeploymentPreparationPoll(100); renderManagedDeploy(); } }
 }
 
+/**
+ * A stopped preparation's external blockers describe the environment as it was
+ * then; a readiness check made since is the current answer. The newest check
+ * time is kept apart from the readiness itself, which is cleared while a new
+ * check runs, so the old banner does not come back during it.
+ */
+function preparationSuperseded(state) {
+  const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
+  state.lastCheckedAt ||= {};
+  if (readiness) state.lastCheckedAt[state.environment] = Math.max(state.lastCheckedAt[state.environment] || 0, Number(readiness.checkedAt) || 0);
+  const job = state.preparation;
+  return !!job && !job.active && job.state === "blocked" && job.blockedBy === "external"
+    && (state.lastCheckedAt[state.environment] || 0) > Number(job.updatedAt);
+}
+
 function renderDeploymentPreparation() {
   const state = WS.managedDeploy;
-  const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
-  // A stopped preparation's external blockers describe the environment as it was then; a
-  // readiness check made since is the current answer, so the old banner is not repeated.
-  const superseded = state.preparation && !state.preparation.active && state.preparation.state === "blocked"
-    && state.preparation.blockedBy === "external" && Number(readiness?.checkedAt) > Number(state.preparation.updatedAt);
-  const job = superseded ? null : state.preparation;
+  const job = preparationSuperseded(state) ? null : state.preparation;
   const section = $("#dep-preparation");
   section.hidden = !job;
   if (!job) return;
