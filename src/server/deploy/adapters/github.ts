@@ -667,7 +667,11 @@ export class GitHubActionsAdapter {
     const workflow = this.#metadata.prepareWorkflows.find((entry) =>
       entry.repository === input.repository && entry.workflow === input.workflow
     );
-    const ref = workflow?.refs.find((entry) => entry.ref === input.ref);
+    // The connection form saves a branch by name ("master"); dispatch asks for the
+    // full ref ("refs/heads/master"). Both name the same branch; tags never match a bare name.
+    const sameRef = (allowed: string, requested: string) => allowed === requested
+      || `refs/heads/${allowed}` === requested || allowed === `refs/heads/${requested}`;
+    const ref = workflow?.refs.find((entry) => sameRef(entry.ref, input.ref));
     if (!workflow || !ref) {
       throw new GitHubExecutorError(
         "github-target-not-allowed",

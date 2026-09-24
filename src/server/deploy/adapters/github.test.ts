@@ -308,3 +308,17 @@ test("the controller's target file is read at the pinned commit", async () => {
   assert.ok(github.calls.at(-1)!.url.endsWith(`/contents/targets/werewolf__todo-production-web.json?ref=${HEAD_SHA}`));
   await assert.rejects(adapter(github).readControllerJson("werewolf:todo-production-web", "../secrets.json"), /Unexpected controller file path/);
 });
+
+test("a branch saved by name allows its full ref, and nothing else", async () => {
+  const saved = metadata();
+  const named = { ...saved, prepareWorkflows: [{ ...saved.prepareWorkflows[0], refs: [{ ref: "master" }] }] };
+  const github = fakeGitHub();
+  const kit = new GitHubActionsAdapter({ metadata: named, token: () => TOKEN, fetch: github.fetch, now: () => 1_760_000_000_000 });
+  assert.equal(await codeOf(() => kit.dispatchPrepare(prepareDispatch({ ref: "refs/heads/masterx" }))), "github-target-not-allowed");
+  assert.equal(await codeOf(() => kit.dispatchPrepare(prepareDispatch({ ref: "refs/tags/master" }))), "github-target-not-allowed");
+  assert.equal(github.calls.length, 0);
+  // The full ref of the saved branch passes the allowlist and reaches GitHub.
+  await kit.dispatchPrepare(prepareDispatch({ ref: "refs/heads/master" })).catch(() => undefined);
+  assert.ok(github.calls.length > 0, "an allowlisted dispatch makes requests");
+  assert.ok(github.calls.some((call) => call.url.includes("/commits/master")));
+});
