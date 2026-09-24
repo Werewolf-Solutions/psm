@@ -1,11 +1,10 @@
 /**
  * Machine onboarding against a real SSH server: a disposable Ubuntu 20.04
- * container built from scripts/machine-test-host. Opt in with
- * `PSM_MACHINE_DOCKER=1` (and build the image first, see that Dockerfile);
- * the ordinary test run stays hermetic and skips it.
+ * container (see test-hosts.ts). Opt in with `PSM_MACHINE_DOCKER=1` for the
+ * local unprivileged container, or `PSM_MACHINE_LXD=1` for the systemd LXD
+ * container on the homelab. The ordinary test run stays hermetic and skips it.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import test from "node:test";
 
 import { SecretBroker } from "../deploy/connections.ts";
@@ -15,13 +14,9 @@ import { commandAccountName } from "./plan.ts";
 import { ADMIN_CONNECTION_KIND, MachineService } from "./service.ts";
 import { SshMachineTransport } from "./ssh.ts";
 import { MachineStore } from "./store.ts";
+import { selectedTestHost, startTestHost } from "./test-hosts.ts";
 
-const IMAGE = process.env.PSM_MACHINE_IMAGE || "psm-machine-test-host:20.04";
-const enabled = process.env.PSM_MACHINE_DOCKER === "1";
-
-function docker(...args: string[]): string {
-  return execFileSync("docker", args, { encoding: "utf8" }).trim();
-}
+const hostKind = selectedTestHost();
 
 async function waitFor<T>(what: string, attempt: () => Promise<T>): Promise<T> {
   let last: unknown;
@@ -31,7 +26,7 @@ async function waitFor<T>(what: string, attempt: () => Promise<T>): Promise<T> {
   throw new Error(`${what}: ${String(last)}`);
 }
 
-test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !enabled && "set PSM_MACHINE_DOCKER=1 to run against Docker" }, async (t) => {
+test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !hostKind && "set PSM_MACHINE_DOCKER=1 or PSM_MACHINE_LXD=1 to run against a real server" }, async (t) => {
   const database = openDatabase(":memory:");
   const deployments = new DeploymentStore(database);
   const broker = new SecretBroker();
@@ -39,25 +34,25 @@ test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !ena
   const service = new MachineService({ store: new MachineStore(() => database), deployments, broker, transport });
 
   const adminKey = await transport.generateKeyPair("psm test admin");
-  const container = docker("run", "-d", "--rm", "-p", "127.0.0.1::22", "-e", `PSM_TEST_ADMIN_KEY=${adminKey.publicKey}`, IMAGE);
-  t.after(() => { try { docker("rm", "-f", container); } catch { /* already gone */ } database.close(); });
-  const port = Number(docker("port", container, "22/tcp").split("\n")[0].split(":").pop());
-  const exec = (...command: string[]) => docker("exec", container, ...command);
+  const target = startTestHost(hostKind!, adminKey.publicKey);
+  t.after(() => { target.close(); database.close(); });
+  const { port } = target;
+  const exec = target.exec;
 
   // 1. Connect: discover candidates, then register only with a confirmed fingerprint.
-  const discovered = await waitFor("sshd", () => service.discover("127.0.0.1", port));
+  const discovered = await waitFor("sshd", () => service.discover(target.address, port));
   const ed25519 = discovered.candidates.find((candidate) => candidate.keyType === "ssh-ed25519")!;
   const trueFingerprint = exec("ssh-keygen", "-lf", "/etc/ssh/ssh_host_ed25519_key.pub").split(" ")[1];
   assert.equal(ed25519.fingerprint, trueFingerprint, "scanned fingerprint matches the one the server itself reports");
-  assert.throws(() => service.register({ workspaceId: "personal", name: "test", host: "127.0.0.1", port, knownHost: ed25519.knownHost, confirmFingerprint: "SHA256:wrong" }), /does not match/);
-  let machine = service.register({ workspaceId: "personal", name: "Ubuntu test host", host: "127.0.0.1", port, knownHost: ed25519.knownHost, confirmFingerprint: trueFingerprint });
+  assert.throws(() => service.register({ workspaceId: "personal", name: "test", host: target.address, port, knownHost: ed25519.knownHost, confirmFingerprint: "SHA256:wrong" }), /does not match/);
+  let machine = service.register({ workspaceId: "personal", name: "Ubuntu test host", host: target.address, port, knownHost: ed25519.knownHost, confirmFingerprint: trueFingerprint });
   assert.equal(machine.hostKeySource, "operator-confirmed");
 
   const addAdmin = async (connectionId: string, user: string) => {
     deployments.createConnection({
       connectionId, kind: ADMIN_CONNECTION_KIND, label: `${user} on test host`, secretGeneration: 0, readiness: "missing-secret",
       metadata: { publicMetadata: { knownHost: ed25519.knownHost }, credentialIdentity: null, requiredSecretSlots: ["privateKey"] },
-      constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: "127.0.0.1", user, port, hostKeyFingerprint: trueFingerprint } },
+      constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: target.address, user, port, hostKeyFingerprint: trueFingerprint } },
       createdAt: Date.now(),
     });
     // The broker zeroes what it is given, so each connection gets its own copy.
@@ -149,7 +144,7 @@ test("machine onboarding against a disposable Ubuntu 20.04 server", { skip: !ena
   await assert.rejects(service.planCommandAccess({ machineId: machine.id, workspaceId: "personal", project: { ...todo, id: "prj_biz", workspaceId: "business:0123456789abcdef01234567" }, environmentId: "staging", risk: "staging" }), /different workspace/);
 
   // 9. A changed host key stops everything, and nothing is re-pinned silently.
-  exec("sh", "-c", "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A >/dev/null && pkill -HUP -x sshd");
+  target.rotateHostKeys();
   machine = service.setAdminConnection(machine.id, "personal", service.getMachine(machine.id, "personal").revision, "admin-root");
   assert.equal(service.retry(done.id, "personal").state, "succeeded", "retrying finished work is a no-op");
   const changed = await service.settled(service.startSetup({ accessId: access.id, workspaceId: "personal", planDigest: access.plan.digest, method: "admin-ssh", actor: "test" }).id);
