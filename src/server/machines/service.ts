@@ -78,6 +78,8 @@ export interface MachineServiceOptions {
   helper?: HostHelperTransport;
   /** Builds the helper binary for an architecture; tests substitute a fixture. */
   buildHelper?: (arch: string) => HelperBuild;
+  /** The host target a project environment's deployment manifest names, if any. */
+  hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null } | null;
   now?: () => number;
 }
 
@@ -110,6 +112,7 @@ export class MachineService {
   readonly #transport: MachineTransport;
   readonly #helper: HostHelperTransport;
   readonly #buildHelper: (arch: string) => HelperBuild;
+  readonly #hostTarget: NonNullable<MachineServiceOptions["hostTarget"]>;
   readonly #now: () => number;
   readonly #owner = `psm_${process.pid}_${randomBytes(4).toString("hex")}`;
   readonly #machineQueues = new Map<string, Promise<unknown>>();
@@ -122,6 +125,7 @@ export class MachineService {
     this.#transport = options.transport;
     this.#helper = options.helper ?? new SshHostHelperTransport({ broker: options.broker });
     this.#buildHelper = options.buildHelper ?? ((arch) => buildHostHelper(arch));
+    this.#hostTarget = options.hostTarget ?? (() => null);
     this.#now = options.now ?? Date.now;
   }
 
@@ -366,11 +370,17 @@ export class MachineService {
       const infraConnection = `machine-infra-${accessId.slice(4, 20)}`;
       const releaseConnection = `machine-release-${accessId.slice(4, 20)}`;
       let plan: DeployAccessPlan;
+      // The deployment manifest, when there is one, decides the target: a
+      // connection enrolled for a different target could never be bound to it.
+      const declared = this.#hostTarget(input.project.id, environmentId);
+      if (declared && input.hostname && declared.hostname && String(input.hostname).trim().toLowerCase() !== declared.hostname) {
+        throw new MachineServiceError(`This deployment serves ${declared.hostname}, not ${String(input.hostname)}. Change the manifest to change the domain.`, 409, "hostname-mismatch");
+      }
       try {
         plan = buildDeployAccessPlan({
           machine: identity(machine), projectId: input.project.id, projectName: input.project.name, environmentId, risk: input.risk,
-          unitId: input.unitId, targetId: input.targetId, hostname: input.hostname, certbotEmail: input.certbotEmail,
-          canonicalRoot: input.canonicalRoot, allowedRootPrefix: input.allowedRootPrefix,
+          unitId: declared?.unitId ?? input.unitId, targetId: declared?.targetId ?? input.targetId, hostname: declared?.hostname ?? input.hostname, certbotEmail: input.certbotEmail,
+          canonicalRoot: declared?.root ?? input.canonicalRoot, allowedRootPrefix: declared?.allowedRootPrefix ?? input.allowedRootPrefix,
           infraPublicKey: infraKeys.publicKey, releasePublicKey: releaseKeys.publicKey, now,
         });
         const create = async (connectionId: string, role: "infrastructure" | "release", user: string, fingerprint: string, key: Buffer) => {
@@ -506,6 +516,11 @@ export class MachineService {
     } catch (error) {
       return [{ id: "login", title: "Log in with the new key", ok: false, detail: this.#failure(error).message }];
     }
+  }
+
+  /** What a project environment's manifest says its host target is, for the wizard to show. */
+  deployTarget(projectId: string, environmentId: string) {
+    return this.#hostTarget(projectId, environmentId);
   }
 
   getAccess(id: string, workspaceId: string): MachineAccessRecord {
@@ -871,7 +886,7 @@ export class MachineService {
         { id: "infra-observe", title: "Infrastructure identity reaches the helper", ok: infra.outcome === "succeeded" && Boolean(targetDigest), detail: infra.outcome === "succeeded" ? `target ${targetDigest}` : `${infra.code}: ${infra.detail}` },
         { id: "release-observe", title: "Release identity reaches the helper", ok: release.outcome === "succeeded" && digestOf(release) === targetDigest, detail: release.outcome === "succeeded" ? "same target contract" : `${release.code}: ${release.detail}` },
         { id: "release-scope", title: "Release identity cannot run infrastructure operations", ok: crossRole.outcome === "failed" && crossRole.code === "not-authorized", detail: `${crossRole.code}: ${crossRole.detail}` },
-        { id: "no-shell", title: "Deploy keys open no shell", ok: !/uid=\d+/.test(shell), detail: shell ? "a command ran" : "forced to the helper client" },
+        { id: "no-shell", title: "Deploy keys open no shell", ok: !/uid=\d+/.test(shell), detail: /uid=\d+/.test(shell) ? "a shell command ran" : "the key reaches only the helper client" },
       ],
     };
   }

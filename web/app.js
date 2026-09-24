@@ -4678,6 +4678,16 @@ function renderDeploymentReadiness() {
       ? $("#dep-connections-section").scrollIntoView({ behavior: "smooth", block: "start" })
       : switchPane(item.action === "review-capabilities" ? "capabilities" : "changes");
     $("#dep-readiness").children[index]?.append(button);
+    // The server a deployment runs on can be set up from here, scoped to this project.
+    if (item.action === "connect" && item.slot === "host") {
+      const machine = depText("button", "dep-mini-btn", "Set up on a machine");
+      machine.type = "button";
+      machine.onclick = () => openMachines({
+        project: currentProject(), environment: state.environment,
+        onBound: () => { void discoverDeploymentPlan(); },
+      });
+      $("#dep-readiness").children[index]?.append(machine);
+    }
   }
   const expired = readiness && Number(readiness.expiresAt) <= Date.now();
   const preparing = !!state.preparation?.active;
@@ -5912,6 +5922,7 @@ function closeModals() {
   $("#modal-backdrop").hidden = true;
   $("#procs-modal").hidden = true;
   $("#links-modal").hidden = true;
+  $("#machines-modal").hidden = true;
   $("#new-modal").hidden = true;
   $("#rules-modal").hidden = true;
   $("#usage-modal").hidden = true;
@@ -7069,6 +7080,21 @@ $("#stale-dismiss").onclick = () => {
   $("#stale-page").hidden = true;
 };
 $("#links-open").onclick = openLinks;
+$("#machines-open").onclick = () => openMachines();
+$("#machines-close").onclick = closeModals;
+
+/** Machines inventory and setup wizard; optionally for one project's environment. */
+function openMachines(options = {}) {
+  closeModals();
+  openModal("#machines-modal");
+  void PsmMachines.open({
+    api: agentApi,
+    root: $("#machines-body"),
+    workspace: $("#workspace-select")?.value || "personal",
+    projects: () => STATE.projects,
+    ...options,
+  });
+}
 $("#links-close").onclick = closeModals;
 $("#link-kinds").onclick = (e) => {
   const button = e.target.closest(".link-kind");

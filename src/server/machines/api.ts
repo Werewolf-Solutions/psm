@@ -87,6 +87,11 @@ export function machineRouter(options: MachineApiOptions): express.Router {
     const access = await service.planHelperInstall({ machineId: req.params.id, workspaceId: ws });
     res.status(201).json({ access: service.accessView(access) });
   }));
+  router.get("/api/machine-deploy-target", route(false, (req, res) => {
+    const project = options.project(String(req.query.projectId || ""));
+    if (!project) return res.status(404).json({ error: "Project not found.", code: "project-not-found" });
+    res.json({ target: service.deployTarget(project.id, String(req.query.environmentId || "")) });
+  }));
   router.post("/api/machines/:id/admin-access", route(true, async (req, res, ws) => {
     const access = await service.planAdminAccess({ machineId: req.params.id, workspaceId: ws });
     res.status(201).json({ access: service.accessView(access) });

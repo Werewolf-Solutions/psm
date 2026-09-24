@@ -1892,3 +1892,37 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
   border-color: var(--st-paused);
   color: var(--st-paused);
 }
+
+/* Machines inventory and setup wizard */
+.machines-body { display: flex; flex-direction: column; gap: 12px; }
+.machine-wizard-head h3 { margin: 0 0 8px; }
+.machine-steps { display: flex; flex-wrap: wrap; gap: 6px 18px; list-style: none; margin: 0; padding: 0; color: var(--muted); font-size: 13px; counter-reset: step; }
+.machine-steps li { counter-increment: step; }
+.machine-steps li::before { content: counter(step) ". "; }
+.machine-steps li.current { color: var(--text); font-weight: 600; }
+.machine-steps li.done { color: var(--accent); }
+.machine-error { color: var(--st-blocked, #e5534b); margin: 0; min-height: 0; }
+.machine-error:empty { display: none; }
+.machine-wizard-body { display: flex; flex-direction: column; gap: 12px; align-items: stretch; }
+.machine-wizard-body > .btn { align-self: flex-start; }
+.machine-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.machine-field span { color: var(--muted); }
+.machine-field input, .machine-field select, .machine-field textarea { max-width: 100%; }
+.machine-field textarea { min-height: 120px; font-family: var(--mono, monospace); font-size: 12px; }
+.machine-card, .machine-option { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 8px; }
+.machine-card h4, .machine-option h4, .machine-card p, .machine-option p { margin: 0; }
+.machine-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.machine-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.machine-option .btn { align-self: flex-start; }
+.machine-access-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.machine-candidates { display: flex; flex-direction: column; gap: 8px; }
+.machine-candidate { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.machine-candidate code, .machine-card code { overflow-wrap: anywhere; }
+.machine-subfields { display: flex; flex-direction: column; gap: 8px; }
+.machine-authority li { color: var(--muted); }
+.machine-script, .machine-command { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 6px; }
+.machine-command-card { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.machine-job-steps { margin: 0; padding-left: 4px; list-style: none; font-size: 13px; }
+.machine-job-steps .step-failed, .machine-job-steps .step-uncertain { color: var(--st-blocked, #e5534b); }
+.machine-job-steps .step-done { color: var(--text); }
+.machine-job-steps .step-pending { color: var(--muted); }

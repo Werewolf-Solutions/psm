@@ -168,3 +168,27 @@ test("a key already authorized for that account is a conflict to rotate explicit
   assert.match(job.error!.message, /rotate it explicitly/);
   assert.equal(server.accounts.get(access.account)!.key, "restrict ssh-ed25519 SOMEONE-ELSE");
 });
+
+test("deploy access follows the deployment manifest's target, root and domain", async (t) => {
+  const database = openDatabase(":memory:");
+  t.after(() => database.close());
+  const deployments = new DeploymentStore(database);
+  const broker = new SecretBroker();
+  const server = new FakeServer();
+  const service = new MachineService({
+    store: new MachineStore(() => database), deployments, broker, transport: server,
+    hostTarget: (projectId, environmentId) => projectId === "prj_todo" && environmentId === "staging"
+      ? { unitId: "web", targetId: "werewolf:todo-staging-web", root: "/var/www/todo.werewolf.solutions", allowedRootPrefix: "/var/www", hostname: "todo.werewolf.solutions" }
+      : null,
+  });
+  const [candidate] = (await service.discover("203.0.113.4", 22)).candidates;
+  const machine = service.register({ workspaceId: "personal", name: "alpha", host: "203.0.113.4", port: 22, knownHost: candidate.knownHost, confirmFingerprint: candidate.fingerprint });
+  const project = { id: "prj_todo", name: "Todo", workspaceId: "personal" };
+  await assert.rejects(service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project, environmentId: "staging", risk: "staging", hostname: "other.example.com", certbotEmail: "ops@example.com" }), /serves todo.werewolf.solutions/);
+  const access = await service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project, environmentId: "staging", risk: "staging", hostname: "", certbotEmail: "ops@example.com" });
+  const plan = access.plan as import("./roles.ts").DeployAccessPlan;
+  assert.equal(plan.target.targetId, "werewolf:todo-staging-web");
+  assert.equal(plan.target.canonicalRoot, "/var/www/todo.werewolf.solutions");
+  assert.equal(plan.target.hostname, "todo.werewolf.solutions");
+  assert.deepEqual((deployments.getConnection(access.connectionId).constraints as any).allowedTargetIds, ["werewolf:todo-staging-web"]);
+});

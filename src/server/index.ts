@@ -2329,7 +2329,10 @@ local.use(createDeploymentRouter({
 
 const machineStore = new MachineStore(db);
 const machineTransport = new SshMachineTransport({ broker: deploymentSecretBroker });
-const machines = new MachineService({ store: machineStore, deployments: deploymentStore, broker: deploymentSecretBroker, transport: machineTransport });
+const machines = new MachineService({
+  store: machineStore, deployments: deploymentStore, broker: deploymentSecretBroker, transport: machineTransport,
+  hostTarget: (projectId, environmentId) => deploymentEngine.service.hostTarget(projectId, environmentId),
+});
 // Managed agents reach connected servers only through this, as each project's command account.
 machineCommands = new MachineCommands(machineStore, machineTransport);
 // A setup this process was running when it stopped is failed as uncertain; its

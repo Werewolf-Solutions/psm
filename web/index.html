@@ -95,6 +95,7 @@
         <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
         <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
         <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
+        <button id="machines-open" class="btn" title="Servers your projects deploy to">🖥&nbsp;Machines</button>
         <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
         <button id="skills-open" class="btn" title="Skills the agents have used">Skills</button>
         <button id="new-open" class="btn" title="Create a new project">＋&nbsp;New</button>
@@ -645,6 +646,17 @@
     </section>
 
     <!-- linked folders: what psm looks at -->
+    <section class="modal modal-wide machines-modal" id="machines-modal" role="dialog" aria-modal="true" aria-labelledby="machines-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="machines-title">Machines</h2>
+          <p class="hint">Connect → Choose access → Set up → Ready</p>
+        </div>
+        <button class="icon-btn" id="machines-close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body machines-body" id="machines-body"></div>
+    </section>
+
     <section class="modal modal-wide links-modal" id="links-modal" role="dialog" aria-modal="true" aria-labelledby="links-title" hidden>
       <div class="modal-head">
         <div>
@@ -876,6 +888,7 @@
     <script src="/agent.js"></script>
     <script src="/deployment-connections.js"></script>
     <script src="/agent-permissions.js"></script>
+    <script src="/machines.js"></script>
     <script src="/workspaces.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>

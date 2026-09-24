@@ -398,6 +398,23 @@ export class DeploymentService {
     return planView({ digest: plan.digest, document: plan.document as unknown as DeploymentPlanDocument });
   }
 
+  /**
+   * The host target a project environment's manifest names — what a machine's
+   * deploy identities must be enrolled for. Null when the manifest has none.
+   */
+  hostTarget(idOrName: string, environmentId: string): { slot: string; unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null } | null {
+    let context: LoadedContext;
+    try { context = this.loadCurrent(idOrName); } catch { return null; }
+    const environment = context.manifest.environments.find((entry) => entry.id === environmentId);
+    const unit = environment?.units.find((entry) => entry.target.kind === "ssh-release-directory@1");
+    if (!environment || !unit) return null;
+    const hostname = environment.resources.find((item) => item.kind === "nginx-static-site@1")?.desired.hostname ?? null;
+    return {
+      slot: unit.target.observerConnection, unitId: unit.id, targetId: unit.target.targetId, root: unit.target.root,
+      allowedRootPrefix: unit.target.root.slice(0, unit.target.root.lastIndexOf("/")) || "/", hostname: typeof hostname === "string" ? hostname : null,
+    };
+  }
+
   async environmentView(idOrName: string, environmentId: string): Promise<Record<string, unknown>> {
     const context = this.loadCurrent(idOrName);
     const resolved = await this.resolveEnvironment(context, environmentId);
