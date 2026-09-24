@@ -9,7 +9,7 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P01 — Machine inventory and reusable bootstrap** (P00 verified 2026-09-23) |
+| Next phase | **P02 — Unified access policies and credential lifecycle** (P00 verified 2026-09-23, P01 verified 2026-09-24) |
 | Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
@@ -58,8 +58,8 @@ local to those documents; they are not additional competing sequences.
 | ID / status | Deliverable | Depends on | Acceptance and source |
 | --- | --- | --- | --- |
 | **P00 · verified** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
-| **P01 · in progress** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
-| **P02 · pending** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
+| **P01 · verified** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
+| **P02 · in progress** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
 | **P03 · pending** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
 | **P04 · pending** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
 | **P05 · pending** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
@@ -268,4 +268,55 @@ Independent next work: P06 re-verification can proceed alongside.
 Next action: P01 — add src/server/machines/ (records, validated plan, generated
   bootstrap with inspect/apply and collision checks) and prove repeatable
   enrollment against a disposable Ubuntu 20.04 sshd container.
+```
+
+### 2026-09-24 — P01 machine inventory and reusable bootstrap
+
+```text
+Phase / step: P01
+State: verified
+Changed files / repositories: psm — src/server/machines/ (plan, roles, store,
+  ssh, service, api + tests), db migration 12 (machines, machine_access,
+  machine_setup_jobs), server wiring, host-helper/main.go, deploy/connections.ts,
+  scripts/machine-test-host/ (Docker image, LXD.md).
+Commits: 903d1e7 broker Buffer copies, 9a1a8d9 machines + command access,
+  d336c5d real-host tests on LXD, 62fb5dc helper socket directory,
+  5ce6921 helper install + deploy identities.
+What exists now:
+  Machines registered once per workspace; trust only from an operator-confirmed
+  fingerprint or an existing pinned connection. Per-project-environment roles:
+  command (unprivileged account + workdir), helper (machine-wide install of the
+  reproducibly built, digest-checked host helper + nginx/certbot), deploy
+  (infrastructure + release accounts, forced-command keys, enrolled target).
+  Setup is a durable job: identity → inspect → apply → verify → save. Conflicts
+  stop before any change; an interrupted apply is "uncertain" and the retry
+  inspects first; success only after logging in as the new identity. Copyable
+  one-time command for administrators whose sudo needs a password (command and
+  deploy roles). Connections created with the right kinds, scope and, for
+  deploy, the target contract fingerprint the helper itself reports.
+Verification (2026-09-24):
+  npm run typecheck → 0; npm test → 571 pass, 0 fail, 2 real-host skipped
+  (cd host-helper && go test ./...) → ok
+  PSM_MACHINE_DOCKER=1 real-host.test.ts (unprivileged sshd container) → pass
+  PSM_MACHINE_LXD=1 real-host.test.ts (Ubuntu 20.04 LXD container with systemd
+    on the homelab, see scripts/machine-test-host/LXD.md) → both tests pass:
+    9 command-role scenarios, and helper install + two projects' deploy
+    identities with role and project isolation checked through the helper.
+  Live server run (throwaway PSM on :4399, in-memory secrets) → discover,
+    confirm, inspect, plan, setup, ready over the HTTP API; cross-origin refused.
+Bugs found and fixed on the way:
+  - SecretBroker copied Buffer secrets with Buffer#slice (a view) then zeroed it,
+    wiping stored keys and callers' buffers.
+  - Helper runtime directory was root:root 0750, so no deploy account could ever
+    reach the socket. The helper already running on werewolf-alpha predates this
+    fix: its deploy accounts cannot connect until it is upgraded (P07).
+  - /usr/local/libexec is absent on Ubuntu 20.04 minimal; installer creates it.
+Delivery state: committed 5ce6921 (not pushed, not deployed)
+Not in P01 (tracked): explicit adoption of existing psm-infra/psm-release and
+  helper upgrade plans (P07 on werewolf-alpha); enrollment intents, HTTPS
+  artifact serving and the web wizard (P03/P04).
+Incident: a privileged systemd Docker container froze the desktop twice
+  (2026-09-23). Systemd tests now run only in the homelab LXD host.
+Next action: P02 — start with honest access (rename the managed "Full access"
+  button, report blocker causes), then scoped Allow/Ask/Deny policies.
 ```
