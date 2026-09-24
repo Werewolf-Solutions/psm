@@ -192,3 +192,28 @@ test("deploy access follows the deployment manifest's target, root and domain", 
   assert.equal(plan.target.hostname, "todo.werewolf.solutions");
   assert.deepEqual((deployments.getConnection(access.connectionId).constraints as any).allowedTargetIds, ["werewolf:todo-staging-web"]);
 });
+
+test("replacing re-inspects with this version's script, so a plan made by an older PSM can be re-planned", async (t) => {
+  const { service, server, store, machine, project } = await fixture(t);
+  const inspected: string[] = [];
+  const run = server.run.bind(server);
+  server.run = async (endpoint, command, input = "") => {
+    const script = String(input);
+    if (!script.includes("PSM_TARGET_FILE")) return run(endpoint, command, input);
+    inspected.push(script);
+    // What a current script reports: the target belongs to other accounts, and its digest.
+    const lines = ["psm.schema=1", "psm.kernel=Linux", "psm.arch=x86_64", "psm.uid=0", "psm.helper=active", "psm.infra=absent", "psm.release=absent", "psm.target=conflict",
+      ...(/^readonly PSM_REPLACE_TARGET=/m.test(script) ? [`psm.target_sha=${"f".repeat(64)}`] : []), "psm.conflict=target-owned-by-other:werewolf:todo", "psm.result=inspected"];
+    return { code: 0, stdout: `${lines.join("\n")}\n`, stderr: "" };
+  };
+  const access = await service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project, environmentId: "staging", risk: "staging", targetId: "werewolf:todo", hostname: "todo.example.com", certbotEmail: "ops@example.com" });
+  // As stored by an older PSM: no key fields, and a script that cannot report the digest.
+  const { publicKey: _, ...older } = access.plan as import("./roles.ts").DeployAccessPlan;
+  store.updateAccess(access.id, access.revision, (value) => ({ ...value, plan: { ...older, release: { account: older.release.account, publicKeyFingerprint: older.release.publicKeyFingerprint }, script: older.script.replace(/^readonly PSM_REPLACE_TARGET=.*$/m, "") } as never }));
+  const replanned = await service.planReplacement(access.id, "personal");
+  const plan = replanned.plan as import("./roles.ts").DeployAccessPlan;
+  assert.match(inspected[0], /^readonly PSM_REPLACE_TARGET=/m, "inspected with a freshly generated script");
+  assert.equal(plan.target.replaces, "f".repeat(64));
+  assert.equal(plan.publicKeyFingerprint, access.plan.publicKeyFingerprint, "the same keys as the reviewed plan");
+  assert.equal(replanned.state, "planned");
+});

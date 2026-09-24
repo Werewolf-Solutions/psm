@@ -540,31 +540,39 @@ export class MachineService {
       if (this.#store.listJobs(machine.id).some((job) => job.accessId === access.id && (job.state === "running" || job.state === "waiting"))) {
         throw new MachineServiceError("Setup for this access is already in progress.", 409, "job-active");
       }
-      const report = await this.#runScript(admin, access.plan.script, "--inspect");
-      const blocking = report.conflicts.filter((conflict) => !isReplaceableConflict(conflict));
-      if (blocking.length) throw new MachineServiceError(`Other problems need attention first: ${blocking.map(describeConflict).join("; ")}.`, 409, "conflict");
-      const values = report.values;
       const now = this.#now();
-      let plan: AccessPlan;
+      // Rebuilt from the recorded inputs, so a plan made by an older PSM is
+      // inspected with this version's script, which reports what may be replaced.
+      let rebuild: (replaces: Record<string, string> | null) => AccessPlan;
       if (access.plan.role === "helper") {
-        const replaces = Object.fromEntries((["binary", "client", "unit"] as const).filter((name) => values[name] === "differs").map((name) => [name, values[`${name}_sha`]]));
-        if (!Object.keys(replaces).length) throw new MachineServiceError("Nothing installed differs from this plan any more.", 409, "nothing-to-replace");
         const build = this.#buildHelper(access.plan.helper.arch);
-        plan = buildHelperInstallPlan({ machine: identity(machine), build, replaces, now });
+        rebuild = (replaces) => buildHelperInstallPlan({ machine: identity(machine), build, ...(replaces ? { replaces } : {}), now });
       } else {
         const current = access.plan as DeployAccessPlan;
-        if (values.target !== "conflict" || !values.target_sha) throw new MachineServiceError("The target is not enrolled for other accounts any more.", 409, "nothing-to-replace");
         // Plans made before the keys were recorded still carry them in their script.
         const authorized = (name: string) => new RegExp(`readonly ${name}='command="[^"']*",restrict (ssh-ed25519 [A-Za-z0-9+/=]+) `).exec(current.script)?.[1];
         const infraPublicKey = current.publicKey ?? authorized("PSM_INFRA_AUTHORIZED");
         const releasePublicKey = current.release.publicKey ?? authorized("PSM_RELEASE_AUTHORIZED");
         if (!infraPublicKey || !releasePublicKey) throw new MachineServiceError("This plan's keys cannot be recovered. Remove it and plan the access again.", 409, "plan-outdated");
-        plan = buildDeployAccessPlan({
+        rebuild = (replaces) => buildDeployAccessPlan({
           machine: identity(machine), projectId: access.projectId, projectName: access.projectName, environmentId: access.environmentId, risk: current.risk,
           unitId: current.target.unitId, targetId: current.target.targetId, hostname: current.target.hostname, certbotEmail: current.target.certbotEmail,
           canonicalRoot: current.target.canonicalRoot, allowedRootPrefix: current.target.allowedRootPrefix,
-          infraPublicKey, releasePublicKey, replacesTarget: values.target_sha, now,
+          infraPublicKey, releasePublicKey, ...(replaces?.target ? { replacesTarget: replaces.target } : {}), now,
         });
+      }
+      const report = await this.#runScript(admin, rebuild(null).script, "--inspect");
+      const blocking = report.conflicts.filter((conflict) => !isReplaceableConflict(conflict));
+      if (blocking.length) throw new MachineServiceError(`Other problems need attention first: ${blocking.map(describeConflict).join("; ")}.`, 409, "conflict");
+      const values = report.values;
+      let plan: AccessPlan;
+      if (access.plan.role === "helper") {
+        const replaces = Object.fromEntries((["binary", "client", "unit"] as const).filter((name) => values[name] === "differs" && values[`${name}_sha`]).map((name) => [name, values[`${name}_sha`]]));
+        if (!Object.keys(replaces).length) throw new MachineServiceError("Nothing installed differs from this plan any more.", 409, "nothing-to-replace");
+        plan = rebuild(replaces);
+      } else {
+        if (values.target !== "conflict" || !values.target_sha) throw new MachineServiceError("The target is not enrolled for other accounts any more.", 409, "nothing-to-replace");
+        plan = rebuild({ target: values.target_sha });
       }
       return this.#store.updateAccess(access.id, access.revision, (value) => ({ ...value, plan, state: "planned", updatedAt: now }));
     });
