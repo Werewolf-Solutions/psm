@@ -1074,8 +1074,12 @@ export function buildCommand(
 ): { cmd: string; args: string[] } {
   const readOnly = sessionIdentity(s.name).role !== "agent";
   // read-only wins over full access: a planner is a planner whatever the
-  // project's setting says.
-  const sandbox = readOnly ? "read-only" : fullAccess ? "off" : "workspace-write";
+  // project's setting says. Sandbox-off exists only for workspace chat, and
+  // never with a multi-project scope: project and workroom agents run through
+  // the managed broker, and must not fall back to an unrestricted CLI if that
+  // broker is ever unavailable.
+  const unrestricted = fullAccess && s.name === WORKSPACE_NAME && s.extraDirs.length === 0;
+  const sandbox = readOnly ? "read-only" : unrestricted ? "off" : "workspace-write";
   const scope = writableRootArgs(s.extraDirs);
   const rules = [
     composeSystemRules(s.cwd),
@@ -1109,7 +1113,7 @@ export function buildCommand(
   args.push(...scope);
   args.push(
     "--permission-mode",
-    readOnly ? "plan" : fullAccess ? "bypassPermissions" : "acceptEdits",
+    readOnly ? "plan" : unrestricted ? "bypassPermissions" : "acceptEdits",
   );
   if (rules) args.push("--append-system-prompt", rules);
   if (s.sessionId) args.push("--resume", s.sessionId);

@@ -7,14 +7,26 @@
     { id: "git-remote", title: "Remote Git", description: "Fetch from and push to configured remotes." },
     { id: "execution", title: "Execution", description: "Run tests and install project packages." },
     { id: "integrations", title: "Integrations", description: "Use explicitly attached tools and services." },
+    { id: "machines", title: "Servers", description: "Run commands on connected servers as the project's own account." },
   ];
+  const STATUS_TEXT = {
+    ready: "Ready", "needs-review": "Asks you first", "needs-grant": "Needs a grant", "needs-connection": "Needs a connection",
+    "needs-runner": "Needs a runner", "provider-restricted": "Provider restricted", unsupported: "Not available",
+  };
+  const DURATIONS = [["standing", "Always"], ["1", "For 1 hour"], ["8", "For 8 hours"], ["24", "For 24 hours"], ["once", "Once"]];
+  const describeRule = (rule) => {
+    const scope = Object.entries(rule.scope || {}).filter(([key]) => key !== "operation" && key !== "task").map(([key, value]) => `${key.replace("Id", "")} ${value}`).join(", ");
+    const duration = rule.remainingUses !== null ? "once" : rule.expiresAt ? `until ${new Date(rule.expiresAt).toLocaleString()}` : rule.scope?.task ? "this task" : "always";
+    return `${rule.effect.toUpperCase()} ${rule.permission}${scope ? ` · ${scope}` : ""}${rule.scope?.operation ? " · one exact operation" : ""} · ${duration} · ${rule.source}`;
+  };
   const permissionCategory = (permission) => {
     if (permission.category) return permission.category;
     if (permission.id.startsWith("repo.")) return "repository";
     if (["git.fetch", "git.push"].includes(permission.id)) return "git-remote";
     if (permission.id.startsWith("git.")) return "git-local";
     if (["test.run", "pkg.install"].includes(permission.id)) return "execution";
-    if (permission.id === "mcp.use") return "integrations";
+    if (permission.id.startsWith("mcp.")) return "integrations";
+    if (permission.id.startsWith("machine.")) return "machines";
     return "other";
   };
   const node = (tag, text, className = "") => {
@@ -33,7 +45,7 @@
     const generation = (generations.get(container) || 0) + 1;
     generations.set(container, generation);
     const current = () => generations.get(container) === generation;
-    container.replaceChildren(node("h2", "Agent permissions"), node("p", "Project and workroom sessions use these grants. Missing grants deny access. Workspace chat and operator terminals retain their own permissions.", "cap-section-description"));
+    container.replaceChildren(node("h2", "Agent permissions"), node("p", "Project and workroom agents can do only what is allowed here, through PSM's tools. Anything not allowed is denied. Workspace chat and your own terminals have their own, separate access.", "cap-section-description"));
     connections.replaceChildren(node("h2", "Deployment connections"));
     if (!project?.id) {
       container.append(node("p", "This project has no registered identity. Set up the project before granting permissions."));
@@ -84,21 +96,75 @@
         return button;
       };
 
-      const summary = node("div", "", "permission-summary");
-      const summaryCopy = node("div", "");
-      summaryCopy.append(
-        node("h3", "Managed agent access"),
-        node("p", "Claude and Codex receive only the operations granted here. Grant full access enables every supported repository, Git, execution, and integration operation.", "cap-section-description"),
-      );
-      const summaryActions = node("div", "", "permission-actions");
-      const missing = supported.filter((permission) => !data.grants[permission.id]?.granted).map((permission) => permission.id);
+      const post = async (path, body, method = "POST") => {
+        if (pending || !current()) return;
+        pending = true;
+        list.querySelectorAll("button, select, input").forEach((item) => { item.disabled = true; });
+        try {
+          const updated = await request(api, `${base}${path}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, revision: data.revision }) });
+          if (current()) { status.textContent = "Saved."; show(updated.permissions || updated); loadAccess(); }
+        } catch (error) { if (current()) status.textContent = error.message; }
+        finally { pending = false; }
+      };
+
+      const summary = node("section", "", "permission-presets");
+      summary.append(node("h3", "Access presets"), node("p", "One action sets everything below to the preset. You can still change individual grants and rules afterwards.", "cap-section-description"));
+      const lastPreset = [...(data.history || [])].find((event) => String(event.permission).startsWith("preset:"));
+      const presetGrid = node("div", "", "permission-preset-grid");
+      for (const preset of data.presets || []) {
+        const card = node("article", "", "permission-preset");
+        const active = lastPreset?.permission === `preset:${preset.id}@${preset.version}`;
+        card.append(node("h4", `${preset.title}${active ? " · applied" : ""}`), node("p", preset.summary));
+        const limits = node("details", "");
+        limits.append(node("summary", "What it cannot do"));
+        const ul = node("ul", "");
+        for (const limit of preset.limits) ul.append(node("li", limit));
+        limits.append(ul);
+        const apply = node("button", active ? "Apply again" : `Apply ${preset.title}`, preset.id === "full" ? "btn" : "btn btn-primary");
+        apply.type = "button";
+        apply.onclick = () => {
+          const lines = [`${preset.title} for ${project.name}:`, preset.summary, "", "Allows: " + preset.grants.join(", "), ...(preset.rules || []).map((rule) => `${rule.effect.toUpperCase()} ${rule.permission}${rule.scope?.environmentId ? ` in ${rule.scope.environmentId}` : ""}`), "", "Replaces this project's current grants and rules. Running agent turns stop."];
+          if (window.confirm(lines.join("\n"))) post("/agent-permissions/preset", { preset: preset.id });
+        };
+        card.append(limits, apply);
+        presetGrid.append(card);
+      }
       const granted = supported.filter((permission) => data.grants[permission.id]?.granted).map((permission) => permission.id);
-      summaryActions.append(
-        action("Grant full access", missing, true, "use every supported managed operation", true, currentCatalog),
-        action("Revoke all", granted, false, "revoke every managed operation", false, currentCatalog),
-      );
-      summary.append(summaryCopy, summaryActions);
+      const revokeAll = action("Revoke all grants", granted, false, "revoke every managed operation", false, currentCatalog);
+      summary.append(presetGrid, revokeAll);
       list.append(summary);
+
+      const rules = node("section", "", "permission-rules");
+      rules.append(node("h3", "Rules"), node("p", "Rules narrow or widen single operations: Allow, Ask (you review each use) or Deny, for an environment, for a while, or once. The most specific rule wins; Deny beats Ask beats Allow.", "cap-section-description"));
+      for (const rule of data.rules || []) {
+        const row = node("article", "", "permission-row");
+        row.append(node("p", describeRule(rule)));
+        const remove = node("button", "Remove", "btn"); remove.type = "button";
+        remove.onclick = () => post(`/agent-permissions/rules/${encodeURIComponent(rule.id)}`, {}, "DELETE");
+        row.append(remove);
+        rules.append(row);
+      }
+      if (!(data.rules || []).length) rules.append(node("p", "No rules. Only the grants below apply."));
+      for (const rule of data.workspaceRules || []) if (rule.effect === "deny") rules.append(node("p", `Workspace: ${describeRule(rule)}`, "cap-badge"));
+      const form = node("form", "", "permission-rule-form");
+      const select = (options, label) => { const element = document.createElement("select"); element.setAttribute("aria-label", label); for (const [value, text] of options) { const option = document.createElement("option"); option.value = value; option.textContent = text; element.append(option); } return element; };
+      const permissionSelect = select(supported.map((permission) => [permission.id, `${permission.title} (${permission.id})`]), "Operation");
+      const effectSelect = select([["allow", "Allow"], ["ask", "Ask me"], ["deny", "Deny"]], "Effect");
+      const environment = document.createElement("input"); environment.placeholder = "environment (optional)"; environment.setAttribute("aria-label", "Environment");
+      const duration = select(DURATIONS, "Duration");
+      const add = node("button", "Add rule", "btn"); add.type = "submit";
+      form.append(permissionSelect, effectSelect, environment, duration, add);
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        const chosen = duration.value;
+        post("/agent-permissions/rules", {
+          permission: permissionSelect.value, effect: effectSelect.value,
+          scope: environment.value.trim() ? { environmentId: environment.value.trim() } : {},
+          duration: chosen === "standing" ? { kind: "standing" } : chosen === "once" ? { kind: "once" } : { kind: "until", expiresAt: Date.now() + Number(chosen) * 3_600_000 },
+        });
+      };
+      rules.append(form);
+      list.append(rules);
       if (!currentCatalog) list.append(node("p", "PSM is still running the previous permission service. Individual grants remain available; restart PSM to load the complete Git list and category-wide grants.", "permission-status"));
 
       for (const category of categories) {
@@ -136,7 +202,10 @@
       }
       const audit = node("details", "", "permission-audit");
       audit.append(node("summary", "Permission history"));
-      for (const event of data.history) audit.append(node("p", `${new Date(event.at).toLocaleString()} · ${event.actor} · ${event.granted ? "granted" : "revoked"} ${event.permission} · revision ${event.revision}`));
+      for (const event of data.history) {
+        const what = String(event.permission).includes(":") ? event.permission : `${event.granted ? "granted" : "revoked"} ${event.permission}`;
+        audit.append(node("p", `${new Date(event.at).toLocaleString()} · ${event.actor} · ${what} · revision ${event.revision}`));
+      }
       if (!data.history.length) audit.append(node("p", "No permission changes recorded."));
       list.append(audit);
       container.append(list);
@@ -182,6 +251,57 @@
       const manage = node("button", "Open deployment setup", "btn");
       manage.type = "button"; manage.onclick = onDeploy; connections.append(manage);
     }).catch((error) => { if (current()) connections.append(node("p", error.message)); });
+    const accessSection = node("section", "", "permission-access");
+    container.insertBefore(accessSection, loading);
+    const loadAccess = async () => {
+      try {
+        const data = await request(api, `${base}/agent-access`);
+        if (!current()) return;
+        accessSection.replaceChildren(node("h3", "What agents can do now"), node("p", `As ${data.engine} sees it. Each gap names what would change it.`, "cap-section-description"));
+        const table = node("div", "", "permission-access-list");
+        for (const item of data.items) {
+          const row = node("article", "", `permission-row access-${item.status}`);
+          const copy = node("div", "");
+          copy.append(node("h4", item.title), node("p", item.detail));
+          if (item.action) copy.append(node("small", item.action));
+          row.append(copy, node("span", STATUS_TEXT[item.status] || item.status, "cap-badge"));
+          table.append(row);
+        }
+        accessSection.append(table);
+      } catch (error) { if (current()) accessSection.replaceChildren(node("p", error.message)); }
+    };
+    const operationSection = node("section", "", "permission-operation-reviews");
+    container.append(operationSection);
+    const loadOperationReviews = async () => {
+      try {
+        const data = await request(api, `${base}/agent-reviews`);
+        if (!current()) return;
+        operationSection.replaceChildren(node("h3", "Operations waiting for you"));
+        const pendingReviews = data.reviews.filter((review) => review.state === "pending");
+        if (!pendingReviews.length) operationSection.append(node("p", "Nothing is waiting. When a rule says Ask, the agent's request appears here."));
+        for (const review of data.reviews.slice(0, 20)) {
+          const row = node("article", "", "permission-row");
+          const detail = node("div", "");
+          detail.append(node("h4", review.permission), node("pre", review.summary), node("small", `${review.state}${review.answer ? ` · ${review.answer}` : ""}${review.actor ? ` · ${review.actor}` : ""} · ${new Date(review.createdAt).toLocaleString()}`));
+          row.append(detail);
+          if (review.state === "pending") {
+            for (const [answer, label] of [["once", "Allow once"], ["task", "Allow for this task"], ["standing", "Always allow"], ["reject", "Reject"]]) {
+              if (answer === "task" && !review.task) continue;
+              const button = node("button", label, answer === "once" ? "btn btn-primary" : "btn"); button.type = "button";
+              button.onclick = async () => {
+                if (answer === "standing" && !window.confirm(`Always allow ${review.permission}${review.context?.environmentId ? ` in ${review.context.environmentId}` : ""} for ${project.name}? Future requests of this kind will not ask.`)) return;
+                row.querySelectorAll("button").forEach((item) => { item.disabled = true; });
+                try { await request(api, `${base}/agent-reviews/${encodeURIComponent(review.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer }) }); status.textContent = answer === "reject" ? "Rejected." : "Approved. The agent can retry now."; }
+                catch (error) { status.textContent = error.message; }
+                await Promise.all([loadOperationReviews(), loadAccess()]);
+              };
+              row.append(button);
+            }
+          }
+          operationSection.append(row);
+        }
+      } catch (error) { if (current()) operationSection.replaceChildren(node("p", error.message)); }
+    };
     const toolSection = node("section", "", "permission-tool-reviews");
     container.append(toolSection);
     const loadReviews = async () => {
@@ -197,12 +317,12 @@
           detail.append(node("h4", `${call.capability} · ${call.tool}`), node("pre", JSON.stringify(call.arguments, null, 2)), node("p", `${call.state}${call.actor ? ` · ${call.actor}` : ""}`));
           row.append(detail);
           if (call.state === "pending" && call.expiresAt > Date.now()) {
-            for (const approve of [true, false]) {
-              const button = node("button", approve ? "Approve call" : "Reject", "btn");
+            for (const [approve, always, label] of [[true, false, "Approve call"], [true, true, "Always allow this tool"], [false, false, "Reject"]]) {
+              const button = node("button", label, "btn");
               button.onclick = async () => {
-                if (approve && !window.confirm(`Run ${call.tool} through ${call.capability} with the displayed arguments? This may change an external service.`)) return;
+                if (approve && !window.confirm(always ? `Run ${call.tool} now, and let future ${call.tool} calls through ${call.capability} run without review?` : `Run ${call.tool} through ${call.capability} with the displayed arguments? This may change an external service.`)) return;
                 row.querySelectorAll("button").forEach((button) => { button.disabled = true; });
-                try { await request(api, `${base}/agent-tool-requests/${encodeURIComponent(call.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: call.digest, approve }) }); }
+                try { await request(api, `${base}/agent-tool-requests/${encodeURIComponent(call.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: call.digest, approve, always }) }); }
                 catch (error) { status.textContent = error.message; }
                 await loadReviews();
               };
@@ -213,7 +333,7 @@
         }
       } catch (error) { if (current()) toolSection.replaceChildren(node("p", error.message)); }
     };
-    await Promise.all([permissions, connectionTask, loadReviews()]);
+    await Promise.all([permissions, connectionTask, loadReviews(), loadOperationReviews(), loadAccess()]);
   }
   window.PsmAgentPermissions = { render };
 })();

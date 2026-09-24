@@ -3927,7 +3927,7 @@ function syncAiControls() {
     const managed = WS.name !== "__workspace__";
     $(set.full).checked = managed ? false : WS.fullAccess;
     $(set.full).disabled = managed;
-    $(set.full).closest("label").title = managed ? "Access is controlled by project grants in Capabilities → Agent permissions." : "Workspace chat uses its separate access setting.";
+    $(set.full).closest("label").title = managed ? "Project and workroom agents use Capabilities → Agent permissions, never an unrestricted sandbox." : "Workspace chat only: run the AI with its sandbox off. It can run any command as you, on every project and file you can reach.";
   }
   renderScopeChip();
   renderAiModel();
@@ -4007,6 +4007,11 @@ function applyEffort(effort) {
 }
 
 function applyFullAccess(fullAccess) {
+  // Sandbox-off is a machine-wide grant, so turning it on is a deliberate act.
+  if (fullAccess && !WS.fullAccess && !window.confirm("Run workspace chat unrestricted?\n\nThe AI's sandbox is turned off: it can run any command as you, read and change any file you can, on every project. Project and workroom agents are unaffected; they use Agent permissions.")) {
+    for (const node of aiControlNodes("full")) node.checked = false;
+    return;
+  }
   WS.fullAccess = fullAccess;
   for (const node of aiControlNodes("full")) node.checked = fullAccess;
   rememberAiChoice({ fullAccess: WS.fullAccess }); // remember per project

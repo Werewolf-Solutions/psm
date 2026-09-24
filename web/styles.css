@@ -1861,6 +1861,20 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .permission-connection { padding: 16px 0; border-bottom: 1px solid var(--line); }
 .permission-cause { margin-top: 12px; padding: 12px; background: var(--bg-soft); border-radius: 6px; }
 .permission-cause pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.permission-access, .permission-presets, .permission-rules, .permission-operation-reviews { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+.permission-access h3, .permission-presets h3, .permission-rules h3, .permission-operation-reviews h3 { margin: 0 0 5px; }
+.permission-access .access-ready .cap-badge { color: var(--st-active, var(--accent)); }
+.permission-access .access-needs-grant .cap-badge, .permission-access .access-needs-connection .cap-badge, .permission-access .access-needs-runner .cap-badge { color: var(--st-blocked, var(--text)); }
+.permission-access .access-unsupported { opacity: 0.7; }
+.permission-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin: 12px 0; }
+.permission-preset { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-soft); }
+.permission-preset h4, .permission-preset p { margin: 0; }
+.permission-preset p, .permission-preset details { color: var(--muted); font-size: 13px; }
+.permission-preset ul { margin: 6px 0 0; padding-left: 18px; }
+.permission-preset .btn { align-self: flex-start; margin-top: auto; }
+.permission-rule-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.permission-rule-form select, .permission-rule-form input { min-width: 0; max-width: 100%; }
+.permission-operation-reviews pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; margin: 0 0 6px; }
 @media (max-width: 640px) {
   .permission-summary, .permission-category-head, .permission-row { align-items: flex-start; flex-wrap: wrap; }
   .permission-summary > div, .permission-category-head > div, .permission-row > div { flex-basis: 100%; }

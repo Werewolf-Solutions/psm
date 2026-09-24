@@ -25,6 +25,7 @@ const {
   limitAppliesTo,
   limitWindowLabel,
   writableRootArgs,
+  WORKSPACE_NAME,
 } = await import("./ai.ts");
 type TurnSpec = Parameters<typeof buildCommand>[0];
 
@@ -255,12 +256,20 @@ test("a planner may read the other repository but not write anywhere", () => {
   assert.ok(args.includes("--add-dir"), "it still has to be able to read the other side");
 });
 
-test("full access and a wider scope do not appear together by accident", () => {
-  const { args } = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", true);
-  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
-  // Nothing stops this today; the guard is that a Workroom will not offer full
-  // access at all. Asserted so that changing it is a decision, not a drift.
-  assert.ok(args.includes("--add-dir"));
+test("sandbox-off is only ever workspace chat, and never with a wider scope", () => {
+  // Decided 2026-09-24 (P02): project and workroom agents never run unrestricted,
+  // even if the managed broker were unavailable and the CLI path were reached.
+  const wide = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", true);
+  assert.equal(wide.args[wide.args.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.ok(wide.args.includes("--add-dir"));
+  const project = buildCommand(spec(), "go", true);
+  assert.equal(project.args[project.args.indexOf("--permission-mode") + 1], "acceptEdits");
+  const codexRoom = buildCommand(spec({ engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
+  assert.ok(!codexRoom.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  const workspace = buildCommand(spec({ name: WORKSPACE_NAME }), "go", true);
+  assert.equal(workspace.args[workspace.args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  const workspaceWide = buildCommand(spec({ name: WORKSPACE_NAME, engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
+  assert.ok(!workspaceWide.args.includes("--dangerously-bypass-approvals-and-sandbox"));
 });
 
 test("the scope the AI is told matches the scope it is given", () => {

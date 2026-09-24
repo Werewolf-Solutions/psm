@@ -4,9 +4,10 @@ import { RepositoryTools } from "./agent-repository-tools.ts";
 import os from "node:os";
 import { databaseFile, db } from "./db.ts";
 import { taskKey } from "./agent-policy.ts";
+import { configuredRemotes, explainAccess, taskRunnerStatus } from "./agent-access.ts";
 import { OperationReviews } from "./agent-reviews.ts";
 import { MachineCommands } from "./machines/commands.ts";
-import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject } from "./agent-permissions.ts";
+import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
 import express from "express";
 import type { Request, Response } from "express";
 import fs from "node:fs";
@@ -2201,7 +2202,24 @@ configureManagedAgents((scope) => {
   // An attached executable provider cannot also be edited by this managed turn.
   const attachedRefs = new Set(projects.filter((project) => snapshots.some((snapshot) => snapshot.project.id === project.id)).flatMap((project) => project.attachments.map((attachment) => attachment.capabilityRef)));
   const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
-  return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+  return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, explain: (snapshot: PermissionSnapshot) => projectAccess(snapshot, scope.engine), projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
+});
+/** The access explanation for one project, as the operator and the agent both see it. */
+async function projectAccess(snapshot: PermissionSnapshot, engine: string) {
+  const project = getProjects().find((entry) => entry.id === snapshot.project.id);
+  return explainAccess({
+    snapshot, store: agentPermissions, engine,
+    remotes: configuredRemotes(snapshot.project.path),
+    runner: await taskRunnerStatus(),
+    attachedTools: (project?.attachments ?? []).filter((attachment) => currentCatalog().some((capability) => capability.ref === attachment.capabilityRef && capability.kind === "mcp")).length,
+    servers: machineCommands?.environments(snapshot.project.id) ?? [],
+  });
+}
+local.get("/api/projects/:id/agent-access", async (req, res) => {
+  try {
+    const engine = String(req.query.engine || "claude");
+    res.json({ engine, items: await projectAccess(agentPermissions.snapshot(permissionProject(req.params.id)), engine) });
+  } catch (error) { res.status(400).json({ error: (error as Error).message }); }
 });
 local.use(agentPermissionRouter({
   store: agentPermissions, mcp: managedMcp, reviews: operationReviews, project: permissionProject,

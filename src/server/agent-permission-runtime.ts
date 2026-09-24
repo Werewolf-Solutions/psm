@@ -19,6 +19,8 @@ export interface ManagedAgentPolicy {
   reviews?: OperationReviews;
   /** Commands on servers connected to the scoped projects. */
   machines?: MachineCommands;
+  /** What the agent can do per project, and why not; the same answer the operator sees. */
+  explain?: (snapshot: PermissionSnapshot) => Promise<unknown>;
 }
 export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController): Options {
   return {
@@ -75,6 +77,9 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       tool("server_environments", "List servers connected to a project, by environment, with the unprivileged account and directory commands run as.", { project }, ({ project }) => invoke(project, () => policy.machines!.environments(project))),
       tool("server_command", "Run one shell command on a project's connected server for an environment, as that environment's own command account (no sudo, its own working directory). May need operator review.", { project, environment: z.string(), command: z.string(), timeoutSeconds: z.number().int().min(5).max(600).optional() }, ({ project, environment, command, timeoutSeconds }) => invoke(project, (repo) => policy.machines!.run({ snapshot: repo.snapshot, permissions: input.policy.store, environmentId: environment, command, timeoutSeconds, signal: input.signal.signal }))),
     ] : []),
+    ...(policy.explain ? [
+      tool("access_status", "Explain what you can and cannot do in a project right now, and for each gap whether it needs a grant, a review, a connection or a runner, or is unsupported. Check this before telling the operator something is impossible.", { project }, ({ project }) => invoke(project, (repo) => policy.explain!(repo.snapshot))),
+    ] : []),
     tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
     tool("install_packages", "Install the public npm lockfile into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project }, ({ project }) => invoke(project, () => tasks.get(project)!.install())),
     tool("files", "List ordinary project files.", { project }, ({ project }) => invoke(project, (repo) => repo.list())),
@@ -105,7 +110,7 @@ export async function runManagedAgent(input: {
 }): Promise<void> {
   const server = createManagedRepositoryServer(input.policy, input.signal);
   const scope = input.policy.snapshots.map(({ project, grants }) => `${project.name}: ${project.id}; grants: ${Object.entries(grants).filter(([, value]) => value?.granted).map(([name]) => name).join(", ") || "none"}`).join("\n");
-  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nUse the PSM tools. Grants are enforced outside the conversation. Ask the operator with the PSM question marker if a required operation is unavailable.`;
+  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nUse the PSM tools. Grants are enforced outside the conversation. When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.`;
   if (input.engine === "codex") return runCodexManaged({ ...input, server, context });
   const stream = query({
     // SDK MCP servers require streaming input, including for a single user turn.
