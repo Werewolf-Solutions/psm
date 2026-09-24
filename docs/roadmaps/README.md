@@ -9,7 +9,7 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P06 — Close existing app/workspace release defects** (P00–P02, P04, P05 verified locally; P03 live hosted acceptance blocked) |
+| Next phase | **P07 — First complete hosted-to-staging deployment** (P00–P02, P04–P06 verified locally; P03 live hosted acceptance blocked) |
 | Execution state | In progress on branch `opus-delivery-20260923-155753` in the isolated delivery workspace `.psm-data/opus-delivery-20260923-155753/workspace/psm`. Nothing pushed or deployed. |
 | Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
@@ -63,8 +63,8 @@ local to those documents; they are not additional competing sequences.
 | **P03 · blocked (live)** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
 | **P04 · verified (local)** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
 | **P05 · verified (local)** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
-| **P06 · in progress** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
-| **P07 · pending** | First complete hosted-to-staging deployment | P04–P06 | Adopt/verify the selected host roles, resolve enrollment/controller/App/credential prerequisites through the product flows, publish the intended source, build off-host and deploy through the managed engine. Verify DNS/TLS, exact served version, staging login/workspaces and rollback. Laptop disconnected. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
+| **P06 · verified (code); staging rollout needs approval** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
+| **P07 · in progress** | First complete hosted-to-staging deployment | P04–P06 | Adopt/verify the selected host roles, resolve enrollment/controller/App/credential prerequisites through the product flows, publish the intended source, build off-host and deploy through the managed engine. Verify DNS/TLS, exact served version, staging login/workspaces and rollback. Laptop disconnected. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
 | **P08 · pending** | General application deployment and operations | P07 | Frontend + API + worker + database recipes, configuration, migrations, diagnostics, restart/scale, backups and recovery work for a representative app. Typed integrations plus custom API/MCP/CLI adapters cover extensibility. [Application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
 | **P09 · pending** | Unattended maintenance and SaaS operations | P08 | Scheduled/monitor-triggered tasks honor standing grants, recover from interruption, avoid duplicate external mutations, and expose usage/retention limits. Prove restore and credential rotation; optional local/user-hosted runners share the protocol. [Runner requirements](agent-access-and-operations.md#runners-and-saas-operation), [machine lifecycle](machine-onboarding.md#ongoing-machine-management). |
 | **P10 · pending** | Complete project governance and agent usage visibility | P05, P09 | Audit the older governance plan against current rules/profile/skills features, then complete only missing applicability/readiness UI, rule provenance and actually observable usage reporting. No duplicate rules system or incompatible metadata migration. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
@@ -425,4 +425,32 @@ Verification (2026-09-24): npm test 610 pass, 0 fail; PSM_RUNNER_DOCKER=1 sandbo
   completed, passed a hidden check, committed; managed $0.051 vs direct $0.143.
 Not done: a real headless browser (preview_check fetches pages; no rendering or JS);
   Codex resumes still replay (its app-server threads are ephemeral here).
+```
+
+### 2026-09-24 — P06 app/workspace release defects
+
+```text
+Phase / step: P06
+State: code verified; deploying the fixed apps to staging needs explicit approval
+  (the shared droplet's dapp process handles live Stripe).
+Changed repositories (delivery branch opus-delivery-20260923-155753, not pushed):
+  werewolf-dapp e4c267a — fenced todo transfer locks: a stalled run whose lock was
+    taken over stops with 409 instead of overwriting the new run; release/fail act
+    only on the attempt's own token. New integration test failed before the fix
+    (stalled run answered 200). Full server suite: 688/688 (disposable mongo:7 with
+    --ulimit nofile=64000; the default limit made Mongo die mid-suite).
+  todo-app cc46a47, 89f5b8a — viewers get no write controls (add, edit, status,
+    archive, delete, drag, draft/suggest, periods, objectives, key results, vision,
+    notes). Tests 11/11, production build ok.
+Re-verified, not re-done: PSM sign-in contract (web client with redirect URIs,
+  billing bootstrap no longer rewrites it; psm sends a checked callback/Origin).
+Browser evidence (2026-09-24): local dapp (:3100, throwaway Mongo, no .env) + todo
+  dev client (:5200); disposable users; carol signed in through the real PKCE
+  authorize/exchange; as viewer of Acme A she saw alice's task, objective, key
+  result and shared note with no write controls; as member of Beta B she drafted a
+  week and got the seven add inputs.
+Left untouched: uncommitted work already in those copies (dapp 0.5.5 bump and
+  migrate-script docs; todo .psm/deployments.json retainReleases 3 -> 5).
+Blocked (exact): deploying werewolf-dapp to staging.werewolf.solutions and Todo to
+  staging — needs approval for the shared host; staging still serves dapp 0.5.1.
 ```
