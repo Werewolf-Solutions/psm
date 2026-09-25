@@ -35,6 +35,7 @@ import type { Attachment, Capability, Override, Project } from "../types.ts";
 import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, transcript, type ProcKind } from "./procs.ts";
 import {
   activeSessions,
+  pendingQuestions,
   configureManagedAgents,
   stopProjectAgents,
   aiLimit,
@@ -1276,7 +1277,12 @@ function workingItems() {
 
 // projects currently being worked on — live AI, running process, or manual mark
 local.get("/api/sessions", (_req, res) => {
-  res.json({ sessions: workingItems() });
+  const projects = new Set(getProjects().map((project) => project.name));
+  const rooms = new Map(openWorkrooms().map((room) => [room.id, room.title]));
+  const questions = pendingQuestions()
+    .filter((entry) => entry.roomId ? rooms.has(entry.roomId) : entry.project === WORKSPACE_NAME || projects.has(entry.project))
+    .map((entry) => ({ ...entry, label: entry.roomId ? rooms.get(entry.roomId) : entry.project === WORKSPACE_NAME ? "Workspace chat" : entry.project }));
+  res.json({ sessions: workingItems(), questions });
 });
 
 // Leave the Working on lane completely: clear the human mark and stop live work.
@@ -2290,7 +2296,7 @@ const deploymentPreparation = new DeploymentPreparationController({
       } catch { return null; }
     },
     useAi: (roomId, ai) => { workSessions.setEngine(roomId, ai); },
-    send: (roomId, message) => {
+    send: (roomId, message, preparation) => {
       const conversation = workroomConversation(roomId);
       const result = aiSend(
         conversation.name,
@@ -2302,6 +2308,7 @@ const deploymentPreparation = new DeploymentPreparationController({
         false, // a preparation room is never handed the sandbox-off flag
         conversation.extraContext,
         conversation.extraDirs,
+        preparation,
       );
       if (result.ok) conversation.onTurn?.();
       return result;

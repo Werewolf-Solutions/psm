@@ -26,6 +26,14 @@ export interface PreparationAi {
   effort?: string | null;
 }
 
+export interface PreparationTurn {
+  jobId: string;
+  environmentId: string;
+  purpose: "repair" | "diagnose-external";
+  attempt: number;
+  maximumAttempts: number;
+}
+
 export interface RepairSessionHost {
   /** Opens a workroom scoped to one project and returns its id. */
   open(input: { projectId: string; environmentId: string; title: string; objective: string; ai: PreparationAi }): string;
@@ -34,7 +42,7 @@ export interface RepairSessionHost {
   /** Points an existing room at a different AI. Switching engines starts a fresh thread. */
   useAi(roomId: string, ai: PreparationAi): void;
   /** Sends one turn. `question` means the room is already waiting on the operator. */
-  send(roomId: string, message: string): { ok: boolean; error?: string; question?: boolean; limited?: boolean };
+  send(roomId: string, message: string, preparation: PreparationTurn): { ok: boolean; error?: string; question?: boolean; limited?: boolean };
   state(roomId: string): { busy: boolean; question: boolean };
   stop(roomId: string): void;
 }
@@ -72,7 +80,7 @@ export function repairBrief(job: PreparationJob, checked: ReadinessResult, purpo
     );
     return lines.join("\n");
   }
-  if (job.repairs > 1) lines.push("", `This is attempt ${job.repairs} of 3. Read what this room already tried before repeating it.`);
+  lines.push("", `This is attempt ${job.repairs} of 3 (a maximum, not a requirement). Read what this room already tried before repeating it.`);
   lines.push(
     "",
     "How to work here:",
@@ -80,6 +88,8 @@ export function repairBrief(job: PreparationJob, checked: ReadinessResult, purpo
     "- Do not read, write or invent deployment credentials or secrets, and do not run a deployment, a release build or an infrastructure change yourself. psm runs those, and the operator approves the exact plan first.",
     "- If a step needs a credential, a business decision or an approval, ask the operator a question instead of guessing. Preparation waits for the answer and resumes when you have it.",
     "- Stop the turn once the listed checks would pass, or once only the operator can act. psm rechecks readiness on its own and continues from there.",
+    "- A failed workflow alone does not establish a compiler error. Base a diagnosis on the failed step's output; distinguish missing diagnostics or runner limitations from a defect in the application.",
+    "- Preserve the existing build, test and typecheck gates. Do not propose removing a check just to make preparation pass, or commit diagnostic-only notes to trigger another build. If evidence is missing, name the missing evidence once and stop.",
   );
   return lines.join("\n");
 }
@@ -111,7 +121,10 @@ export class WorkroomPreparationRepairer implements PreparationRepairer {
     // An unanswered question is not a room to talk over: the operator is already
     // the blocker, and a second turn would bury what they were asked.
     if (this.host.state(roomId).question) return roomId;
-    const sent = this.host.send(roomId, repairBrief(job, checked, purpose));
+    const sent = this.host.send(roomId, repairBrief(job, checked, purpose), {
+      jobId: job.id, environmentId: job.environmentId, purpose,
+      attempt: job.repairs, maximumAttempts: 3,
+    });
     if (!sent.ok && !sent.question) {
       // Name the provider that refused. "You've hit your usage limit" with no
       // subject is unactionable when the fix is to choose the other one.

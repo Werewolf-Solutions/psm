@@ -9,6 +9,7 @@ import { AgentPermissionStore, PREPARATION_OPERATIONS, reviewAgentPermissions } 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "psm-permission-lifecycle-"));
 process.env.PSM_SESSIONS_FILE = path.join(root, "transcript.json");
 const ai = await import("./ai.ts");
+test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
 test("revocation aborts the managed turn, clears its queue and blocks resume before spawn", async (t) => {
   const database = openDatabase(":memory:");
@@ -25,7 +26,7 @@ test("revocation aborts the managed turn, clears its queue and blocks resume bef
     running.push(input.signal);
     await new Promise<void>((resolve) => input.signal.signal.addEventListener("abort", () => resolve(), { once: true }));
   });
-  t.after(() => { ai.stopSession("test"); ai.configureManagedAgents(null); database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { ai.stopSession("test"); ai.configureManagedAgents(null); database.close(); });
   const send = () => ai.send("test", root, "claude", null, null, "continue", true);
   assert.equal(send().ok, true);
   assert.equal(running.length, 1, "Full access cannot bypass the managed runner");
@@ -79,4 +80,27 @@ test("a managed Claude session resumes while its authority is unchanged, and res
   assert.equal(calls[4].resume, "session-4");
   assert.equal(calls[5].resume, null);
   assert.match(calls[5].context, /Recent conversation/);
+});
+
+test("preparation attempt metadata persists while the provider receives the full repair brief", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-preparation-turn-"));
+  const database = openDatabase(":memory:");
+  const store = new AgentPermissionStore(() => database);
+  const project = { id: "prj_preparation", name: "preparation", path: directory };
+  store.changeMany(project, ["repo.read"], true, 0, "operator");
+  const received: string[] = [];
+  ai.configureManagedAgents(() => ({ store, snapshots: [store.snapshot(project)], protectedRoots: [] }), async (input) => {
+    received.push(input.message);
+  });
+  t.after(() => { ai.stopSession("preparation"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  const preparation = { jobId: "prep-1", environmentId: "staging", purpose: "repair" as const, attempt: 2, maximumAttempts: 3 };
+  const message = "Full repair instructions and failing checks";
+  assert.equal(ai.send("preparation", directory, "claude", null, null, message, false, "", [], preparation).ok, true);
+  for (let i = 0; i < 50 && ai.aiState("preparation").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(received, [message]);
+  const saved = JSON.parse(fs.readFileSync(process.env.PSM_SESSIONS_FILE!, "utf8"));
+  const session = saved.sessions.preparation;
+  const event = session.log.find((entry: { text: string }) => entry.text === message);
+  assert.deepEqual(event.preparation, preparation);
+  assert.equal(event.role, "user", "the provider's conversation semantics are unchanged");
 });

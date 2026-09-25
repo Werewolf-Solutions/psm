@@ -81,6 +81,8 @@ export interface AiEvent {
   t: number;
   role: "user" | "assistant" | "system";
   text: string;
+  /** PSM-generated work, shown as a compact entry instead of an operator message. */
+  preparation?: import("./deploy/repair-sessions.ts").PreparationTurn;
 }
 
 export interface AiQuestionOption {
@@ -1036,6 +1038,23 @@ export function activeSessions() {
   return out.sort((a, b) => b.lastActive - a.lastActive);
 }
 
+/** Pending questions survive page/server reloads, including conversations with no open tab. */
+export function pendingQuestions() {
+  return [...sessions].flatMap(([name, session]) => {
+    if (!session.question) return [];
+    const identity = sessionIdentity(name);
+    const roomId = name.startsWith(WORK_PREFIX) ? name.slice(WORK_PREFIX.length) : null;
+    const project = roomId ? `work:${roomId}` : identity.project ?? (name === WORKSPACE_NAME ? WORKSPACE_NAME : null);
+    if (!project) return [];
+    return [{
+      project, roomId,
+      scope: identity.role === "agent" ? "ai" as const : "planner" as const,
+      role: identity.role === "agent" ? null : identity.role,
+      request: session.question,
+    }];
+  }).sort((a, b) => a.request.askedAt - b.request.askedAt);
+}
+
 /** Build the argv for one turn (no shell — args are passed literally). */
 export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
   const value = normalizeEffort(effort);
@@ -1347,6 +1366,7 @@ export function send(
   fullAccess: boolean,
   extraContext = "",
   extraDirs: string[] = [],
+  preparation?: AiEvent["preparation"],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   try { resolveManagedPolicy({ name, cwd, engine, model, effort, extraDirs, sessionId: null }); }
   catch (error) { return { ok: false, error: (error as Error).message }; }
@@ -1359,7 +1379,7 @@ export function send(
   if (limit?.hard) return { ok: false, limited: true, error: limit.message };
 
   // show the user's message in the transcript now, in the order it was sent
-  pushEvent(s, { t: Date.now(), role: "user", text: message });
+  pushEvent(s, { t: Date.now(), role: "user", text: message, ...(preparation ? { preparation } : {}) });
 
   if (s.busy) {
     // a turn is in flight — hold this one and run it when the current turn ends

@@ -20,6 +20,7 @@ function checked(items: { title: string; detail: string; status: string; action:
 function host(overrides: Partial<RepairSessionHost> = {}) {
   const opened: { ai: PreparationAi }[] = [];
   const sent: string[] = [];
+  const entries: Parameters<RepairSessionHost["send"]>[2][] = [];
   const stopped: string[] = [];
   const switches: PreparationAi[] = [];
   let waiting = false;
@@ -39,12 +40,12 @@ function host(overrides: Partial<RepairSessionHost> = {}) {
       };
       switches.push({ ...currentAi });
     },
-    send: (_room, message) => { sent.push(message); return { ok: true }; },
+    send: (_room, message, preparation) => { sent.push(message); entries.push(preparation); return { ok: true }; },
     state: () => ({ busy: sent.length > 0, question: waiting }),
     stop: (room) => { stopped.push(room); },
   };
   return {
-    host: { ...base, ...overrides }, opened, sent, stopped, switches,
+    host: { ...base, ...overrides }, opened, sent, entries, stopped, switches,
     waitFor: () => { waiting = true; },
     engine: () => currentAi.engine,
   };
@@ -71,6 +72,10 @@ test("the brief carries the last failure and says which attempt this is", async 
   );
   assert.match(kit.sent[0], /What failed last time: Build run run_7 ended failed\./);
   assert.match(kit.sent[0], /attempt 2 of 3/);
+  assert.deepEqual(kit.entries[0], { jobId: "prep_1", environmentId: "staging", purpose: "repair", attempt: 2, maximumAttempts: 3 });
+  assert.match(kit.sent[0], /maximum, not a requirement/);
+  assert.match(kit.sent[0], /failed workflow alone does not establish a compiler error/);
+  assert.match(kit.sent[0], /Preserve the existing build, test and typecheck gates/);
 });
 
 test("the brief withholds the credentials and the deploy button from the repair", async () => {

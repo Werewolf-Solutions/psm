@@ -94,6 +94,7 @@
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
         <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
         <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
+        <button id="questions-open" class="btn" title="Review pending questions from your sessions" aria-haspopup="dialog">Questions <span id="questions-count" class="questions-count" hidden>0</span></button>
         <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
         <button id="machines-open" class="btn" title="Servers your projects deploy to">🖥&nbsp;Machines</button>
         <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
@@ -413,6 +414,7 @@
           </div>
           <div class="ws-composer">
             <textarea id="ws-msg" rows="2" placeholder="Ask the project's AI to make a change…  (Enter to send, Shift+Enter for newline)"></textarea>
+            <button class="btn btn-primary" id="ws-question-answer" hidden>Review question</button>
             <button class="btn btn-primary" id="ws-send">Send</button>
             <button class="btn" id="ws-cancel" hidden>Stop</button>
           </div>
@@ -610,6 +612,18 @@
 
     <!-- shared modal backdrop -->
     <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+
+    <section class="modal modal-wide" id="questions-modal" role="dialog" aria-modal="true" aria-labelledby="questions-title" hidden>
+      <div class="modal-head">
+        <h2 id="questions-title">Questions</h2>
+        <button class="icon-btn" id="questions-close" aria-label="Close questions">✕</button>
+      </div>
+      <div class="modal-body questions-body">
+        <p class="questions-hint">Pending questions from your sessions. Open one when you’re ready; closing it leaves it here for later.</p>
+        <p id="questions-error" class="questions-error" role="status" hidden></p>
+        <div id="questions-list"></div>
+      </div>
+    </section>
 
     <!-- provider subscription usage -->
     <section class="modal modal-wide usage-modal" id="usage-modal" role="dialog" aria-modal="true" aria-labelledby="usage-title" hidden>

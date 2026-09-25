@@ -12,6 +12,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
   let busy = false;
   let question = false;
   let mutations = false;
+  let commit = "source-1";
   let repairs = 0;
   const repairPurposes: string[] = [];
   let builds = 0;
@@ -19,7 +20,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
   const cancellations: string[] = [];
   const runs: { runId: string; planId: string | null; runKind: string; terminal: boolean; state: string }[] = [];
   const service = {
-    checkReadiness: async () => ({ readiness: { items: outstanding, canMakeReady: canPrepare, ready: !outstanding.length }, plan: {}, environment: {} } as unknown as ReadinessResult),
+    checkReadiness: async () => ({ readiness: { items: outstanding, canMakeReady: canPrepare, ready: !outstanding.length }, plan: { id: Math.random() }, environment: { source: { commit } } } as unknown as ReadinessResult),
     createPlan: async () => ({ plan: { id: "infrastructure" } }),
     runView: (id: string) => runs.find((run) => run.runId === id),
     store: {
@@ -51,6 +52,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     current: () => repository.get("project", "staging")!,
     blockers: (actions: string[]) => { outstanding = actions.map((action) => ({ action, status: "blocked", detail: action })); },
     buildAvailable: (available: boolean) => { canPrepare = available; },
+    source: (value: string) => { commit = value; },
     worker: (state: { busy: boolean; question?: boolean }) => { busy = state.busy; question = state.question ?? false; },
     infrastructure: () => { mutations = true; },
     counts: () => ({ repairs, builds, stops }), repairPurposes,
@@ -112,10 +114,43 @@ test("a failed build enters repairs instead of reporting ready", async (t) => {
   assert.equal(h.counts().repairs, 1);
 });
 
-test("repair attempts are bounded and do not repeatedly launch unchanged work forever", async (t) => {
+test("unchanged repairs stop after one attempt without another prompt or build", async (t) => {
   const h = harness(); t.after(h.close);
   h.blockers(["review-source"]); h.start();
   for (let i = 0; i < 4; i++) { h.worker({ busy: false }); await h.advance(); }
+  assert.equal(h.counts().repairs, 1); assert.equal(h.current().state, "blocked");
+  assert.equal(h.current().blockedBy, "unchanged");
+  assert.match(h.current().message, /Stopped after repair attempt 1 of 3/);
+  assert.equal(h.counts().builds, 0);
+});
+
+test("an unrepaired failed build does not dispatch the identical source again", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+  Object.assign(h.runs[0], { terminal: true, state: "failed" });
+  await h.advance();
+  h.worker({ busy: false }); await h.advance();
+  assert.equal(h.current().blockedBy, "unchanged");
+  assert.deepEqual(h.counts(), { repairs: 1, builds: 1, stops: 0 });
+  // Providing evidence and explicitly resuming starts a labelled new cycle.
+  h.start(); await h.advance();
+  assert.equal(h.current().phase, "build");
+  assert.equal(h.counts().builds, 2);
+});
+
+test("a changed source can rebuild after repair even when checklist wording is unchanged", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+  Object.assign(h.runs[0], { terminal: true, state: "failed" });
+  await h.advance();
+  h.worker({ busy: false }); h.source("source-2"); await h.advance();
+  assert.equal(h.current().phase, "build"); assert.equal(h.counts().builds, 2);
+});
+
+test("repairs with changing source still stop at the three-attempt limit", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["review-source"]); h.start();
+  for (let i = 0; i < 4; i++) { h.source(`source-${i}`); h.worker({ busy: false }); await h.advance(); }
   assert.equal(h.counts().repairs, 3); assert.equal(h.current().state, "blocked");
 });
 

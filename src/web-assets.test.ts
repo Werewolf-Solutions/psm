@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { fileURLToPath } from "node:url";
 
 const WEB = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "web");
@@ -146,24 +147,15 @@ test("every workspace tab has a pane, and every pane a tab", () => {
   assert.ok(tabs.includes("notes"), "the Notes tab should exist");
   for (const tab of tabs) assert.ok(panes.includes(tab), `the ${tab} tab has no pane`);
 
-  // app.js gates the same names again; a rename has to happen in both places.
-  // There are two sets — the panes a workroom or the workspace chat may show,
-  // and the full list a project may — so take the widest and require it to hold
-  // every tab, and require the narrow one to be a subset of it rather than a
-  // separate list that could drift into naming a pane that does not exist.
+  // Navigation and stored preferences share one validator. Exercise it against
+  // the actual tabs so a rename cannot silently send a valid tab to the default.
   const app = read("app.js");
-  const sets = [...app.matchAll(/new Set\(\[((?:"[a-z]+",?\s*)+)\]\)/g)].map((m) =>
-    [...m[1].matchAll(/"([a-z]+)"/g)].map((entry) => entry[1]),
-  );
-  assert.ok(sets.length >= 2, "switchPane should still gate the panes by name");
-  const widest = sets.reduce((a, b) => (b.length > a.length ? b : a));
+  const context = vm.createContext({ localStorage: { getItem: () => null } });
+  vm.runInContext(app.slice(app.indexOf("const PANE_MEMORY_KEY ="), app.indexOf("function projectHash(")), context);
   for (const tab of tabs) {
-    assert.ok(widest.includes(tab), `switchPane would refuse the ${tab} tab`);
-  }
-  for (const set of sets) {
-    for (const pane of set) {
-      assert.ok(widest.includes(pane), `switchPane allows "${pane}", which is not a pane`);
-    }
+    assert.equal(context.selectedPane("project", "prj_test", tab), tab, `navigation would refuse ${tab}`);
+    assert.equal(context.selectedPane("work", "room", tab), ["ai", "session", "changes"].includes(tab) ? tab : "ai");
+    assert.equal(context.selectedPane("project", "__workspace__", tab), ["ai", "session"].includes(tab) ? tab : "ai");
   }
 });
 

@@ -283,8 +283,11 @@ Click **▶** on a card to open its cockpit:
   failure. An owner is only ever the project a manifest names — psm does not infer one from a URL.
 - **Session** — a read-only tab with the provider session id, model, effort, queue depth,
   current activity, and recent AI events for the project.
-- **Questions** — when an AI tool needs input, psm opens a structured answer popup.
-  Choose **Later** to keep it pending, then reopen it from Working on or Session.
+- **Questions** — the header lists pending questions across projects, workrooms,
+  workspace chat, planners and reviewers, with a count. New questions and page
+  reloads update the list without opening dialogs. Choose **Review question** to
+  answer; closing the dialog leaves it pending. A waiting chat also has a direct
+  **Review question** button beside its composer.
 - **Recap** — a "where we left off" summary shown on reopen.
 - **Subscription usage** — **Usage** appears only inside an opened project and reads only
   the provider selected by that project's engine/model controls. A shared engine/model cache
@@ -307,6 +310,12 @@ Click **▶** on a card to open its cockpit:
   recovery and rollback. Every one of the fifteen action kinds has an installed executor,
   across a root-owned [host helper](host-helper/), DigitalOcean DNS, a GitHub release
   controller and an external monitor.
+
+  **Prepare build / Make ready** shows each automated repair as an expandable PSM
+  entry in its session, labelled with its attempt number. Three attempts are a
+  ceiling: if a repair leaves the source revision and readiness checks unchanged,
+  preparation stops before another prompt or build. Supply the missing evidence
+  or access and resume explicitly; existing build and typecheck gates stay in place.
 
   **No executor has run against a real target yet.** The repository, droplet helper install
   and monitor those adapters talk to do not exist, so a managed plan stops at the point it
@@ -385,6 +394,9 @@ schemas/             the published JSON Schema for `.psm/deployments.json`
 
 Project pages are addressed by that id — `#/p/prj_…/logs`, not `#/p/<name>/logs` — so a bookmark
 survives a rename. Old name-addressed URLs still resolve and are rewritten to the id form.
+Each project and workroom remembers its selected tab in this browser. Switching
+to a preparation session and back therefore returns to Deploy; explicit links
+to another tab still take precedence, including after a page reload.
 
 ## PSM Cloud
 

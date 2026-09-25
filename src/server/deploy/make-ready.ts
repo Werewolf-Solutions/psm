@@ -1,6 +1,6 @@
 import { externalPreparationItems, externalPreparationMessage, repositoryRepairItems } from "./readiness.ts";
 import type { SourcePublicationController } from "./source-publication.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { db } from "../db.ts";
 import type { ArtifactPreparationController, DeploymentRunController } from "./api.ts";
@@ -22,11 +22,13 @@ export interface PreparationJob {
   /** This preparation has already asked its AI room to diagnose external blockers. */
   diagnosedExternal?: boolean;
   repairs: number;
+  /** Stable source/readiness before the repair; excludes plan ids and timestamps. */
+  repairBaseline?: string | null;
   runId: string | null;
   planId: string | null;
   publicationId?: string | null;
   /** Why a blocked job is blocked, when psm can tell on its own that the cause has gone. */
-  blockedBy?: "capabilities" | "checkout" | "external" | null;
+  blockedBy?: "capabilities" | "checkout" | "external" | "unchanged" | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -34,6 +36,16 @@ export interface PreparationJob {
   effort: string | null;
 }
 export type ReadinessResult = Awaited<ReturnType<DeploymentService["checkReadiness"]>>;
+
+function repairFingerprint(checked: ReadinessResult): string {
+  const items = checked.readiness.items.map(({ id, code, status, detail, action }) =>
+    ({ id, code, status, detail, action })).sort((a, b) => String(a.id ?? a.action).localeCompare(String(b.id ?? b.action)));
+  return createHash("sha256").update(JSON.stringify({
+    source: checked.environment.source ?? null,
+    canMakeReady: checked.readiness.canMakeReady,
+    items,
+  })).digest("hex");
+}
 export interface PreparationRepairer {
   start(job: PreparationJob, checked: ReadinessResult, purpose?: "repair" | "diagnose-external"): Promise<string>;
   status(roomId: string): { busy: boolean; question: boolean };
@@ -258,7 +270,7 @@ export class DeploymentPreparationController {
     const current = this.current(job.projectId, job.environmentId);
     return !this.stopped && !!current && current.id === job.id && preparationActive(current);
   }
-  private async repair(job: PreparationJob, checked: ReadinessResult): Promise<void> {
+  private async repair(job: PreparationJob, checked: ReadinessResult, baseline: string): Promise<void> {
     if (!this.live(job)) return;
     const permissionGap = this.options.reviewCapabilities?.(job.projectId, job.engine, job.workroomId);
     if (permissionGap) {
@@ -278,7 +290,8 @@ export class DeploymentPreparationController {
       this.save(job); return;
     }
     job.phase = "repair"; job.state = "running"; job.repairs++;
-    job.message = "Fixing deployment inputs and prerequisites in the preparation session…";
+    job.repairBaseline = baseline;
+    job.message = `Repair attempt ${job.repairs} of 3 — fixing deployment inputs in the preparation session…`;
     this.save(job);
     job.workroomId = await this.options.repairs.start(job, checked);
     job.waitingForRepair = true; job.failure = null; this.save(job);
@@ -291,14 +304,16 @@ export class DeploymentPreparationController {
       job.state = "blocked"; job.message = "Preparation paused after two hours. Review its session and resume when ready.";
       this.save(job); if (job.workroomId) this.options.repairs.stop(job.workroomId); return;
     }
+    let completedRepair = false;
     if (job.waitingForRepair && job.workroomId) {
       const state = this.options.repairs.status(job.workroomId);
       if (state.busy || state.question) {
         job.state = state.question ? "waiting-input" : "running";
-        job.message = state.question ? "Answer the question in the preparation session; preparation will continue automatically." : "Fixing deployment prerequisites…";
+        job.message = state.question ? "Answer the question in the preparation session; preparation will continue automatically." : job.repairBaseline ? `Repair attempt ${job.repairs} of 3 — working in the preparation session…` : "Diagnosing external deployment checks…";
         this.save(job); return;
       }
       job.waitingForRepair = false; job.state = "running";
+      completedRepair = !!job.repairBaseline;
     }
     const { service, preparer } = this.options;
     if (job.publicationId && this.options.publisher) {
@@ -324,6 +339,12 @@ export class DeploymentPreparationController {
     await this.options.repairConnections?.(projectId, environmentId);
     const checked = await service.checkReadiness(projectId, environmentId, { preparationAvailable: true });
     if (!this.live(job)) return;
+    if (completedRepair && job.repairBaseline === repairFingerprint(checked)) {
+      job.state = "blocked"; job.blockedBy = "unchanged";
+      job.message = `Stopped after repair attempt ${job.repairs} of 3: the source revision and readiness checks are unchanged. No automatic retry or build was started. Review the session for missing evidence or access, then resume when it is available.`;
+      this.save(job); return;
+    }
+    if (completedRepair) job.repairBaseline = null;
     const outstanding = checked.readiness.items.filter((item) => item.status !== "ready");
     const sourceItems = repositoryRepairItems(checked.readiness);
     const externalItems = externalPreparationItems(checked.readiness);
@@ -331,10 +352,11 @@ export class DeploymentPreparationController {
       // A mixed report may contain useful local work. Send only that work to the
       // single-project room; connection credentials and other projects stay out.
       const repairItems = sourceItems.length ? sourceItems : outstanding.filter((item) => item.action === "prepare-artifact");
-      await this.repair(job, { ...checked, readiness: { ...checked.readiness, items: repairItems } }); return;
+      await this.repair(job, { ...checked, readiness: { ...checked.readiness, items: repairItems } }, repairFingerprint(checked)); return;
     }
     if (externalItems.length || job.failure) {
       if (externalItems.length && !job.diagnosedExternal) {
+        job.repairBaseline = null;
         job.phase = "repair"; job.state = "running";
         job.message = "Asking the selected AI to diagnose the external deployment checks…";
         this.save(job);

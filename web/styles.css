@@ -710,6 +710,13 @@ body.ws-open .workspace { flex: 1 1 auto; border-top: 1px solid var(--line); }
   align-self: center; max-width: 92%; background: none; border: none; padding: 2px 8px;
   color: var(--faint); font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
+.ai-preparation {
+  align-self: stretch; max-width: 100%; padding: 8px 12px;
+  background: var(--bg-soft); border: 1px solid var(--line); color: var(--muted);
+  white-space: normal; font-size: 12px;
+}
+.ai-preparation summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.ai-preparation-brief { margin-top: 10px; white-space: pre-wrap; }
 .ws-composer { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--line); align-items: flex-end; }
 .ws-composer textarea {
   flex: 1; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
@@ -1381,6 +1388,17 @@ select[data-loading] { opacity: 0.55; font-style: italic; }
 
 /* ---- AI question dialog ---- */
 .question-backdrop { position: fixed; inset: 0; z-index: 130; background: rgba(0, 0, 0, .62); }
+.questions-count {
+  display: inline-block; min-width: 18px; padding: 1px 5px; margin-left: 3px;
+  border-radius: 9px; background: var(--accent); color: var(--accent-ink); font-size: 11px;
+}
+.questions-hint, .questions-meta, .questions-empty { color: var(--muted); }
+.questions-error { color: var(--warn, #d29922); }
+.questions-item { padding: 16px 0; border-top: 1px solid var(--line); }
+.questions-item h3 { margin: 0; font-size: 14px; }
+.questions-meta { margin: 5px 0; font-size: 12px; }
+.questions-preview { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.questions-body { overflow-y: auto; }
 .question-modal {
   z-index: 140; width: min(640px, 94vw); max-height: min(760px, 92vh);
   border-radius: 8px;

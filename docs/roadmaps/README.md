@@ -485,3 +485,34 @@ Remaining blockers (exact):
   4. Approve the first staging release (creates DNS, directory, nginx, certificate).
 Next action: re-run PSM_MACHINE_LXD=1 real-host test when the homelab is back.
 ```
+
+### 2026-09-24 — P07 preparation retry clarity
+
+Preparation repair turns now carry persisted attempt metadata and appear as
+compact, expandable PSM entries, including legacy saved briefs. An unchanged
+source revision and readiness report after a repair stops automatic prompts and
+builds; changed source can continue, with three repairs still the maximum per
+preparation. Repair instructions require failure evidence and preserve build and
+typecheck gates instead of suggesting their removal.
+
+Verified locally: TypeScript clean; 628 tests passed, 0 failed, 5 opt-in tests
+skipped. Includes session persistence/rendering and failed-build retry regressions.
+Version 0.3.4; changes are in the working tree, not published or deployed. The
+running PSM backend needs a restart to use the retry guard. P07 remains in
+progress: failed CI job output and nested-package sandbox installation remain
+diagnostic gaps; this change does not establish or fix Todo's build failure.
+
+### 2026-09-25 — Session questions inbox
+
+The header now lists pending questions across projects, workrooms, workspace
+chat, planners and reviewers. Polls, incoming questions and stream replay update
+the count without opening dialogs. Review is explicit; closing leaves a question
+pending, and a waiting chat has a direct Review question action. Workroom answers
+consistently use the room id rather than its display title.
+
+Verified locally: TypeScript clean; 634 tests passed, 0 failed, 5 opt-in tests
+skipped. An isolated Brave check using the real question UI and fixture sessions
+verified reload, explicit review, closing, draft preservation during polling,
+workroom answer routing and no automatic next dialog. Version 0.3.5 is in the
+working tree, not committed, published or deployed. Restart PSM and refresh the
+page to load the complete update. P07 and its build-diagnostic gaps remain open.

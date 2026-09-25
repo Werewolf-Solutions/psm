@@ -200,10 +200,16 @@ async function fetchRuntimeServices(force = false) {
 }
 
 // refresh the "Working on" lane; re-render only when it actually changed
+let sessionsFetchSequence = 0;
 async function fetchSessions(rerender = true) {
+  const sequence = ++sessionsFetchSequence;
+  const questionRevision = pendingQuestionRevision;
   try {
     const r = await agentApi("/api/sessions");
-    const sessions = (await r.json()).sessions || [];
+    if (!r.ok) throw new Error("Could not load sessions");
+    const data = await r.json();
+    if (sequence !== sessionsFetchSequence) return;
+    const sessions = data.sessions || [];
     const sig = JSON.stringify(
       sessions.map((s) => ({
         name: s.name,
@@ -229,11 +235,18 @@ async function fetchSessions(rerender = true) {
       })),
     );
     STATE.sessions = sessions;
-    syncPendingQuestions(sessions);
+    // A question arriving over SSE after this request started is newer than
+    // the poll. Never erase it (or reopen an answered one) with an old snapshot.
+    if (questionRevision === pendingQuestionRevision) syncPendingQuestions(sessions, data.questions);
+    $("#questions-error").hidden = true;
     if (rerender && sig !== STATE.sessionsSig) renderBoard();
     STATE.sessionsSig = sig;
     renderQuickSwitch();
-  } catch {}
+  } catch {
+    if (sequence !== sessionsFetchSequence) return;
+    $("#questions-error").textContent = "Could not refresh questions. Showing the last known list; it will retry automatically.";
+    $("#questions-error").hidden = false;
+  }
 }
 
 /**
@@ -245,12 +258,39 @@ function routeKey(project) {
   return project?.id || project?.name || "";
 }
 
-function projectHash(key, pane = "plan") {
+const PANE_MEMORY_KEY = "psm.selected-panes.v1";
+const PROJECT_PANES = ["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy"];
+const SELECTED_PANES = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANE_MEMORY_KEY) || "{}");
+    return new Map(Object.entries(saved).filter(([key, pane]) => /^(project|work):/.test(key) && PROJECT_PANES.includes(pane)).slice(-100));
+  } catch { return new Map(); }
+})();
+
+function selectedPane(kind, key, requested = null) {
+  const allowed = kind === "work" ? ["ai", "session", "changes"]
+    : key === "__workspace__" ? ["ai", "session"] : PROJECT_PANES;
+  const chosen = requested ?? SELECTED_PANES.get(`${kind}:${key}`);
+  return allowed.includes(chosen) ? chosen : allowed[0];
+}
+
+function rememberPane(kind, key, pane) {
+  if (!key) return;
+  const id = `${kind}:${key}`;
+  SELECTED_PANES.delete(id);
+  SELECTED_PANES.set(id, selectedPane(kind, key, pane));
+  while (SELECTED_PANES.size > 100) SELECTED_PANES.delete(SELECTED_PANES.keys().next().value);
+  try { localStorage.setItem(PANE_MEMORY_KEY, JSON.stringify(Object.fromEntries(SELECTED_PANES))); } catch { /* memory still works when storage is unavailable */ }
+}
+
+function projectHash(key, pane = null) {
+  pane = selectedPane("project", key, pane);
   return `#/p/${encodeURIComponent(key)}/${encodeURIComponent(pane)}`;
 }
 
 /** Rooms have their own space, so a room id can never be read as a project id. */
-function workroomHash(id, pane = "ai") {
+function workroomHash(id, pane = null) {
+  pane = selectedPane("work", id, pane);
   return `#/w/${encodeURIComponent(id)}/${encodeURIComponent(pane)}`;
 }
 
@@ -268,10 +308,12 @@ function projectByName(name) {
 
 /** Mint this project's id server-side; throws so callers can decide how loud to be. */
 async function assignProjectId(project) {
+  const previousKey = routeKey(project);
   const response = await agentApi(`/api/projects/${encodeURIComponent(project.name)}/id`, { method: "POST" });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "could not assign an id");
   project.id = data.id;
+  if (previousKey !== data.id) rememberPane("project", data.id, selectedPane("project", previousKey));
   const known = projectByName(project.name);
   if (known) known.id = data.id;
   return data.id;
@@ -295,7 +337,7 @@ function renderQuickSwitch() {
     const button = el("button", "quick-pill", esc(name));
     button.classList.toggle("on", WS?.name === name);
     button.onclick = () => {
-      location.hash = projectHash(routeKey(projectByName(name)), WS?.name === name ? WS.pane : "plan");
+      location.hash = projectHash(routeKey(projectByName(name)));
     };
     nav.append(button);
   }
@@ -568,7 +610,7 @@ function sessionCard(sess, proj) {
     const answer = el("button", "sess-answer", "Answer");
     answer.onclick = (e) => {
       e.stopPropagation();
-      openQuestion(sess.name, sess.question, true);
+      openQuestion(sessionConversationKey(sess), sess.question, true, "ai", null, sess.name);
     };
     actions.append(answer);
   }
@@ -1209,7 +1251,8 @@ async function downloadLog(kind = "run") {
   }
 }
 
-function openWorkspace(p, pane = "logs", opts = {}) {
+function openWorkspace(p, pane = null, opts = {}) {
+  pane = selectedPane(opts.kind || "project", opts.id || routeKey(p), pane);
   if (!opts.fromRoute) {
     location.hash = projectHash(routeKey(p), pane);
     return;
@@ -1292,7 +1335,7 @@ function openWorkspace(p, pane = "logs", opts = {}) {
   loadDevNotes(p.name); // this project's un-applied preview notes come back with it
   setWsStatus("idle");
   setAiBusy(false);
-  switchPane(chat ? "ai" : pane);
+  switchPane(pane);
   $("#home-page").hidden = true;
   $("#ws-backdrop").hidden = true;
   $("#workspace").hidden = false;
@@ -1597,22 +1640,26 @@ async function createWorkroom(event) {
  * work — with the project-only panes hidden and the members named across the
  * top. `chatOnly` is what the workspace-wide chat already uses for this.
  */
-async function openWorkroom(id, fromRoute = false, pane = "ai") {
+async function openWorkroom(id, fromRoute = false, pane = null) {
+  pane = selectedPane("work", id, pane);
   if (!fromRoute) {
     location.hash = workroomHash(id, pane);
     return;
   }
+  const requestedRoute = location.hash;
   let room;
   try {
     const r = await agentApi(`/api/work-sessions/${encodeURIComponent(id)}`);
     if (!r.ok) throw new Error("gone");
     room = (await r.json()).workSession;
   } catch {
+    if (location.hash !== requestedRoute) return;
     toast("Workroom not found");
     history.replaceState(null, "", "#/");
     closeWorkspace(true);
     return;
   }
+  if (location.hash !== requestedRoute) return;
   openWorkspace(
     {
       name: room.id, port: null, runCommand: null, deployStaging: null, deployProduction: null,
@@ -1624,19 +1671,22 @@ async function openWorkroom(id, fromRoute = false, pane = "ai") {
   );
 }
 
-async function openWorkspaceChat(fromRoute = false) {
+async function openWorkspaceChat(fromRoute = false, pane = null) {
+  pane = selectedPane("project", "__workspace__", pane);
   if (!fromRoute) {
-    location.hash = projectHash("__workspace__", "ai");
+    location.hash = projectHash("__workspace__", pane);
     return;
   }
+  const requestedRoute = location.hash;
   let w = { aiEngine: "claude", aiModel: null, aiEffort: null, aiFullAccess: false };
   try {
     w = await (await agentApi("/api/workspace")).json();
   } catch {}
+  if (location.hash !== requestedRoute) return;
   openWorkspace(
     { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null, aiExtraProjects: [],
       aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiEffort: w.aiEffort || null, aiFullAccess: !!w.aiFullAccess },
-    "ai",
+    pane,
     { chatOnly: true, title: "psm · all projects", fromRoute: true },
   );
 }
@@ -1658,11 +1708,10 @@ function disconnectAi() {
 }
 
 function switchPane(pane) {
-  const allowed = WS.chatOnly
-    ? new Set(["ai", "session", "changes"])
-    : new Set(["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy"]);
-  if (!allowed.has(pane)) pane = WS.chatOnly ? "ai" : "plan";
+  const key = WS.kind === "work" ? WS.id : routeKey(projectByName(WS.name)) || WS.name;
+  pane = selectedPane(WS.kind, key, pane);
   WS.pane = pane;
+  rememberPane(WS.kind, key, pane);
   if (pane !== "deploy") {
     clearDeploymentPoll();
     clearPreparationPoll();
@@ -2098,7 +2147,7 @@ function closeWorkspace(fromRoute = false) {
 function routeFromHash() {
   const room = location.hash.match(/^#\/w\/([^/]+)(?:\/([^/]+))?$/);
   if (room) {
-    openWorkroom(decodeURIComponent(room[1]), true, decodeURIComponent(room[2] || "ai"));
+    openWorkroom(decodeURIComponent(room[1]), true, room[2] ? decodeURIComponent(room[2]) : null);
     return;
   }
   const match = location.hash.match(/^#\/p\/([^/]+)(?:\/([^/]+))?$/);
@@ -2113,9 +2162,9 @@ function routeFromHash() {
     return;
   }
   const key = decodeURIComponent(match[1]);
-  const pane = decodeURIComponent(match[2] || "plan");
+  const pane = match[2] ? decodeURIComponent(match[2]) : null;
   if (key === "__workspace__") {
-    openWorkspaceChat(true);
+    openWorkspaceChat(true, pane);
     return;
   }
   const project = projectByRouteKey(key);
@@ -2137,8 +2186,9 @@ async function canonicaliseRoute(project, pane) {
   } catch {
     return; // no id: the name URL keeps working, just isn't rename-proof
   }
-  if (!project.id || WS.name !== project.name) return; // the user moved on meanwhile
-  history.replaceState(null, "", projectHash(project.id, pane));
+  if (!project.id || WS.kind !== "project" || WS.name !== project.name) return; // the user moved on meanwhile
+  rememberPane("project", project.id, WS.pane);
+  history.replaceState(null, "", projectHash(project.id, WS.pane));
   renderBoard(); // the card's "assign id" chip becomes a copyable id
 }
 
@@ -3471,7 +3521,7 @@ function renderSessionPane(data) {
   $("#session-state-text").textContent = state.question ? "needs answer" : state.busy ? "working" : state.hasSession ? "idle" : state.events ? "local" : "no session";
   $("#ws-session-answer").hidden = !state.question;
   refreshComposer();
-  if (state.question && WS.name) openQuestion(WS.name, state.question);
+  if (state.question && WS.name) openQuestion(conversationKey(), state.question, false, "ai", null, $("#ws-name").textContent);
 
   const rows = [
     ["engine", state.engine || WS.engine || "claude"],
@@ -3526,7 +3576,10 @@ function scheduleSessionRefresh(delay = 150) {
 
 /* ---- AI questions ---- */
 let ACTIVE_QUESTION = null;
-const QUESTIONS_LATER = new Set();
+const PENDING_QUESTIONS = new Map();
+let pendingQuestionRevision = 0;
+let questionsListSignature = null;
+let questionReturnFocus = null;
 
 /**
  * The key one AI conversation's questions are filed under.
@@ -3560,22 +3613,24 @@ function questionKey(project, request, scope = "ai", role = "") {
   return `${scope}:${role || ""}:${project}:${request?.id || ""}`;
 }
 
-function closeQuestion(markLater = false) {
-  if (markLater && ACTIVE_QUESTION) {
-    QUESTIONS_LATER.add(questionKey(
-      ACTIVE_QUESTION.project,
-      ACTIVE_QUESTION.request,
-      ACTIVE_QUESTION.scope,
-      ACTIVE_QUESTION.role,
-    ));
-  }
+function closeQuestion() {
   ACTIVE_QUESTION = null;
   $("#question-backdrop").hidden = true;
   $("#question-modal").hidden = true;
   $("#question-body").innerHTML = "";
+  if (questionReturnFocus?.isConnected) questionReturnFocus.focus();
+  questionReturnFocus = null;
 }
 
 function clearQuestion(project, requestId = null, scope = "ai", role = null) {
+  for (const [key, entry] of PENDING_QUESTIONS) {
+    if (entry.project === project && entry.scope === scope && (!role || entry.role === role)
+      && (!requestId || entry.request.id === requestId)) {
+      PENDING_QUESTIONS.delete(key);
+      pendingQuestionRevision++;
+    }
+  }
+  renderQuestions();
   if (
     ACTIVE_QUESTION?.project === project &&
     ACTIVE_QUESTION.scope === scope &&
@@ -3654,10 +3709,11 @@ function renderQuestionField(question, index) {
 
 function openQuestion(project, request, force = false, scope = "ai", role = null, label = null) {
   if (!request?.id || !request.questions?.length) return;
-  const key = questionKey(project, request, scope, role || "");
-  if (!force && QUESTIONS_LATER.has(key)) return;
-  if (ACTIVE_QUESTION && !$("#question-modal").hidden && !force) return;
-  if (force) QUESTIONS_LATER.delete(key);
+  rememberQuestion({ project, request, scope, role, label });
+  // Polling, navigation and stream replay only update the inbox. A dialog is
+  // opened exclusively by an explicit Review/Answer click, even after reload.
+  if (!force) return;
+  questionReturnFocus = document.activeElement;
   ACTIVE_QUESTION = { project, request, scope, role };
   $("#question-project").textContent = label
     ? label
@@ -3675,22 +3731,82 @@ function openQuestion(project, request, force = false, scope = "ai", role = null
   requestAnimationFrame(() => body.querySelector("input")?.focus());
 }
 
-function syncPendingQuestions(sessions) {
-  const pending = sessions.filter((session) => session.question);
-  if (ACTIVE_QUESTION?.scope === "ai") {
-    const stillPending = pending.some(
-      (session) =>
-        sessionConversationKey(session) === ACTIVE_QUESTION.project &&
-        session.question.id === ACTIVE_QUESTION.request.id,
-    );
-    if (!stillPending) closeQuestion();
+function rememberQuestion(entry) {
+  if (!entry.request?.id || !entry.request.questions?.length) return;
+  const key = questionKey(entry.project, entry.request, entry.scope, entry.role);
+  for (const [oldKey, old] of PENDING_QUESTIONS) {
+    if (old.project === entry.project && old.scope === entry.scope && old.role === entry.role && oldKey !== key) {
+      PENDING_QUESTIONS.delete(oldKey);
+      pendingQuestionRevision++;
+    }
   }
-  if (!ACTIVE_QUESTION) {
-    const next = pending.find(
-      (session) => !QUESTIONS_LATER.has(questionKey(sessionConversationKey(session), session.question)),
-    );
-    if (next) openQuestion(sessionConversationKey(next), next.question, false, "ai", null, next.name);
+  if (JSON.stringify(PENDING_QUESTIONS.get(key)) !== JSON.stringify(entry)) {
+    PENDING_QUESTIONS.set(key, entry);
+    pendingQuestionRevision++;
   }
+  renderQuestions();
+}
+
+function syncPendingQuestions(sessions, questions) {
+  // The fallback supports a refreshed page connected to a backend that has not
+  // restarted yet. New backends also supply workspace, planner and reviewer questions.
+  const pending = Array.isArray(questions) ? questions : [
+    ...sessions.filter((session) => session.question).map((session) => ({
+      project: sessionConversationKey(session), request: session.question,
+      scope: "ai", role: null, label: session.name,
+    })),
+    ...[...PENDING_QUESTIONS.values()].filter((entry) => entry.scope === "planner" || entry.project === "__workspace__"),
+  ];
+  PENDING_QUESTIONS.clear();
+  for (const entry of pending) {
+    if (entry.request?.id && entry.request.questions?.length) {
+      const normalized = { project: entry.project, request: entry.request, scope: entry.scope || "ai", role: entry.role || null, label: entry.label || null };
+      PENDING_QUESTIONS.set(questionKey(normalized.project, normalized.request, normalized.scope, normalized.role), normalized);
+    }
+  }
+  pendingQuestionRevision++;
+  if (ACTIVE_QUESTION && !PENDING_QUESTIONS.has(questionKey(ACTIVE_QUESTION.project, ACTIVE_QUESTION.request, ACTIVE_QUESTION.scope, ACTIVE_QUESTION.role))) closeQuestion();
+  renderQuestions();
+}
+
+function renderQuestions() {
+  const entries = [...PENDING_QUESTIONS.values()].sort((a, b) => (a.request.askedAt || 0) - (b.request.askedAt || 0));
+  const count = entries.length;
+  $("#questions-count").textContent = String(count);
+  $("#questions-count").hidden = count === 0;
+  $("#questions-open").setAttribute("aria-label", `Questions: ${count} pending`);
+  if ($("#questions-modal").hidden) return;
+  const signature = JSON.stringify(entries);
+  if (signature === questionsListSignature) return;
+  questionsListSignature = signature;
+  const list = $("#questions-list");
+  list.innerHTML = "";
+  if (!count) {
+    const empty = el("p", "questions-empty");
+    empty.textContent = "No pending questions.";
+    list.append(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const row = el("article", "questions-item");
+    const title = el("h3");
+    title.textContent = entry.label || (entry.project === "__workspace__" ? "Workspace chat" : entry.project);
+    const meta = el("p", "questions-meta");
+    meta.textContent = [entry.request.engine || "AI", entry.scope === "planner" ? entry.role : null, formatDateTime(entry.request.askedAt)].filter(Boolean).join(" · ");
+    const preview = el("p", "questions-preview");
+    preview.textContent = compactText(entry.request.questions.map((question) => question.question).join(" · "), 300);
+    const review = el("button", "btn btn-primary");
+    review.textContent = entry.request.questions.length > 1 ? `Review ${entry.request.questions.length} questions` : "Review question";
+    review.onclick = () => openQuestion(entry.project, entry.request, true, entry.scope, entry.role, entry.label);
+    row.append(title, meta, preview, review);
+    list.append(row);
+  }
+}
+
+function openQuestions() {
+  openModal("#questions-modal");
+  renderQuestions();
+  fetchSessions();
 }
 
 function collectQuestionAnswers() {
@@ -3755,10 +3871,9 @@ async function answerQuestion(event) {
       }
       return toast(data.error || "Could not send the answer");
     }
-    QUESTIONS_LATER.delete(questionKey(active.project, active.request, active.scope, active.role || ""));
     clearQuestion(active.project, active.request.id, active.scope, active.role);
+    await fetchSessions();
     if (!planner) {
-      await fetchSessions();
       if (conversationKey() === active.project) fetchSessionState();
     }
     toast("Answer sent");
@@ -4250,11 +4365,32 @@ function addAiText(node, text) {
   node.append(part);
 }
 
+function preparationEntryLabel(ev) {
+  if (ev.role !== "user") return null;
+  const turn = ev.preparation;
+  if (turn) return turn.purpose === "diagnose-external"
+    ? `PSM · ${turn.environmentId} · External checks`
+    : `PSM · ${turn.environmentId} · Repair attempt ${turn.attempt} of ${turn.maximumAttempts}${turn.attempt === 1 ? " · Preparation started" : ""}`;
+  // Older saved sessions have only the generated brief. Keep them readable too.
+  const legacy = /^psm is preparing this project for deployment to "([^"\n]+)" and these readiness checks are not passing\./.exec(ev.text || "");
+  if (!legacy) return null;
+  if (ev.text.includes("Diagnose these external deployment checks")) return `PSM · ${legacy[1]} · External checks`;
+  const attempt = /This is attempt (\d+) of (\d+)/.exec(ev.text);
+  return `PSM · ${legacy[1]} · Repair attempt ${attempt?.[1] || "1"} of ${attempt?.[2] || "3"}${!attempt || attempt[1] === "1" ? " · Preparation started" : ""}`;
+}
+
 function renderAiBubble(ev) {
   const t = $("#ws-transcript");
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
-  const b = el("div", "ai-msg ai-" + ev.role);
-  if (ev.role === "assistant") {
+  const preparation = preparationEntryLabel(ev);
+  const b = el(preparation ? "details" : "div", preparation ? "ai-msg ai-preparation" : "ai-msg ai-" + ev.role);
+  if (preparation) {
+    const summary = el("summary");
+    summary.textContent = preparation;
+    const brief = el("div", "ai-preparation-brief");
+    brief.textContent = ev.text;
+    b.append(summary, brief);
+  } else if (ev.role === "assistant") {
     if (renderAiText(b, ev.text)) b.classList.add("has-figure"); // figures need the width
   } else {
     b.textContent = ev.text;
@@ -4485,6 +4621,7 @@ function refreshComposer() {
   const waiting = !!WS.question;
   $("#ws-send").disabled = blocked || waiting;
   $("#ws-msg").disabled = blocked || waiting;
+  $("#ws-question-answer").hidden = !waiting;
   $("#ws-msg").placeholder = waiting
     ? "Answer the AI's question to continue"
     : blocked
@@ -5855,10 +5992,12 @@ $("#web-usage").onclick = openUsage;
 $("#ws-send").onclick = sendAi;
 $("#ws-cancel").onclick = cancelAi;
 $("#ws-session-refresh").onclick = fetchSessionState;
-$("#ws-session-answer").onclick = () => {
+$("#ws-session-answer").onclick = $("#ws-question-answer").onclick = () => {
   const question = WS.question || WS.sessionState?.question;
-  if (WS.name && question) openQuestion(WS.name, question, true);
+  if (WS.name && question) openQuestion(conversationKey(), question, true, "ai", null, $("#ws-name").textContent);
 };
+$("#questions-open").onclick = openQuestions;
+$("#questions-close").onclick = closeModals;
 $("#plan-editor").onclick = planAction;
 $("#plan-add-phase").onclick = () => {
   if (!PLAN.draft || planLocked()) return;
@@ -5973,7 +6112,7 @@ $("#dep-prep-capabilities").onclick = () => switchPane("capabilities");
 $("#dep-prep-approve").onclick = approvePreparationInfrastructure;
 $("#dep-prep-open").onclick = () => {
   const roomId = WS.managedDeploy.preparation?.workroomId;
-  if (roomId) openWorkroom(roomId);
+  if (roomId) openWorkroom(roomId, false, "ai");
 };
 $("#dep-approve").onclick = approveDeploymentPlan;
 $("#dep-cancel").onclick = cancelDeploymentRun;
@@ -6031,6 +6170,7 @@ function closeModals() {
   $("#procs-modal").hidden = true;
   $("#links-modal").hidden = true;
   $("#machines-modal").hidden = true;
+  $("#questions-modal").hidden = true;
   $("#new-modal").hidden = true;
   $("#rules-modal").hidden = true;
   $("#usage-modal").hidden = true;
@@ -7374,8 +7514,8 @@ boot();
 window.addEventListener("hashchange", routeFromHash);
 setInterval(() => {
   pollProcs();
-  if ($("#workspace").hidden) fetchSessions(); // keep the lane fresh while on the board
-  else if (WS.pane === "session") fetchSessionState();
+  fetchSessions(); // questions from other sessions remain visible on every page
+  if (!$("#workspace").hidden && WS.pane === "session") fetchSessionState();
   else if (WS.pane === "plan" && PLAN.saved?.status === "reviewing") loadPlan(true);
 }, 3000);
 setInterval(() => fetchUsage(true, true), USAGE_REFRESH_MS);
