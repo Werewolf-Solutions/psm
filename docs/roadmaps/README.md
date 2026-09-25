@@ -516,3 +516,22 @@ verified reload, explicit review, closing, draft preservation during polling,
 workroom answer routing and no automatic next dialog. Version 0.3.5 is in the
 working tree, not committed, published or deployed. Restart PSM and refresh the
 page to load the complete update. P07 and its build-diagnostic gaps remain open.
+
+### 2026-09-25 — P07 build observation
+```text
+Phase / step: P07
+State: in progress — Todo builds succeed on GitHub Actions; PSM now observes them.
+Finding: every prepare since the ref fix failed 0.3 s after dispatch with "did not match
+  repository, workflow, commit and correlation constraints". GitHub had not yet applied
+  run-name, so the queued run still carried the workflow's name. GitHub runs 36106921820
+  and 36110086343 concluded success unobserved. The repair agent, unable to see CI,
+  pushed docs-only commits 6717627 and 9450cce to todo-app master (harmless).
+Changed (psm dev): e41ff2a completes the Codex session's work (repair-attempt entries and
+  unchanged-retry stop, Questions inbox, per-page tab memory; 0.3.6); bc5ec05 watches a
+  dispatch-identified run while its title is pending.
+Verification: npm test 640 pass / 0 fail before bc5ec05; deploy suites 252 pass; the new
+  regression fails without the fix. GitHub's real response replayed through the adapter.
+Remaining blockers: artifact import and the release are not yet observed live; the
+  artifact-reader GitHub App is still to be installed; the release needs approval.
+Next action: restart PSM, Make ready to deploy (Claude), watch the import step.
+```
