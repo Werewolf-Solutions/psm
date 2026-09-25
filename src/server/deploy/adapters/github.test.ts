@@ -322,3 +322,31 @@ test("a branch saved by name allows its full ref, and nothing else", async () =>
   assert.ok(github.calls.length > 0, "an allowlisted dispatch makes requests");
   assert.ok(github.calls.some((call) => call.url.includes("/commits/master")));
 });
+
+test("a run named by its dispatch may carry GitHub's placeholder title until it finishes", async () => {
+  // Shape of GitHub's response for a just-dispatched run: named after the workflow
+  // until run-name is evaluated (observed 2026-09-25, run 36110086343).
+  const run = (overrides: Record<string, unknown>) => ({
+    id: 36110086343, head_sha: "9450ccedb9ba08493a6461ab930467ad0ea07625", path: ".github/workflows/build-static.yml",
+    event: "workflow_dispatch", repository: { full_name: "Werewolf-Solutions/todo-app" }, created_at: "2026-09-25T07:54:47Z",
+    display_title: "Prepare managed static artifact", status: "queued", conclusion: null, run_attempt: 1, head_branch: "master",
+    html_url: "https://github.com/Werewolf-Solutions/todo-app/actions/runs/36110086343", updated_at: "2026-09-25T07:54:47Z", ...overrides,
+  });
+  const kit = (body: unknown) => new GitHubActionsAdapter({
+    metadata: { revision: 2, prepareWorkflows: [{ repository: "Werewolf-Solutions/todo-app", workflow: "build-static.yml", workflowPath: ".github/workflows/build-static.yml", refs: [{ ref: "master" }] }], releaseControllers: [] },
+    token: () => TOKEN, fetch: (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch,
+  });
+  const receipt = {
+    schema: "psm.werewolf.solutions/github-dispatch-receipt/v1", policyRevision: "2", operation: "prepare", repository: "Werewolf-Solutions/todo-app",
+    workflow: "build-static.yml", workflowPath: ".github/workflows/build-static.yml", ref: "master", expectedHeadSha: "9450ccedb9ba08493a6461ab930467ad0ea07625",
+    workflowBlobSha: "74bbf26a03266af77bd428451d5f20df048e02b5", psmRunId: "run_b5c3cc107bdd46e7", dispatchedAt: "2026-09-25T07:54:46.503Z",
+    providerRunId: "36110086343", controller: null, targetId: null, githubEnvironment: null,
+  } as never;
+  assert.equal((await kit(run({})).pollRun(receipt)).run?.status, "queued", "a queued run with the placeholder is still being watched");
+  assert.equal((await kit(run({ status: "in_progress" })).pollRun(receipt)).run?.status, "in-progress");
+  assert.equal((await kit(run({ status: "completed", conclusion: "success", display_title: "prepare run_b5c3cc107bdd46e7" })).pollRun(receipt)).run?.conclusion, "success");
+  // Finished without the correlation, or any other identity differing, is still refused.
+  await assert.rejects(kit(run({ status: "completed", conclusion: "success" })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
+  await assert.rejects(kit(run({ head_sha: "a".repeat(40) })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
+  await assert.rejects(kit(run({ id: 999 })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
+});

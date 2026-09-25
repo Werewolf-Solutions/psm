@@ -1035,12 +1035,18 @@ export class GitHubActionsAdapter {
     if ((providerStatus === "completed") !== (conclusion !== null)) {
       throw new GitHubExecutorError("github-response-invalid", "GitHub returned an inconsistent workflow state");
     }
+    // GitHub names a just-dispatched run after its workflow until `run-name` is
+    // evaluated, so the correlation title appears only once the run starts. A run
+    // identified by the id GitHub returned from this very dispatch may still carry
+    // the placeholder while pending; a finished run must always carry the correlation.
+    const identifiedByDispatch = receipt.providerRunId !== null && receipt.providerRunId === providerRunId;
+    const titlePending = identifiedByDispatch && providerStatus !== "completed";
     if (
       repository?.full_name !== receipt.repository
       || path !== receipt.workflowPath
       || run.event !== "workflow_dispatch"
       || headSha !== receipt.expectedHeadSha
-      || !correlationAppears(displayTitle, receipt.psmRunId)
+      || (!titlePending && !correlationAppears(displayTitle, receipt.psmRunId))
     ) {
       throw new GitHubExecutorError(
         "github-run-mismatch",
