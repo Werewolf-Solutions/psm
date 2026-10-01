@@ -501,6 +501,9 @@ and cached readiness; finishing preparation refreshes the artifact list in the
 open page. External commits that omit a version bump are caught before building,
 and Make ready can create a managed version commit. Publishing still uses the
 reviewed source-publication flow; existing artifacts are never relabelled.
+An identical artifact already active on a target can be redeployed to finish
+PSM's verification after a later probe fails; a different artifact at the same
+version still needs a version bump.
 
 ## Config — `psm.config.json`
 

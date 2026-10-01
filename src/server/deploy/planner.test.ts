@@ -138,7 +138,7 @@ function inputWithAction(kind: string): BuildDeploymentPlanInput {
   return changed;
 }
 
-test("the exact active unverified artifact may be redeployed for verification", () => {
+test("the exact active artifact may be redeployed for PSM verification", () => {
   const candidate = inputWithAction("assert-dependency@1");
   const artifact = candidate.artifact!;
   const targetId = "werewolf:todo-staging-web";
@@ -159,7 +159,7 @@ test("the exact active unverified artifact may be redeployed for verification", 
   const hasVersionBlocker = () => buildDeploymentPlan(candidate).document.blockers.some((item) => item.code === "version-not-increased");
   assert.equal(hasVersionBlocker(), false);
   active.receipt.verified = true;
-  assert.equal(hasVersionBlocker(), true, "a verified release cannot be repeated at the same version");
+  assert.equal(hasVersionBlocker(), false, "the exact active release can be reverified after a later PSM probe failed");
   active.receipt.verified = false;
   active.artifactId = "art_other";
   assert.equal(hasVersionBlocker(), true, "another artifact with the same version stays blocked");

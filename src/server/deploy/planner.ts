@@ -482,10 +482,11 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
       if (typeof receipt.version !== "string") continue;
       const compared = compareWorkspaceVersions(input.artifact.version, receipt.version);
       if (compared <= 0) {
-        // A controller failure can leave this exact artifact active but unverified.
-        // Repeating its reviewed deployment is the only way to verify it in place.
-        // A different artifact with the same version remains refused.
-        const verifyingActiveArtifact = compared === 0 && receipt.verified === false
+        // A later PSM probe can fail after the controller verified and activated
+        // this exact artifact (for example, while local DNS still caches NXDOMAIN).
+        // Repeating the same reviewed release can finish verification in place;
+        // another artifact at the same version remains refused.
+        const verifyingActiveArtifact = compared === 0
           && release.provenance === "managed"
           && release.projectId === input.manifest.projectId
           && release.environmentId === input.environment.id
