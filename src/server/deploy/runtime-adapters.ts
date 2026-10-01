@@ -11,7 +11,7 @@ import {
 import { BetterStackClient } from "./adapters/better-stack.ts";
 import { DigitalOceanClient, DigitalOceanError, dnsMatches, type DigitalOceanDnsRecord } from "./adapters/digitalocean.ts";
 import { GitHubActionsAdapter, GitHubExecutorError, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
-import { deploymentGitHubToken, githubAppIdentity, githubAppTokens } from "./github-app.ts";
+import { deploymentGitHubToken, githubAppIdentity, githubAppPages, githubAppTokens } from "./github-app.ts";
 import {
   ExecutorContractError,
   RELEASE_EXECUTION_CONTRACT_SCHEMA,
@@ -405,10 +405,15 @@ export class DeploymentRuntimeAdapters {
       try {
         const writers = await adapter.listControllerWriters(targetId);
         const added = writers.filter((login) => !reviewed.includes(login));
+        const pages = githubAppPages(github);
+        // A repository always has someone who can push: an empty list means the App cannot see them.
+        const blind = !writers.length || !reviewed.length;
         checks.push({
           id: `${unit.id}:controller-writers`, purpose: "deploy", title: "Who can change the release controller",
-          ready: added.length === 0,
-          detail: added.length === 0
+          ready: added.length === 0 && !blind,
+          detail: blind
+            ? `The GitHub App cannot see who can push to ${String(pinned.repository)}, so PSM cannot guard it. Grant the App Organization permissions → Members: Read at ${pages.permissions}, accept it at ${pages.installation}, then review controller setup again to record who can push.`
+            : added.length === 0
             ? `${String(pinned.repository)} has no branch protection on its GitHub plan; releases run only at the pinned commit, and only ${reviewed.join(", ") || "nobody"} can push to it.`
             : `${added.join(", ")} can now push to ${String(pinned.repository)}, which has no branch protection on its GitHub plan, so they could change the workflow that holds the release key. Remove their access at ${controllerUrl}/settings/access, or review controller setup again to accept them.`,
         });

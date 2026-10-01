@@ -176,3 +176,11 @@ test("a controller with branch protection is not asked who can push", async (t) 
   assert.ok(!checks.some((check) => check.id === "web:controller-writers"));
   assert.ok(!calls.some((call) => call.includes("/collaborators")));
 });
+
+test("a controller whose writers the App cannot see is not ready", async (t) => {
+  const adapters = await fixture(t, undefined, false, true, { branchProtection: "unavailable-on-plan", reviewedWriters: [] });
+  stubGitHub(t, current, ["PSM_ARTIFACT_READER_PRIVATE_KEY", "PSM_TARGET_KNOWN_HOSTS", "PSM_TARGET_SSH_PRIVATE_KEY"], ["PSM_ARTIFACT_READER_APP_ID"], "a".repeat(40), []);
+  const check = (await adapters.controllerReadiness(unit, { checkoutId: "chk_1", environment })).find((item) => item.id === "web:controller-writers");
+  assert.equal(check?.ready, false);
+  assert.match(check?.detail ?? "", /cannot see who can push/);
+});

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { GitHubActionsAdapter, type GitHubActionsConnectionMetadata } from "./adapters/github.ts";
-import { githubAppIdentity, githubAppRequest, GitHubAppTokens, type GitHubPermissions } from "./github-app.ts";
+import { COLLABORATOR_PERMISSIONS, githubAppIdentity, githubAppPages, githubAppRequest, GitHubAppTokens, type GitHubPermissions } from "./github-app.ts";
 import { validateConnectionScope, type ConnectionProfile } from "./connections.ts";
 import { deploymentConnectionProfile } from "./runtime-adapters.ts";
 import type { DeploymentService } from "./service.ts";
@@ -100,17 +100,8 @@ export class GitHubControllerSetup {
       workflow: controller.workflow, workflowPath: controller.workflowPath } : null);
   }
 
-  /** The GitHub pages where the App's repositories and permissions are changed; PSM cannot change either. */
   #appPages(profile: ConnectionProfile) {
-    const app = profile.publicMetadata?.githubApp as Record<string, string> | undefined;
-    const organization = (profile.publicMetadata?.githubAppSetup as Record<string, string> | undefined)?.accountKind === "organization";
-    const owner = encodeURIComponent(String(app?.owner ?? ""));
-    const settings = organization ? `https://github.com/organizations/${owner}/settings` : "https://github.com/settings";
-    return {
-      installation: `${settings}/installations/${encodeURIComponent(String(app?.installationId ?? ""))}`,
-      permissions: `${settings}/apps/${encodeURIComponent(String(app?.slug ?? ""))}/permissions`,
-      billing: organization ? `${settings}/billing` : "https://github.com/settings/billing",
-    };
+    return githubAppPages(profile);
   }
 
   #accessError(profile: ConnectionProfile, repository: string): Error {
@@ -139,12 +130,27 @@ export class GitHubControllerSetup {
     return { protection, unavailable: false };
   }
 
-  /** Everyone who can push to the repository, directly, through a team or as an organization owner. */
+  /**
+   * Everyone who can push to the repository, directly, through a team or as an
+   * organization owner. A repository always has someone who can push, so an
+   * empty answer means the App cannot see them; that is refused, never recorded.
+   */
   async #writers(profile: ConnectionProfile, repository: string): Promise<string[]> {
-    const people = await this.#request(profile, repository, "/collaborators?affiliation=all&per_page=100", { metadata: "read" });
+    const pages = this.#appPages(profile);
+    const grant = `Grant the App Organization permissions → Members: Read at ${pages.permissions}, accept the new permission at ${pages.installation}, then review controller setup again.`;
+    let people: unknown;
+    try { people = await this.#request(profile, repository, "/collaborators?affiliation=all&per_page=100", COLLABORATOR_PERMISSIONS); }
+    catch (error) {
+      if (/not granted|permission/i.test(error instanceof Error ? error.message : String(error)) || [403, 422].includes(Number(object(error).status))) {
+        throw new Error(`The GitHub App cannot list who can push to ${repository}. ${grant}`);
+      }
+      throw error;
+    }
     if (!Array.isArray(people)) throw new Error("GitHub returned no collaborator list for the controller");
     if (people.length >= 100) throw new Error("The controller repository has too many collaborators to review; give it a smaller audience first");
-    return people.filter((person: any) => person?.permissions?.push === true).map((person: any) => String(person.login)).sort();
+    const writers = people.filter((person: any) => person?.permissions?.push === true).map((person: any) => String(person.login)).sort();
+    if (!writers.length) throw new Error(`GitHub showed the App nobody who can push to ${repository}, which means it cannot see the organization's members. ${grant}`);
+    return writers;
   }
 
   async #head(profile: ConnectionProfile, repository: string, branch: string): Promise<string | null> {

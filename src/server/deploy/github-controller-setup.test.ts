@@ -103,7 +103,7 @@ async function fixture(t: test.TestContext, missing = false, fullApply = false) 
   return { setup: new GitHubControllerSetup(service, fetcher, () => now), store, calls, legacy,
     forbidProtection: (message = "Resource not accessible by integration") => { protectionForbidden = message; }, move: () => { head = movedHead; },
     freePlan: () => { freePlan = true; protectionForbidden = "Upgrade to GitHub Pro or make this repository public to enable this feature."; },
-    grantPush: (login: string) => { writers.push(login); } };
+    grantPush: (login: string) => { writers.push(login); }, hideMembers: () => { writers.length = 0; } };
 }
 
 test("review shows the exact controller files and a changed branch cannot be applied", async (t) => {
@@ -210,4 +210,17 @@ test("apply commits reviewed files, verifies the tree, publishes sealed keys and
     targetId, contractRevision: "r1", githubEnvironment: "example-site-staging", sshHost: "192.0.2.1", sshUser: "release",
     sshPort: 22, hostKeyFingerprint: "SHA256:known-host", canonicalRoot: "/var/www/site",
     helperProtocol: "psm.werewolf.solutions/host-helper-request/v1" })[".github/workflows/release-static.yml"]));
+});
+
+test("an App that cannot see who can push is refused, never recorded as nobody", async (t) => {
+  // Observed 2026-10-01: the App's tokens got an empty collaborator list for a
+  // private organization repository, and setup had recorded "nobody" can push.
+  const { setup, freePlan, hideMembers } = await fixture(t, false, true);
+  freePlan();
+  hideMembers();
+  await assert.rejects(setup.preview("prj_site", "staging"), (error: Error) => {
+    assert.match(error.message, /showed the App nobody who can push/);
+    assert.match(error.message, /Members: Read at https:\/\/github\.com\/organizations\/example\/settings\/apps\/psm-example\/permissions/);
+    return true;
+  });
 });

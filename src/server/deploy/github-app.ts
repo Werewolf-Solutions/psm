@@ -7,6 +7,25 @@ export interface GitHubAppIdentity { id: string; installationId: string; owner: 
 const ID = /^[1-9][0-9]{0,19}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 
+/** The GitHub pages where an App's repositories and permissions are changed; PSM cannot change either. */
+export function githubAppPages(profile: ConnectionProfile): { installation: string; permissions: string; billing: string } {
+  const app = profile.publicMetadata?.githubApp as Record<string, string> | undefined;
+  const organization = (profile.publicMetadata?.githubAppSetup as Record<string, string> | undefined)?.accountKind === "organization";
+  const owner = encodeURIComponent(String(app?.owner ?? ""));
+  const settings = organization ? `https://github.com/organizations/${owner}/settings` : "https://github.com/settings";
+  return {
+    installation: `${settings}/installations/${encodeURIComponent(String(app?.installationId ?? ""))}`,
+    permissions: `${settings}/apps/${encodeURIComponent(String(app?.slug ?? ""))}/permissions`,
+    billing: organization ? `${settings}/billing` : "https://github.com/settings/billing",
+  };
+}
+
+/**
+ * Who can push to a repository is visible to an App only with the organization
+ * "Members: read" permission; without it GitHub answers an empty list.
+ */
+export const COLLABORATOR_PERMISSIONS: GitHubPermissions = { metadata: "read", members: "read" };
+
 export function githubAppIdentity(profile: ConnectionProfile): GitHubAppIdentity | null {
   const value = profile.publicMetadata?.githubApp;
   if (value == null) return null;
@@ -110,7 +129,8 @@ export async function deploymentGitHubToken(broker: SecretBroker, profile: Conne
   if (!match) throw new Error("GitHub App operation must name one repository");
   const repository = `${decodeURIComponent(match[1])}/${decodeURIComponent(match[2])}`;
   const suffix = match[3]; const write = request.method && request.method !== "GET";
-  const permissions: GitHubPermissions = suffix.startsWith("actions/") ? { actions: write ? "write" : "read" }
+  const permissions: GitHubPermissions = suffix.startsWith("collaborators") ? COLLABORATOR_PERMISSIONS
+    : suffix.startsWith("actions/") ? { actions: write ? "write" : "read" }
     : suffix.startsWith("environments/") ? (!suffix.includes("/secrets") && !suffix.includes("/variables")
       // An environment itself is read under Actions and changed under Administration;
       // the Environments permission covers only its secrets and variables.

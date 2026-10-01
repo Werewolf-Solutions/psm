@@ -41,7 +41,9 @@ export class GitHubSetup {
         // subscribes to no events; this public PSM URL is never used for setup.
         hook_attributes: { url: "https://psm.werewolf.solutions/api/deployment-github/events", active: false },
         redirect_url: `${local.origin}/api/deployment-github/callback`, setup_url: `${local.origin}/#/p/${context.projectId}/deploy`,
-        default_permissions: APP_PERMISSIONS, default_events: [] },
+        // An organization's members are visible to the App only with Members: read,
+        // which the controller's push-access check needs.
+        default_permissions: input.accountKind === "organization" ? { ...APP_PERMISSIONS, members: "read" } : APP_PERMISSIONS, default_events: [] },
     };
   }
 
