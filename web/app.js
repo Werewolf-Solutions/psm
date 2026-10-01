@@ -4865,7 +4865,8 @@ function renderDeploymentReadiness() {
     kind: item.status === "ready" ? "Ready" : item.automatic ? "Can prepare" : "Action needed",
   }));
   depRows($("#dep-readiness"), rows, "Check readiness to see the steps needed for this environment.");
-  const outstanding = rows.filter((item) => item.status !== "ready");
+  // When live already runs the committed source, an unchanged version is expected, not a step.
+  const outstanding = rows.filter((item) => item.status !== "ready" && !(item.code === "version-not-increased" && deploymentUpToDate()));
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
   renderActivityTimes($("#dep-readiness-times"), [["Checked", readiness?.checkedAt]]);
   for (const [index, item] of rows.entries()) {
@@ -5001,7 +5002,7 @@ function renderDeploymentReadiness() {
     : state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
     : state.loading ? "Checking deployment readiness…"
     : state.error ? "The check could not finish. Resolve the error and check again."
-    : deploymentUpToDate() && (!readiness || expired) ? "Deployed and up to date. Check readiness again after you commit something new."
+    : deploymentUpToDate() && (!readiness || expired || !outstanding.length) ? "Deployed and up to date. Check readiness again after you commit something new."
     : expired ? "Readiness has expired. Check again before deploying."
     : heldRun && readiness?.ready ? "Release inputs are ready, but the previous deployment is held. Resolve that run before deploying."
     : readiness?.ready ? "Ready to deploy. Review the plan below, then deploy."
@@ -5173,6 +5174,8 @@ function deploymentTodoItems() {
     }
     for (const entry of outstanding) {
       const { item, row } = entry;
+      // Live already runs the committed source: an unchanged version is the expected state, not a step.
+      if (upToDate && item.code === "version-not-increased") continue;
       if (item.automatic && makeReady && !row?.querySelector(".dep-mini-btn")) continue;
       if (controllerUnpinned(entry)) {
         items.push({ title: "Set up the release controller: press “Review controller setup / update”, or choose a GitHub connection that has one", detail: item.detail, target: () => deploymentControllerSetupTarget(item.slot || "github") });
