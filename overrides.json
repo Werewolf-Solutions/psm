@@ -11,8 +11,8 @@
     "port": 5173,
     "aiFullAccess": false,
     "aiEngine": "claude",
-    "aiModel": "sonnet",
-    "aiEffort": "max"
+    "aiModel": "opus",
+    "aiEffort": "medium"
   },
   "nfc-pay": {
     "category": "Flagship & platform",
@@ -101,7 +101,12 @@
     "status": "paused",
     "stack": "React, TypeScript, Tailwind",
     "description": "A professional, SEO/GEO-optimised website for a handyman business in Birmingham, UK.",
-    "next": "Finalise copy/SEO/GEO + cookie & privacy; wire main fields to real business data from the API."
+    "next": "Finalise copy/SEO/GEO + cookie & privacy; wire main fields to real business data from the API.",
+    "runCommand": "npm run dev",
+    "port": 5173,
+    "aiEngine": "codex",
+    "aiModel": "gpt-6-sol",
+    "aiEffort": "medium"
   },
   "manu-ncc-website": {
     "category": "Client & business websites",
@@ -344,7 +349,9 @@
         "attachedAt": 1784559897780
       }
     ],
-    "runCommand": "npm run dev"
+    "runCommand": "npm run dev",
+    "workingOn": true,
+    "workingOnAt": 1790859590180
   },
   "__workspace__": {
     "aiFullAccess": true,
@@ -412,5 +419,10 @@
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high",
     "port": 5174
+  },
+  "ai-mesh": {
+    "status": "active",
+    "pinned": true,
+    "aiFullAccess": false
   }
 }

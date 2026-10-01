@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { openDatabase } from "../db.ts";
 import { SecretBroker } from "./connections.ts";
+import { canonicalDigest } from "./canonical.ts";
 import { DeploymentService } from "./service.ts";
 import { DeploymentStore } from "./store.ts";
 
@@ -126,10 +127,13 @@ function workspace() {
     { id: "own-health", kind: "http-status@1", request: { url: "https://todo.example.com/health", method: "GET" }, expect: { status: 200 } },
   ]);
   const dapp = repository(DAPP, "werewolf-dapp", []);
-  return service([
-    { id: TODO, name: "todo-app", path: todo },
-    { id: DAPP, name: "werewolf-dapp", path: dapp },
-  ]);
+  return {
+    ...service([
+      { id: TODO, name: "todo-app", path: todo },
+      { id: DAPP, name: "werewolf-dapp", path: dapp },
+    ]),
+    dappPath: dapp,
+  };
 }
 
 test("a room reports the cross-project edges its members declare", () => {
@@ -266,6 +270,33 @@ test("readiness for a real project names what is missing, not that something is"
 
   // Work already done is on the list too, or the remaining count means nothing.
   assert.ok(readiness.items.some((item) => item.code === "source-ready" && item.status === "ready"));
+});
+
+test("after a new commit, readiness drops the old build and the old answer", async () => {
+  const kit = workspace();
+  const root = kit.dappPath;
+  const commit = () => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const old = kit.store.recordArtifact({
+    artifactId: "art_old", producingRunId: null, provenance: "external", projectId: DAPP, kind: "static-files",
+    sourceRepository: "Werewolf-Solutions/werewolf-dapp", githubArtifactId: "1", producerRunId: "1",
+    commitSha: commit(), version: "0.1.0",
+    buildProfileDigest: canonicalDigest("psm-deployment-build-profile:v1", { id: "production", publicInputs: {} }),
+    payloadAlgorithm: "psm-static-tree-sha256@1", payloadDigest: "sha256:p", archiveDigest: "sha256:a",
+    providerLocator: {}, provenanceUrl: null, createdAt: Date.now(), retainedUntil: Date.now() + 600_000,
+  });
+  const first = await kit.service.checkReadiness(DAPP, "production");
+  assert.ok(!first.readiness.items.some((item) => item.code === "artifact-missing" && item.status !== "ready"), "a build of the current commit is picked up");
+
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "werewolf-dapp", version: "0.1.1" }) + "\n");
+  execFileSync("git", ["-C", root, "commit", "-qam", "fix"]);
+  assert.equal(kit.service.lastReadiness(DAPP, "production"), null, "an answer about the previous commit is not shown again");
+
+  // An open page may still send the previous commit's selection.
+  const { readiness } = await kit.service.checkReadiness(DAPP, "production", { artifactId: old.artifactId });
+  const codes = readiness.items.filter((item) => item.status !== "ready").map((item) => item.code);
+  assert.ok(codes.includes("artifact-missing"), JSON.stringify(codes));
+  assert.ok(!codes.includes("artifact-source-mismatch"));
+  assert.ok(!codes.includes("version-not-increased"));
 });
 
 test("connection setup suggests only the resources and workflows declared for each slot", async () => {

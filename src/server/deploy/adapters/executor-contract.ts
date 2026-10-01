@@ -272,9 +272,12 @@ function releaseVersion(value: unknown, field: string): string {
   return output;
 }
 
-function timestamp(value: unknown, field: string): string {
+function timestamp(value: unknown, field: string, fractionalDigits: 3 | 9 = 3): string {
   const output = text(value, field, 40);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(output) || !Number.isFinite(Date.parse(output))) {
+  const format = fractionalDigits === 9
+    ? /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/
+    : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+  if (!format.test(output) || !Number.isFinite(Date.parse(output))) {
     fail(field, "must be a UTC ISO-8601 timestamp");
   }
   return output;
@@ -594,14 +597,25 @@ export function releaseDispatchInputs(input: ReleaseControllerDispatch): Record<
   };
 }
 
+const PREPARE_RESULT_WIRE_KEYS = {
+  schema: "schema", psmRunId: "psm_run_id", psmArtifactId: "psm_artifact_id",
+  projectId: "project_id", environmentId: "environment_id", unitId: "unit_id",
+  sourceRepository: "source_repository", producerRunId: "producer_run_id", githubArtifactId: "github_artifact_id",
+  commitSha: "commit_sha", version: "version", manifestDigest: "manifest_digest",
+  buildProfileDigest: "build_profile_digest", payloadAlgorithm: "payload_algorithm", payloadLimits: "payload_limits",
+  payloadDigest: "payload_digest", archiveDigest: "archive_digest", retainedUntil: "retained_until",
+} as const satisfies Record<keyof PrepareArtifactResult, string>;
+
 export function parsePrepareArtifactResult(value: unknown): PrepareArtifactResult {
-  const input = record(value, "result");
-  exactKeys(input, "result", [
-    "schema", "psm_run_id", "psm_artifact_id", "project_id", "environment_id", "unit_id",
-    "source_repository", "producer_run_id", "github_artifact_id", "commit_sha", "version",
-    "manifest_digest", "build_profile_digest", "payload_algorithm", "payload_limits",
-    "payload_digest", "archive_digest", "retained_until",
-  ]);
+  let input = record(value, "result");
+  // Published Todo workflows emitted the complete camelCase record under v1.
+  // Accept that exact legacy shape, never field-by-field aliases or defaults.
+  // Both shapes then pass the same schema, value and downstream identity checks.
+  if (!Object.hasOwn(input, "psm_run_id") && Object.hasOwn(input, "psmRunId")) {
+    exactKeys(input, "result", Object.keys(PREPARE_RESULT_WIRE_KEYS));
+    input = Object.fromEntries(Object.entries(PREPARE_RESULT_WIRE_KEYS).map(([local, wire]) => [wire, input[local]]));
+  }
+  exactKeys(input, "result", Object.values(PREPARE_RESULT_WIRE_KEYS));
   if (input.schema !== PREPARE_ARTIFACT_RESULT_SCHEMA) {
     fail("result.schema", `must be ${PREPARE_ARTIFACT_RESULT_SCHEMA}`);
   }
@@ -706,7 +720,7 @@ export function parseStaticReleaseResult(value: unknown): StaticReleaseResult {
     state: input.state,
     activatedAt: input.activated_at === null
       ? null
-      : timestamp(input.activated_at, "result.activated_at"),
+      : timestamp(input.activated_at, "result.activated_at", 9),
     verification,
   };
 }

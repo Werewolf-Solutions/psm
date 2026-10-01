@@ -5,7 +5,7 @@
 # executes project code, and every value it acts on is either a dispatch input covered by
 # execution_contract_digest or a file in this repository at the pinned commit.
 name: PSM static release
-run-name: release ${{ inputs.release_id }} to ${{ inputs.target_id }}
+run-name: release ${{ inputs.psm_run_id }} ${{ inputs.release_id }} to ${{ inputs.target_id }}
 
 on:
   workflow_dispatch:
@@ -149,6 +149,7 @@ jobs:
           PSM_PROJECT_ID: ${{ inputs.project_id }}
           PSM_ENVIRONMENT_ID: ${{ inputs.environment_id }}
           PSM_UNIT_ID: ${{ inputs.unit_id }}
+          PSM_OPERATION: ${{ inputs.operation }}
           PSM_SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           PSM_PSM_ARTIFACT_ID: ${{ inputs.psm_artifact_id }}
           PSM_GITHUB_ARTIFACT_ID: ${{ inputs.github_artifact_id }}
@@ -175,7 +176,7 @@ jobs:
       # PSM reads exactly this artifact: one name, one file inside it. It is uploaded even
       # when the release failed, because a reported failure is how a plan ends cleanly.
       - name: Upload the release result
-        if: always() && hashFiles(format('{0}/psm-release/psm-release-result.json', runner.temp)) != ''
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ inputs.psm_run_id }}-result

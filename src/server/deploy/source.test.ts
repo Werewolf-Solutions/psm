@@ -59,3 +59,15 @@ test("artifact output cannot escape its checkout", () => {
   assert.throws(() => artifactOutputPath(root, "../outside"));
   assert.throws(() => artifactOutputPath(root, "/tmp/outside"));
 });
+
+test("uncommitted application files are detected even when deployment metadata is unchanged", () => {
+  const root = repository();
+  assert.equal(deploymentInputsDirty(root), false);
+  fs.writeFileSync(path.join(root, "new-code.js"), "export const fixed = true;\n");
+  assert.equal(deploymentInputsDirty(root), true);
+  execFileSync("git", ["-C", root, "add", "new-code.js"]);
+  execFileSync("git", ["-C", root, "commit", "-qm", "new code"]);
+  assert.equal(deploymentInputsDirty(root), false);
+  fs.writeFileSync(path.join(root, "new-code.js"), "export const fixed = false;\n");
+  assert.equal(deploymentInputsDirty(root), true);
+});

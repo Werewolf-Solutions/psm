@@ -1,9 +1,16 @@
 # Release controller draft
 
-A draft of the contents of `Werewolf-Solutions/deployment-control`, the repository the
-`werewolf-static@1` release controller lives in. **Nothing here has run.** The repository
-does not exist yet, and this is kept in psm so the controller can be reviewed before it
-does.
+**Current status, 2026-09-29:** Todo's controller repository exists and its
+verified commit `661ab2bb67a19225fb0d1b388532a6ddf1a1e657` delivered the first
+successful managed release. The files here are the reviewed source for a PSM
+button that previews and publishes a controller bundle. For an App-bound
+connection, PSM generates a workflow variant using `PSM_SOURCE_READ_TOKEN` in
+place of the legacy artifact-reader App key. That variant is locally tested but
+has not yet been applied to the live controller. The legacy workflow below
+describes the existing controller and its historical pin.
+
+A reviewed source of the contents of `Werewolf-Solutions/deployment-control`, the
+repository where the `werewolf-static@1` release controller runs.
 
 ```
 release-static.yml            → .github/workflows/release-static.yml
@@ -32,14 +39,17 @@ The canonical-JSON and digest implementation in `scripts/psm_controller.py` was 
 produce byte-identical output and identical digests to `src/server/deploy/canonical.ts`,
 including non-ASCII strings, escapes and nested key ordering.
 
-## Before this can exist
+## Legacy setup requirements
 
-None of these are in place, and the first two are outside psm:
+These were the manual requirements for the original Todo controller. P07a's
+generated bundle replaces the first requirement and automates the controller
+files, branch and Environment checks after GitHub Create/Install consent:
 
 1. **A GitHub App** with Actions-read on the source repositories, installed in the org. Its
    ID goes in `vars.PSM_ARTIFACT_READER_APP_ID`, its key in
    `secrets.PSM_ARTIFACT_READER_PRIVATE_KEY`. Creating and installing the App is a repository
-   *owner* action in GitHub's web UI; nothing in this repository can do it. **The action pin
+   *owner* action in GitHub's web UI; nothing in this repository can do it. [P07a](../../roadmaps/github-button-setup.md)
+   replaces this App with a per-release token minted by PSM's own GitHub App. **The action pin
    it used to need is now resolved — see below.**
 2. **The host helper installed on the droplet**, with this target enrolled. Enrollment is
    where `contractRevision`, the deploy account, the canonical root and the host key

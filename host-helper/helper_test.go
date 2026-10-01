@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -91,10 +92,51 @@ func TestPayloadDigestHasStableGoldenVector(t *testing.T) {
 	}
 }
 
+func TestReleaseDirectoryReconcileRestoresNginxTraversal(t *testing.T) {
+	target := testTarget(t)
+	for _, directory := range []string{target.CanonicalRoot, filepath.Join(target.CanonicalRoot, "releases"), filepath.Join(target.CanonicalRoot, "incoming")} {
+		if err := os.MkdirAll(directory, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(directory, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observedDesired, _ := json.Marshal(observeDesired{Kind: "host-release-directory@1", Root: target.CanonicalRoot, RetainReleases: target.RetainReleases})
+	before, err := observeResource(target, observedDesired)
+	if err != nil || before.(map[string]any)["state"] != "update" {
+		t.Fatalf("private site root was not detected: %v, %v", before, err)
+	}
+	desired, _ := json.Marshal(releaseDirectoryDesired{Root: target.CanonicalRoot, RetainReleases: target.RetainReleases})
+	if _, err := reconcileReleaseDirectory(target, desired); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{target.CanonicalRoot, filepath.Join(target.CanonicalRoot, "releases")} {
+		info, err := os.Stat(name)
+		if err != nil || info.Mode().Perm() != 0755 {
+			t.Fatalf("nginx cannot traverse %s: %v, %v", name, info, err)
+		}
+	}
+	info, err := os.Stat(filepath.Join(target.CanonicalRoot, "incoming"))
+	if err != nil || info.Mode().Perm() != 0750 {
+		t.Fatalf("incoming permissions changed: %v, %v", info, err)
+	}
+	after, err := observeResource(target, observedDesired)
+	if err != nil || after.(map[string]any)["state"] != "in-sync" {
+		t.Fatalf("public site root was not observed as ready: %v, %v", after, err)
+	}
+}
+
 func tarPayload(t *testing.T, entries map[string][]byte) []byte {
 	t.Helper()
 	var output bytes.Buffer
 	writer := tar.NewWriter(&output)
+	if err := writer.WriteHeader(&tar.Header{Name: "site/", Mode: 0755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteHeader(&tar.Header{Name: "site/assets/", Mode: 0755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
 	keys := make([]string, 0, len(entries))
 	for key := range entries {
 		keys = append(keys, key)
@@ -124,10 +166,17 @@ func TestStageVerifiesBothDigestsAndActivationUsesCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := tarPayload(t, map[string][]byte{
-		"site/index.html":   []byte("hello"),
-		"site/version.json": []byte(`{"version":"0.5.2"}`),
+		"site/assets/app.js": []byte("ready"),
+		"site/index.html":    []byte("hello"),
+		"site/version.json":  []byte(`{"version":"0.5.2"}`),
 	})
 	stagingRoot := t.TempDir()
+	if err := os.Mkdir(filepath.Join(stagingRoot, "assets"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stagingRoot, "assets", "app.js"), []byte("ready"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(stagingRoot, "index.html"), []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +215,55 @@ func TestStageVerifiesBothDigestsAndActivationUsesCAS(t *testing.T) {
 	if _, err := activateRelease(t.TempDir(), target, targetDigest, activationRaw); err == nil {
 		t.Fatal("expected compare-and-swap failure")
 	}
+}
+
+func TestStagedReleaseIsReadableByNginxUnderTheServiceUmask(t *testing.T) {
+	// The shipped unit runs with UMask=0027; observed 2026-09-28 as nginx 403 on
+	// every path of the first Todo staging release.
+	previous := syscall.Umask(0o027)
+	defer syscall.Umask(previous)
+	target := testTarget(t)
+	for _, directory := range []string{"incoming", "releases"} {
+		if err := os.MkdirAll(filepath.Join(target.CanonicalRoot, directory), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	archive := tarPayload(t, map[string][]byte{"site/assets/app.js": []byte("ready"), "site/index.html": []byte("hello"), "site/version.json": []byte(`{"version":"0.6.0"}`)})
+	stagingRoot := t.TempDir()
+	_ = os.Mkdir(filepath.Join(stagingRoot, "assets"), 0755)
+	_ = os.WriteFile(filepath.Join(stagingRoot, "assets", "app.js"), []byte("ready"), 0644)
+	_ = os.WriteFile(filepath.Join(stagingRoot, "index.html"), []byte("hello"), 0644)
+	_ = os.WriteFile(filepath.Join(stagingRoot, "version.json"), []byte(`{"version":"0.6.0"}`), 0644)
+	payload, _, _, err := payloadDigest(stagingRoot, 10, 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveHash := sha256.Sum256(archive)
+	desiredRaw, _ := json.Marshal(stageDesired{ReleaseID: "rel_todo_060", ArtifactID: "artifact_todo_060", CommitSHA: strings.Repeat("a", 40), Version: "0.6.0", PayloadAlgorithm: payloadAlgorithm, PayloadDigest: payload, ArchiveDigest: "sha256:" + hex.EncodeToString(archiveHash[:]), MaximumFiles: 10, MaximumBytes: 1_000})
+	stage := func() {
+		t.Helper()
+		request := Request{IdempotencyKey: "deployment:run_1:unit:web#staged", ArchiveBytes: int64(len(archive)), Desired: desiredRaw}
+		if _, err := stageRelease(target, "sha256:"+strings.Repeat("b", 64), request, bytes.NewReader(archive)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := filepath.Join(target.CanonicalRoot, "releases", "rel_todo_060")
+	assertPublic := func() {
+		t.Helper()
+		for path, mode := range map[string]os.FileMode{release: 0755, filepath.Join(release, "site"): 0755, filepath.Join(release, "site", "assets"): 0755, filepath.Join(release, "site", "index.html"): 0644, filepath.Join(release, "site", "assets", "app.js"): 0644} {
+			info, err := os.Stat(path)
+			if err != nil || info.Mode().Perm() != mode {
+				t.Fatalf("%s is not readable by nginx: %v %v", path, info, err)
+			}
+		}
+	}
+	stage()
+	assertPublic()
+	// A release staged earlier with private modes is repaired by staging it again.
+	_ = os.Chmod(filepath.Join(release, "site", "assets"), 0750)
+	_ = os.Chmod(filepath.Join(release, "site", "index.html"), 0640)
+	stage()
+	assertPublic()
 }
 
 func TestArchiveLinksAreRejected(t *testing.T) {

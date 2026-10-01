@@ -7,11 +7,14 @@ import {
   type ConnectionProfile,
 } from "./connections.ts";
 import { BetterStackClient } from "./adapters/better-stack.ts";
-import { DigitalOceanClient, dnsMatches, type DigitalOceanDnsRecord } from "./adapters/digitalocean.ts";
-import { GitHubActionsAdapter, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
+import { DigitalOceanClient, DigitalOceanError, dnsMatches, type DigitalOceanDnsRecord } from "./adapters/digitalocean.ts";
+import { GitHubActionsAdapter, GitHubExecutorError, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
+import { deploymentGitHubToken, githubAppIdentity, githubAppTokens } from "./github-app.ts";
 import {
+  ExecutorContractError,
   RELEASE_EXECUTION_CONTRACT_SCHEMA,
   STATIC_PAYLOAD_ALGORITHM,
+  releaseDispatchInputs,
   releaseExecutionContractDigest,
   type PreparedArtifactIdentity,
   type ReleaseControllerDispatch,
@@ -19,6 +22,7 @@ import {
   type StaticReleaseExecutionContract,
 } from "./adapters/executor-contract.ts";
 import {
+  HostHelperError,
   SshHostHelperTransport,
   hostHelperRequest,
   type HostHelperResponse,
@@ -31,6 +35,8 @@ import {
   DeploymentStore,
   type DeploymentConnection,
   type DeploymentArtifact,
+  type DeploymentResourceBinding,
+  type DeploymentRunStep,
   type JsonValue,
 } from "./store.ts";
 import type {
@@ -47,6 +53,17 @@ function object(value: unknown): Record<string, unknown> {
 
 function json(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
+}
+
+export function newlyCreatedDnsStillPending(
+  result: ResourceDiscoveryResult,
+  binding: DeploymentResourceBinding | null,
+  step: DeploymentRunStep | null,
+  now: number,
+): boolean {
+  return result.state === "conflict" && result.detail === "The owned DNS record no longer exists"
+    && step?.submittedAt != null && binding != null && binding.boundAt >= step.submittedAt
+    && now - step.submittedAt >= 0 && now - step.submittedAt < 30_000;
 }
 
 export function deploymentConnectionProfile(connection: DeploymentConnection): ConnectionProfile {
@@ -156,7 +173,8 @@ function targetForResource(resource: ResourceManifest, environmentValue: Environ
   return units[0];
 }
 
-function helperData(response: HostHelperResponse): Record<string, unknown> {
+export function helperData(response: HostHelperResponse): Record<string, unknown> {
+  if (response.outcome === "failed") throw new HostHelperError(response.detail, response.code);
   const data = object(response.data);
   if (!Object.keys(data).length) throw new Error("host helper returned no observation data");
   return data;
@@ -164,6 +182,73 @@ function helperData(response: HostHelperResponse): Record<string, unknown> {
 
 function helperDesired(resource: Exclude<ResourceManifest, DigitalOceanDnsResource>, tls?: boolean): JsonValue {
   return json({ kind: resource.kind, ...resource.desired, ...(tls === undefined ? {} : { tls }) });
+}
+
+// A noop http-ready was planned from the full TLS observation, and the TLS
+// config keeps the :80 ACME location, so it re-checks that same rendering
+// instead of demanding the HTTP-only bootstrap file.
+/**
+ * Where a release stands on the target. It is staged into incoming/ and renamed
+ * into releases/<id> only with its receipt, and served only while `current`
+ * points at it. `unreadable` means the observation cannot say.
+ */
+export function releaseStateOnTarget(observed: Record<string, unknown>, releaseId: string): { state: "absent" | "staged" | "active" | "unreadable"; active: string | null } {
+  if ((observed.layout !== "ready" && observed.layout !== "missing") || !Array.isArray(observed.releases)) return { state: "unreadable", active: null };
+  const active = observed.active === null ? null : object(observed.active).releaseId;
+  if (observed.active !== null && typeof active !== "string") return { state: "unreadable", active: null };
+  const current = (active as string | null) ?? null;
+  if (current === releaseId) return { state: "active", active: current };
+  const staged = observed.releases.some((receipt) => object(receipt).releaseId === releaseId);
+  return { state: staged ? "staged" : "absent", active: current };
+}
+
+/** Only this exact, freshly observed target state can close a receiptless release as failed. */
+export function missingReceiptReleaseAbsent(observed: Record<string, unknown>, dispatch: ReleaseControllerDispatch): boolean {
+  const found = releaseStateOnTarget(observed, dispatch.releaseId);
+  return observed.targetId === dispatch.targetId
+    && observed.targetDigest === dispatch.executionContract.target.fingerprint
+    && found.state === "absent"
+    && found.active === (dispatch.executionContract.expectedCurrentRelease?.releaseId ?? null);
+}
+
+/**
+ * The target's active receipt, only when it is exactly the release this dispatch
+ * approved: same release, artifact, commit, version, both digests and target
+ * contract. Anything else is
+ * not ours to record.
+ */
+export function approvedReleaseActiveOnTarget(observed: Record<string, unknown>, dispatch: ReleaseControllerDispatch): Record<string, unknown> | null {
+  if (observed.layout !== "ready" || observed.targetId !== dispatch.targetId
+    || observed.targetDigest !== dispatch.executionContract.target.fingerprint
+    || observed.active === null || typeof observed.active !== "object") return null;
+  const active = object(observed.active);
+  return active.schema === "psm.werewolf.solutions/target-release/v1"
+    && active.targetId === dispatch.targetId
+    && active.payloadAlgorithm === dispatch.artifact.payloadAlgorithm
+    && active.releaseId === dispatch.releaseId
+    && active.artifactId === dispatch.artifact.psmArtifactId
+    && active.payloadDigest === dispatch.artifact.payloadDigest
+    && active.archiveDigest === dispatch.artifact.archiveDigest
+    && active.commitSha === dispatch.artifact.commitSha
+    && active.version === dispatch.artifact.version
+    && active.targetDigest === dispatch.executionContract.target.fingerprint
+    ? active : null;
+}
+
+/** A local contract error is raised before GitHub receives a dispatch request. */
+export function preDispatchContractFailure(events: readonly { type: string; data: JsonValue }[], actionId: string): boolean {
+  return events.some((event) => event.type === "submission-response-lost"
+    && object(event.data).actionId === actionId
+    && object(event.data).errorType === "ExecutorContractError");
+}
+
+export function rollbackAuthorization(rollback: boolean, automaticRollback: boolean, activeReleaseId: string | null, intendedReleaseId: string): { allowed: boolean; previousReleaseId: string | null } {
+  const allowed = !rollback && automaticRollback && activeReleaseId !== null && activeReleaseId !== intendedReleaseId;
+  return { allowed, previousReleaseId: allowed ? activeReleaseId : null };
+}
+
+export function ingressObservationTls(kind: string, operation: PlannedActionDocument["operation"]): false | undefined {
+  return kind === "reconcile-ingress-http@1" && operation !== "noop" ? false : undefined;
 }
 
 function stateResult(data: Record<string, unknown>, detail: string): ResourceDiscoveryResult {
@@ -219,11 +304,69 @@ export class DeploymentRuntimeAdapters {
       return []; // Unbound or unready connections are reported as their own blockers.
     }
     const controllers = (github.publicMetadata as { releaseControllers?: unknown })?.releaseControllers;
-    if (!Array.isArray(controllers) || !controllers.some((entry) => object(entry).targetId === targetId)) return [];
+    // The connection's own allowlist refuses every dispatch it does not name, so an
+    // unnamed tuple must block the plan here rather than fail the release later.
+    const releaseController = unit.executor.releaseController;
+    if (!Array.isArray(controllers) || !controllers.some((entry) => object(entry).targetId === targetId && object(entry).controller === releaseController)) {
+      return [{
+        id: `${unit.id}:controller-pin`, purpose: "deploy", title: "Release controller pin", ready: false,
+        detail: `The ${unit.executor.connection} connection (${github.name}) pins no ${releaseController} release controller for ${targetId}, so it would refuse this release before dispatch. Bind a connection that pins one, or review controller setup for this connection.`,
+      }];
+    }
     const adapter = this.#github(github);
     const checks: ExecutionReadinessCheck[] = [];
+    // Fixes PSM cannot make itself name the exact GitHub page where they are made.
+    const pinned = controllers.map(object).find((entry) => entry.targetId === targetId && entry.controller === releaseController) ?? {};
+    const controllerUrl = `https://github.com/${String(pinned.repository)}`;
+    const controllerBranch = String(pinned.ref ?? "").replace(/^refs\/heads\//, "");
+    const targetFile = `targets/${targetId.replace(/[:/]/g, "__")}.json`;
+    try {
+      const head = await adapter.controllerHead(targetId);
+      const moved = head.headSha !== head.pinnedHeadSha;
+      checks.push({
+        id: `${unit.id}:controller-pin`, purpose: "deploy", title: "Release controller pin",
+        ready: !moved,
+        // The full new commit stays in the text: the Pin button sends back exactly what was shown.
+        detail: !moved ? `Pinned to ${head.pinnedHeadSha.slice(0, 12)}, the current ${head.ref} of ${head.repository}.`
+          : `${head.repository} ${head.ref} moved from ${head.pinnedHeadSha.slice(0, 12)} to ${head.headSha}. Releases stay refused until you review the change (https://github.com/${head.repository}/compare/${head.pinnedHeadSha}...${head.headSha}) and pin the new commit.`,
+      });
+    } catch (error) {
+      checks.push({ id: `${unit.id}:controller-pin`, purpose: "deploy", title: "Release controller pin", ready: false, detail: `Could not read the release controller's current commit: ${error instanceof Error ? error.message : String(error)}` });
+    }
     const ssh = host.constraints.ssh;
     const contract = object(object(host.publicMetadata?.targetContracts)[targetId]);
+    try {
+      const observed = helperData(await this.#host.invoke({ connection: host, request: hostHelperRequest({ targetId, operation: "observe-target", desired: {} }) }));
+      const live = typeof observed.targetDigest === "string" ? observed.targetDigest : "";
+      const pinned = typeof contract.fingerprint === "string" ? contract.fingerprint : "";
+      checks.push({
+        id: `${unit.id}:target-contract`, purpose: "deploy", title: "Target contract",
+        ready: Boolean(live) && live === pinned,
+        // The full live digest stays in the text: the Pin button sends back exactly what was shown.
+        detail: live === pinned ? `The server's target contract matches the pinned ${pinned.slice(0, 19)}….`
+          : `The server's target contract changed from ${pinned.slice(0, 19)}… to ${live}. Releases would be refused at verification. Pin it only if you made or approved that change on the server.`,
+      });
+    } catch (error) {
+      checks.push({ id: `${unit.id}:target-contract`, purpose: "deploy", title: "Target contract", ready: false, detail: `Could not read the server's target contract: ${error instanceof Error ? error.message : String(error)}` });
+    }
+    // Where the GitHub plan has no branch protection, the reviewed set of people who can
+    // push stands in for it: anyone new could change the workflow that holds the release key.
+    if (pinned.branchProtection === "unavailable-on-plan") {
+      const reviewed = Array.isArray(pinned.reviewedWriters) ? pinned.reviewedWriters.map(String) : [];
+      try {
+        const writers = await adapter.listControllerWriters(targetId);
+        const added = writers.filter((login) => !reviewed.includes(login));
+        checks.push({
+          id: `${unit.id}:controller-writers`, purpose: "deploy", title: "Who can change the release controller",
+          ready: added.length === 0,
+          detail: added.length === 0
+            ? `${String(pinned.repository)} has no branch protection on its GitHub plan; releases run only at the pinned commit, and only ${reviewed.join(", ") || "nobody"} can push to it.`
+            : `${added.join(", ")} can now push to ${String(pinned.repository)}, which has no branch protection on its GitHub plan, so they could change the workflow that holds the release key. Remove their access at ${controllerUrl}/settings/access, or review controller setup again to accept them.`,
+        });
+      } catch (error) {
+        checks.push({ id: `${unit.id}:controller-writers`, purpose: "deploy", title: "Who can change the release controller", ready: false, detail: `Could not list who can push to ${String(pinned.repository)}: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
     // The key the controller uses: a CI release key PSM enrolled for this target on this host.
     const ci = this.#connections.store.listConnections().map(deploymentConnectionProfile).find((profile) =>
       profile.kind === "ssh-host-helper@1" && object(profile.publicMetadata).role === "ci"
@@ -239,8 +382,8 @@ export class DeploymentRuntimeAdapters {
         id: `${unit.id}:controller-target`, purpose: "deploy", title: "Release controller target file",
         ready: Object.keys(file).length > 0 && wrong.length === 0,
         // GitHub answers 404 both for a missing file and for a private repository the token cannot see.
-        detail: !Object.keys(file).length ? `PSM's GitHub token cannot read targets/${targetId.replace(/[:/]/g, "__")}.json at the pinned controller commit: the file is missing there, or the token has no access to ${String(controllers.map(object).find((entry) => entry.targetId === targetId)?.repository)}.`
-          : wrong.length ? `Update the controller's target file, then pin the new commit: ${wrong.map(([key, value]) => `${key} must be ${JSON.stringify(value)} (is ${JSON.stringify(file[key] ?? null)})`).join("; ")}.`
+        detail: !Object.keys(file).length ? `PSM's GitHub token cannot read ${targetFile} at the pinned controller commit: the file is missing there, or the token has no access to ${String(pinned.repository)}. Create it at ${controllerUrl}/new/${controllerBranch}/targets?filename=${targetFile.slice("targets/".length)}, then pin the new commit.`
+          : wrong.length ? `Update the controller's target file, then pin the new commit: ${wrong.map(([key, value]) => `${key} must be ${JSON.stringify(value)} (is ${JSON.stringify(file[key] ?? null)})`).join("; ")}. Edit it at ${controllerUrl}/edit/${controllerBranch}/${targetFile}`
           : "Matches the enrolled target.",
       });
     } catch (error) {
@@ -260,7 +403,92 @@ export class DeploymentRuntimeAdapters {
     } catch (error) {
       checks.push({ id: `${unit.id}:controller-credentials`, purpose: "deploy", title: "Release controller credentials", ready: false, detail: `Could not list the controller's GitHub Environment secrets: ${error instanceof Error ? error.message : String(error)}` });
     }
+    try {
+      const controller = controllers.map(object).find((entry) => entry.targetId === targetId);
+      if (controller?.sourceAuthorization === "installation-token") {
+        if (!githubAppIdentity(github)) throw new Error("Connect the GitHub App to supply short-lived source access");
+        await githubAppTokens(this.#connections.broker).token(github, unit.executor.sourceRepository, { actions: "read" });
+        checks.push({ id: `${unit.id}:controller-artifact-reader`, purpose: "deploy", title: "Source artifact access", ready: true,
+          detail: "The GitHub App can read the source artifact. PSM will publish a fresh source-only token before dispatch." });
+      } else {
+      const [secrets, variables] = await Promise.all([adapter.listEnvironmentSecretNames(targetId), adapter.listEnvironmentVariableNames(targetId)]);
+      const missing = [
+        ...(variables?.includes("PSM_ARTIFACT_READER_APP_ID") ? [] : ["variable PSM_ARTIFACT_READER_APP_ID"]),
+        ...(secrets?.includes("PSM_ARTIFACT_READER_PRIVATE_KEY") ? [] : ["secret PSM_ARTIFACT_READER_PRIVATE_KEY"]),
+      ];
+      checks.push({
+        id: `${unit.id}:controller-artifact-reader`, purpose: "deploy", title: "Release controller artifact reader",
+        ready: missing.length === 0,
+        detail: missing.length === 0 ? "The controller's GitHub Environment holds the artifact-reader GitHub App credentials."
+          : `The controller's GitHub Environment is missing ${missing.join(" and ")}, so its release job cannot download the prepared artifact. Install the artifact-reader GitHub App on the source repository and add both to the ${String(pinned.githubEnvironment)} environment at ${controllerUrl}/settings/environments (docs/deploy/TODO-STAGING-SETUP.md, steps 4–5).`,
+      });
+      }
+    } catch (error) {
+      checks.push({ id: `${unit.id}:controller-artifact-reader`, purpose: "deploy", title: "Release controller artifact reader", ready: false, detail: `Could not list the controller's GitHub Environment: ${error instanceof Error ? error.message : String(error)}` });
+    }
     return checks;
+  }
+
+  /**
+   * Pin the target contract the helper attests now, only if it is the digest the
+   * operator reviewed. Every host connection that pinned the old digest for this
+   * target moves with it, so plans made against the old one go stale.
+   */
+  async pinTargetContract(unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest }, reviewedDigest: string): Promise<{ targetId: string; fingerprint: string; connections: string[] }> {
+    if (unit.target.kind !== "ssh-release-directory@1") throw new Error("this unit has no host target");
+    const targetId = unit.target.targetId;
+    const host = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.target.observerConnection, kind: "ssh-host-helper@1" });
+    const observed = helperData(await this.#host.invoke({ connection: host, request: hostHelperRequest({ targetId, operation: "observe-target", desired: {} }) }));
+    if (observed.targetDigest !== reviewedDigest) throw new Error(`The server now attests ${String(observed.targetDigest).slice(0, 19)}…, not the reviewed ${reviewedDigest.slice(0, 19)}…. Check readiness again.`);
+    const previous = String(object(object(host.publicMetadata?.targetContracts)[targetId]).fingerprint ?? "");
+    const moved: string[] = [];
+    for (const record of this.#connections.store.listConnections().filter((item) => item.kind === "ssh-host-helper@1")) {
+      const metadata = object(record.metadata);
+      const publicMetadata = object(metadata.publicMetadata);
+      const contracts = object(publicMetadata.targetContracts);
+      const entry = object(contracts[targetId]);
+      if (entry.fingerprint !== previous) continue;
+      this.#connections.store.updateConnection({
+        connectionId: record.connectionId, expectedMetadataRevision: record.metadataRevision, label: record.label, readiness: record.readiness,
+        metadata: json({ ...metadata, publicMetadata: { ...publicMetadata, targetContracts: { ...contracts, [targetId]: { ...entry, fingerprint: reviewedDigest } } } }),
+        constraints: record.constraints, secretGeneration: record.secretGeneration, updatedAt: Date.now(),
+      });
+      moved.push(record.connectionId);
+    }
+    return { targetId, fingerprint: reviewedDigest, connections: moved };
+  }
+
+  /**
+   * Move a target's controller pin to the commit its ref points at now, only if
+   * that is the commit the operator reviewed. Saving bumps the connection's
+   * metadata revision, so plans made against the old pin go stale.
+   */
+  async pinControllerHead(unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest }, reviewedHeadSha: string): Promise<{ repository: string; ref: string; headSha: string; workflowBlobSha: string }> {
+    if (unit.executor.kind !== "github-actions@1" || unit.target.kind !== "ssh-release-directory@1") throw new Error("this unit has no GitHub release controller");
+    const github = this.#connections.profile({ checkoutId: context.checkoutId, environmentId: context.environment.id, slot: unit.executor.connection, kind: "github-actions@1" });
+    const managed = (github.publicMetadata?.releaseControllers as GitHubActionsConnectionMetadata["releaseControllers"] | undefined)
+      ?.find((entry) => entry.targetId === unit.target.targetId);
+    if (managed?.sourceAuthorization === "installation-token") throw new Error("Use Review controller setup to verify the complete App-managed bundle before moving its pin");
+    const head = await this.#github(github).controllerHead(unit.target.targetId);
+    if (head.headSha !== reviewedHeadSha) throw new Error(`${head.repository} ${head.ref} is now at ${head.headSha.slice(0, 12)}, not the reviewed ${reviewedHeadSha.slice(0, 12)}. Check readiness again.`);
+    const record = this.#connections.store.getConnection(github.connectionId);
+    const metadata = object(record.metadata);
+    const publicMetadata = object(metadata.publicMetadata);
+    const controllers = Array.isArray(publicMetadata.releaseControllers) ? publicMetadata.releaseControllers.map(object) : [];
+    const updated = controllers.map((controller) => controller.repository === head.repository && controller.ref === head.ref && controller.expectedHeadSha === head.pinnedHeadSha
+      ? { ...controller, expectedHeadSha: head.headSha, expectedWorkflowBlobSha: head.workflowBlobSha }
+      : controller);
+    this.#connections.store.updateConnection({
+      connectionId: record.connectionId,
+      expectedMetadataRevision: record.metadataRevision,
+      label: record.label,
+      readiness: record.readiness,
+      metadata: json({ ...metadata, publicMetadata: { ...publicMetadata, releaseControllers: updated } }),
+      constraints: record.constraints,
+      secretGeneration: record.secretGeneration,
+      updatedAt: Date.now(),
+    });
+    return { repository: head.repository, ref: head.ref, headSha: head.headSha, workflowBlobSha: head.workflowBlobSha };
   }
 
   /**
@@ -310,7 +538,7 @@ export class DeploymentRuntimeAdapters {
   #github(profile: ConnectionProfile): GitHubActionsAdapter {
     return new GitHubActionsAdapter({
       metadata: profile.publicMetadata as unknown as GitHubActionsConnectionMetadata,
-      token: () => this.#connections.withToken(profile, async (token) => token),
+      token: (request) => deploymentGitHubToken(this.#connections.broker, profile, request),
     });
   }
 
@@ -421,10 +649,7 @@ export class DeploymentRuntimeAdapters {
       } : null,
       intendedRelease: { releaseId: intendedReleaseId, payloadDigest: intendedPayloadDigest },
       plan: { digest: context.plan.digest, expiresAt: new Date(document.expiresAt).toISOString() },
-      conditionalRollback: {
-        allowed: !rollback && document.policy.authority.automaticRollback === true && active !== null,
-        previousReleaseId: active?.releaseId ?? null,
-      },
+      conditionalRollback: rollbackAuthorization(rollback, document.policy.authority.automaticRollback === true, active?.releaseId ?? null, intendedReleaseId),
       pm2: { invariant: "unchanged", snapshotDigest: this.#pm2Digest(context, unit) },
       probes,
     };
@@ -446,8 +671,35 @@ export class DeploymentRuntimeAdapters {
 
   async #submitRelease(context: DeploymentAdapterContext): Promise<AdapterObservation> {
     const profile = this.#profileForAction(context, "github-actions@1");
-    const dispatch = this.#releaseDispatch(context);
-    const receipt = await this.#github(profile).dispatchRelease(dispatch, { signal: context.signal });
+    let dispatch: ReleaseControllerDispatch;
+    try {
+      dispatch = this.#releaseDispatch(context);
+      // Reject deterministic local contract errors before contacting GitHub.
+      releaseDispatchInputs(dispatch);
+    } catch (error) {
+      if (error instanceof ExecutorContractError) {
+        return { outcome: "failed", data: { reason: "local-contract-invalid", detail: error.message.slice(0, 300) } };
+      }
+      throw error;
+    }
+    const adapter = this.#github(profile);
+    // The allowlist answers without contacting GitHub, so a refusal is known, not a lost response.
+    const policyRejection = adapter.releaseDispatchPolicyRejection(dispatch);
+    if (policyRejection) {
+      return { outcome: "failed", data: { reason: "release-policy-rejected", detail: `The pinned GitHub connection rejected this release before dispatch: ${policyRejection}. Nothing was sent to GitHub or the target.` } };
+    }
+    const controllers = (profile.publicMetadata as unknown as GitHubActionsConnectionMetadata).releaseControllers;
+    const controller = controllers.find((entry) => entry.targetId === dispatch.targetId);
+    if (controller?.sourceAuthorization === "installation-token") {
+      const sharing = this.#connections.store.listConnections().some((record) => record.kind === "github-actions@1"
+        && (deploymentConnectionProfile(record).publicMetadata?.releaseControllers as GitHubActionsConnectionMetadata["releaseControllers"] | undefined)
+          ?.some((entry) => entry.targetId !== dispatch.targetId && entry.repository === controller.repository && entry.githubEnvironment === controller.githubEnvironment));
+      if (sharing)
+        throw new Error("Each managed target needs its own GitHub Environment for source-token delivery");
+      const sourceToken = await githubAppTokens(this.#connections.broker).token(profile, dispatch.artifact.sourceRepository, { actions: "read" }, true);
+      await adapter.publishEnvironmentSecrets(dispatch.targetId, { PSM_SOURCE_READ_TOKEN: sourceToken }, { signal: context.signal });
+    }
+    const receipt = await adapter.dispatchRelease(dispatch, { signal: context.signal });
     return {
       outcome: "pending",
       externalId: receipt.providerRunId ?? context.idempotencyKey,
@@ -460,24 +712,59 @@ export class DeploymentRuntimeAdapters {
     const data = object(stored.data);
     const receipt = data.receipt as unknown as GitHubDispatchReceipt | undefined;
     const dispatch = data.dispatch as unknown as ReleaseControllerDispatch | undefined;
-    if (!receipt || !dispatch) return { outcome: "unknown", data: { reason: "dispatch-receipt-unavailable" } };
     const profile = this.#profileForAction(context, "github-actions@1");
     const github = this.#github(profile);
+    if (!receipt || !dispatch) return this.#observeReleaseWithoutReceipt(context, github);
     const polled = await github.pollRun(receipt, { signal: context.signal });
+    // Every non-final answer carries the receipt forward: it is the only record of
+    // which GitHub run this step started, and recovery needs it again.
+    const carried = { receipt: polled.receipt, dispatch } as unknown as Record<string, JsonValue>;
     if (!polled.run || polled.run.status !== "completed") {
-      return { outcome: "pending", externalId: polled.run?.providerRunId ?? context.externalId, data: json({ receipt: polled.receipt, dispatch }) };
+      return { outcome: "pending", externalId: polled.run?.providerRunId ?? context.externalId, data: json(carried) };
     }
     if (polled.run.conclusion !== "success") {
-      return { outcome: "unknown", externalId: polled.run.providerRunId, data: { reason: `controller-${polled.run.conclusion ?? "failed"}` } };
+      const step = await github.releaseTargetStep(polled.receipt, { signal: context.signal });
+      const reason = `controller-${polled.run.conclusion ?? "failed"}`;
+      if (!step.reached) {
+        return {
+          outcome: "failed",
+          externalId: polled.run.providerRunId,
+          data: json({ ...carried, reason, detail: `The release controller stopped${step.stoppedAt ? ` at "${step.stoppedAt}"` : ""} before reaching the target, so nothing on the server changed. See ${polled.run.provenanceUrl}` }),
+        };
+      }
+      const untouched = await this.#releaseOnTarget(context, dispatch, polled.run.providerRunId);
+      if (untouched) {
+        return {
+          outcome: "failed",
+          externalId: polled.run.providerRunId,
+          data: json({ ...carried, reason, detail: `The release controller failed${step.stoppedAt ? ` at "${step.stoppedAt}"` : ""}. ${untouched} See ${polled.run.provenanceUrl}` }),
+        };
+      }
+      return { outcome: "unknown", externalId: polled.run.providerRunId, data: json({ ...carried, reason }) };
     }
-    const resultValue = await github.downloadRunArtifactJson(
-      polled.receipt,
-      `${context.run.runId}-result`,
-      "psm-release-result.json",
-      { signal: context.signal },
-    );
+    let resultValue: unknown;
+    try {
+      resultValue = await github.downloadRunArtifactJson(
+        polled.receipt,
+        `${context.run.runId}-result`,
+        "psm-release-result.json",
+        { signal: context.signal },
+      );
+    } catch (error) {
+      if (!(error instanceof GitHubExecutorError && error.code === "artifact-integrity"
+        && error.message === "workflow must retain exactly one named result artifact")) throw error;
+      // GitHub completed, but published no result to import. The target's own
+      // exact receipt can establish what is active; it cannot make this run a
+      // verified success without the controller's result artifact.
+      const onTarget = await this.#releaseOnTarget(context, dispatch, polled.run.providerRunId);
+      if (!onTarget) return { outcome: "unknown", externalId: polled.run.providerRunId, data: json({ ...carried, reason: "result-artifact-missing" }) };
+      return { outcome: "failed", externalId: polled.run.providerRunId, data: json({
+        ...carried, reason: "result-artifact-missing",
+        detail: `The controller completed but uploaded no release result. ${onTarget} See ${polled.run.provenanceUrl}`,
+      }) };
+    }
     const result = await github.importReleaseResult(polled.receipt, dispatch, resultValue, { signal: context.signal });
-    if (result.state === "failed") return { outcome: "unknown", externalId: result.providerRunId, data: json(result) };
+    if (result.state === "failed") return { outcome: "unknown", externalId: result.providerRunId, data: json({ ...result, ...carried }) };
     if (result.state === "rolled-back") return { outcome: "rolled-back", externalId: result.providerRunId, data: json(result) };
     const document = planDocument(context);
     const artifact = this.#connections.store.getArtifact(dispatch.artifact.psmArtifactId);
@@ -495,11 +782,121 @@ export class DeploymentRuntimeAdapters {
       activatedAt: Date.parse(result.activatedAt ?? new Date().toISOString()),
       expectedCurrentReleaseId: dispatch.executionContract.expectedCurrentRelease?.releaseId ?? null,
     });
+    // Redeploying a release left active-but-unverified verifies it in place.
+    this.#connections.store.verifyActiveRelease({
+      releaseId: result.releaseId,
+      targetId: result.targetId,
+      activationRunId: context.run.runId,
+      receipt: json({ ...result, commit: artifact.commitSha, version: artifact.version, payloadDigest: artifact.payloadDigest }),
+    });
     return {
       outcome: document.operation === "rollback" ? "rolled-back" : "succeeded",
       externalId: result.providerRunId,
       data: json(result),
     };
+  }
+
+  /**
+   * After the controller finished, the target's own answer says exactly what this
+   * release left behind. Returns that sentence, or null when the target cannot say.
+   * An approved release left active without verification is recorded as the
+   * target's active release, so the next plan's compare-and-set expects it.
+   */
+  async #releaseOnTarget(context: DeploymentAdapterContext, dispatch: ReleaseControllerDispatch, providerRunId: string): Promise<string | null> {
+    const document = planDocument(context);
+    const unit = unitForAction(context);
+    const host = this.#connections.profile({ checkoutId: document.checkoutId, environmentId: document.environmentId, slot: unit.target.observerConnection, kind: "ssh-host-helper@1", plan: document });
+    const observed = helperData(await this.#host.invoke({ connection: host, request: hostHelperRequest({ targetId: dispatch.targetId, operation: "observe-target", desired: {} }), signal: context.signal }));
+    const found = releaseStateOnTarget(observed, dispatch.releaseId);
+    const active = found.active ?? "none";
+    if (found.state === "absent") return `The target shows ${dispatch.releaseId} was never staged or activated (active release: ${active}), so nothing on the server changed.`;
+    if (found.state === "staged") return `The target shows ${dispatch.releaseId} staged but not activated; the active release is still ${active}.`;
+    if (found.state !== "active") return null;
+    const receipt = approvedReleaseActiveOnTarget(observed, dispatch);
+    if (!receipt) {
+      // The controller is finished and the target is fully observed, so this is
+      // known, not uncertain; it just is not the approved release to record.
+      const live = object(observed.active);
+      const differs = ["artifactId", "commitSha", "version", "payloadDigest", "archiveDigest"].some((key) => live[key] !== (key === "artifactId" ? dispatch.artifact.psmArtifactId : (dispatch.artifact as unknown as Record<string, unknown>)[key]));
+      if (differs) return null;
+      return `The target shows ${dispatch.releaseId} active, staged under target contract ${String(live.targetDigest).slice(0, 19)}… while this run approved ${dispatch.executionContract.target.fingerprint.slice(0, 19)}…, so PSM did not record it. The target contract changed after it was pinned; re-verify it before deploying again.`;
+    }
+    if (this.#connections.store.getActiveRelease(dispatch.targetId)?.releaseId !== dispatch.releaseId) {
+      const artifact = this.#connections.store.getArtifact(dispatch.artifact.psmArtifactId);
+      this.#connections.store.activateRelease({
+        releaseId: dispatch.releaseId,
+        artifactId: artifact.artifactId,
+        activationRunId: context.run.runId,
+        targetId: dispatch.targetId,
+        projectId: dispatch.projectId,
+        environmentId: dispatch.environmentId,
+        unitId: dispatch.unitId,
+        provenance: "managed",
+        targetContractDigest: dispatch.executionContract.target.fingerprint,
+        receipt: json({ verified: false, providerRunId, releaseId: dispatch.releaseId, commit: artifact.commitSha, version: artifact.version, payloadDigest: artifact.payloadDigest, stagedAt: receipt.stagedAt ?? null }),
+        activatedAt: Date.now(),
+        expectedCurrentReleaseId: dispatch.executionContract.expectedCurrentRelease?.releaseId ?? null,
+      });
+    }
+    return `The target shows ${dispatch.releaseId} active, but PSM has no successful verification receipt. PSM recorded it as active and unverified; a fresh reviewed plan can verify it in place.`;
+  }
+
+  /**
+   * Steps held before receipts were carried forward kept only GitHub's run id. That
+   * id, the PSM run in the run's title and the target's own state still decide it.
+   */
+  async #observeReleaseWithoutReceipt(context: DeploymentAdapterContext, github: GitHubActionsAdapter): Promise<AdapterObservation> {
+    let providerRunId = context.step?.externalId ?? "";
+    if (!/^[1-9][0-9]{0,19}$/.test(providerRunId)) {
+      if (preDispatchContractFailure(this.#connections.store.listEvents(context.run.runId), context.action.actionId)) {
+        return { outcome: "failed", data: { reason: "local-contract-invalid", detail: "The execution contract was rejected locally before GitHub was contacted; no release was dispatched." } };
+      }
+      const dispatch = this.#releaseDispatch(context);
+      if (!context.step?.submittedAt) return { outcome: "unknown", data: { reason: "dispatch-receipt-unavailable" } };
+      const policyRejection = github.releaseDispatchPolicyRejection(dispatch);
+      if (policyRejection) {
+        if (await this.#missingReceiptTargetUnchanged(context, dispatch)) {
+          return { outcome: "failed", data: { reason: "release-policy-rejected", detail: `The pinned GitHub connection rejected this release before dispatch: ${policyRejection}. The target still has the previously approved release.` } };
+        }
+        return { outcome: "unknown", data: { reason: "release-policy-rejected-target-uncertain", detail: `The pinned GitHub connection rejected dispatch locally (${policyRejection}), but the target does not match the approved prior release.` } };
+      }
+      try {
+        providerRunId = await github.findReleaseRunByCorrelation(dispatch.targetId, context.run.runId, context.step.submittedAt, { signal: context.signal }) ?? "";
+      } catch (error) {
+        if (error instanceof GitHubExecutorError) {
+          return { outcome: "unknown", data: { reason: "dispatch-search-inconclusive", detail: error.message.slice(0, 300) } };
+        }
+        throw error;
+      }
+      if (!providerRunId) {
+        if (await this.#missingReceiptTargetUnchanged(context, dispatch)) {
+          return { outcome: "failed", data: { reason: "release-not-dispatched", detail: "GitHub workflow history contains no run for this submission, and the target still has the previously approved release with no staged or active copy of the intended release." } };
+        }
+        return { outcome: "unknown", data: { reason: "dispatch-receipt-unavailable", detail: "No matching GitHub run was found, but the target has not proved the intended release absent and its previous release unchanged." } };
+      }
+    }
+    const dispatch = this.#releaseDispatch(context);
+    const run = await github.releaseRunById(dispatch.targetId, providerRunId, context.run.runId, { signal: context.signal });
+    if (!run.completed) return { outcome: "unknown", externalId: providerRunId, data: { reason: "controller-still-running" } };
+    const reason = `controller-${run.conclusion ?? "failed"}`;
+    if (run.conclusion !== "success" && !run.reached) {
+      return { outcome: "failed", externalId: providerRunId, data: json({ reason, detail: `The release controller stopped${run.stoppedAt ? ` at "${run.stoppedAt}"` : ""} before reaching the target, so nothing on the server changed. See ${run.provenanceUrl}` }) };
+    }
+    const untouched = await this.#releaseOnTarget(context, dispatch, providerRunId);
+    if (untouched && run.conclusion !== "success") {
+      return { outcome: "failed", externalId: providerRunId, data: json({ reason, detail: `The release controller failed${run.stoppedAt ? ` at "${run.stoppedAt}"` : ""}. ${untouched} See ${run.provenanceUrl}` }) };
+    }
+    return { outcome: "unknown", externalId: providerRunId, data: { reason } };
+  }
+
+  async #missingReceiptTargetUnchanged(context: DeploymentAdapterContext, dispatch: ReleaseControllerDispatch): Promise<boolean> {
+    const document = planDocument(context);
+    const unit = unitForAction(context);
+    const host = this.#connections.profile({ checkoutId: document.checkoutId, environmentId: document.environmentId,
+      slot: unit.target.observerConnection, kind: "ssh-host-helper@1", plan: document });
+    const observed = helperData(await this.#host.invoke({ connection: host,
+      request: hostHelperRequest({ targetId: dispatch.targetId, operation: "observe-target", desired: {} }), signal: context.signal }));
+    return missingReceiptReleaseAbsent(observed, dispatch);
   }
 
   async #checkActivation(context: DeploymentAdapterContext): Promise<AdapterObservation> {
@@ -538,7 +935,17 @@ export class DeploymentRuntimeAdapters {
         if (binding.connectionId !== input.profile.connectionId || binding.providerAccount !== observed.accountId) {
           return { state: "conflict", detail: "DNS ownership binding points at another connection or account", observed: evidence, providerAccount: observed.accountId };
         }
-        const owned = observed.records.find((record) => record.id === binding.providerObjectId);
+        let owned = observed.records.find((record) => record.id === binding.providerObjectId);
+        // The filtered list can lag a successful create. Check the bound ID
+        // directly before declaring that a record disappeared.
+        if (!owned) {
+          try {
+            const byId = await client.getDns(input.resource.desired.zone, binding.providerObjectId, signal);
+            if (byId.name === input.resource.desired.name && byId.type === input.resource.desired.type) owned = byId;
+          } catch (error) {
+            if (!(error instanceof DigitalOceanError && error.status === 404)) throw error;
+          }
+        }
         if (!owned) return { state: "conflict", detail: "The owned DNS record no longer exists", observed: evidence, providerAccount: observed.accountId, providerObjectId: binding.providerObjectId };
         return {
           state: dnsMatches(owned, input.resource, input.address) ? "in-sync" : "update",
@@ -612,13 +1019,19 @@ export class DeploymentRuntimeAdapters {
     if (resource.kind === "digitalocean-dns-record@1") throw new Error("DNS does not use the host helper");
     const unit = targetForResource(resource, environmentValue);
     let operation = "observe-resource";
-    let desired = helperDesired(resource, context.action.kind === "reconcile-ingress-http@1" ? false : undefined);
+    let desired = helperDesired(resource, ingressObservationTls(context.action.kind, action.operation));
     if (context.action.kind === "validate-nginx@1" || context.action.kind === "reload-nginx@1") {
       operation = "validate-nginx";
       desired = {};
     }
     const response = await this.#host.invoke({ connection: profile, request: hostHelperRequest({ targetId: unit.target.targetId, operation, desired }), signal: context.signal });
     const data = helperData(response);
+    // A syntax check cannot prove that systemctl actually reloaded nginx. If
+    // the reload response was lost, hold the run for recovery instead of
+    // reporting the old process as ready for ACME validation.
+    if (context.action.kind === "reload-nginx@1") {
+      return { outcome: "unknown", data: json({ reason: "nginx reload result is unavailable" }) };
+    }
     const state = typeof data.state === "string" ? data.state : null;
     return { outcome: operation === "validate-nginx" || state === "in-sync" ? "succeeded" : "failed", data: json(data) };
   }
@@ -633,7 +1046,7 @@ export class DeploymentRuntimeAdapters {
     const desired = context.action.kind === "reload-nginx@1" || context.action.kind === "validate-nginx@1"
       ? {}
       : json(resource.desired);
-    await this.#host.invoke({
+    const response = await this.#host.invoke({
       connection: profile,
       request: hostHelperRequest({
         targetId: unit.target.targetId,
@@ -645,6 +1058,9 @@ export class DeploymentRuntimeAdapters {
       }),
       signal: context.signal,
     });
+    if (context.action.kind === "reload-nginx@1") {
+      return { outcome: "succeeded", externalId: context.idempotencyKey, data: json(helperData(response)) };
+    }
     return { outcome: "pending", externalId: context.idempotencyKey, data: { accepted: true } };
   }
 
@@ -737,6 +1153,10 @@ export class DeploymentRuntimeAdapters {
           document.environmentId,
           context.signal,
         );
+        const binding = this.#connections.store.getResourceBinding(document.projectId, document.environmentId, resource.id);
+        if (newlyCreatedDnsStillPending(result, binding, context.step, Date.now())) {
+          return { outcome: "pending", externalId: context.externalId, data: json({ ...result, detail: "Waiting for newly created DNS record to become observable" }) };
+        }
         return { outcome: result.state === "in-sync" ? "succeeded" : "failed", externalId: context.externalId, data: json(result) };
       },
     };

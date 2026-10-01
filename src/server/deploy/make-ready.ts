@@ -28,7 +28,7 @@ export interface PreparationJob {
   planId: string | null;
   publicationId?: string | null;
   /** Why a blocked job is blocked, when psm can tell on its own that the cause has gone. */
-  blockedBy?: "capabilities" | "checkout" | "external" | "unchanged" | null;
+  blockedBy?: "capabilities" | "checkout" | "external" | "unchanged" | "artifact" | null;
   failure: string | null;
   /** Which AI clears the steps psm cannot do alone. Null means the project's own. */
   engine: string | null;
@@ -333,7 +333,22 @@ export class DeploymentPreparationController {
     if (job.runId) {
       const run = service.runView(job.runId);
       if (!run.terminal) { this.save(job); return; }
-      if (run.state !== "succeeded") job.failure = `${job.phase === "build" ? "Build" : "Infrastructure preparation"} run ${job.runId} ended ${String(run.state)}. Inspect its events and repair the cause.`;
+      if (run.state !== "succeeded") {
+        const events = run.events as { type: string; level: string; message: string; data?: { failureStage?: string } }[] | undefined;
+        const failure = events?.slice().reverse().find((event) => event.level === "error");
+        job.failure = failure?.message || `${job.phase === "build" ? "Build" : "Infrastructure preparation"} run ${job.runId} ended ${String(run.state)}. Inspect its events and repair the cause.`;
+        // A successful build rejected by PSM cannot be repaired in the app's
+        // source room. Older saved runs lack failureStage but retain this error.
+        if (job.phase === "build" && failure?.type === "prepare-failed"
+          && (failure.data?.failureStage === "import" || failure.data?.failureStage === "dispatch"
+            || failure.message === "Prepare receipt does not match its dispatch")) {
+          job.state = "blocked"; job.blockedBy = "artifact";
+          job.message = failure.data?.failureStage === "dispatch"
+            ? "PSM could not dispatch the build. Review the run error and its GitHub connection, then resume preparation after correcting the cause."
+            : "The GitHub build succeeded, but PSM could not verify or import its artifact. Review the run error and Open GitHub run below. Resume preparation after correcting the cause in PSM or the artifact workflow; no application-source repair was started.";
+          this.save(job); return;
+        }
+      }
       job.runId = null; job.planId = null; job.state = "running";
     }
     await this.options.repairConnections?.(projectId, environmentId);

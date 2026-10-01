@@ -75,6 +75,15 @@ function boundedText(value: unknown, label: string, maximum = 500): string {
   return value;
 }
 
+function boundedHelperDetail(value: unknown): string {
+  // Root-owned command diagnostics commonly contain lines of stderr. Keep the
+  // bounded content but flatten line breaks before it reaches run events/UI.
+  if (typeof value !== "string" || value.length > 500) {
+    throw new HostHelperError("helper detail is invalid", "helper-response-invalid");
+  }
+  return boundedText(value.replace(/[\r\n\t]+/g, " "), "helper detail", 500);
+}
+
 export function encodeHostHelperFrame(request: HostHelperRequest, archive?: Uint8Array): Uint8Array {
   const payload = archive ?? new Uint8Array();
   if (payload.byteLength > MAX_ARCHIVE_BYTES) throw new HostHelperError("archive exceeds the helper limit", "helper-request-invalid");
@@ -131,7 +140,7 @@ export function decodeHostHelperFrame(value: Uint8Array, expected: HostHelperReq
     operation: expected.operation,
     outcome: body.outcome,
     code: boundedText(body.code, "helper code", 120),
-    detail: boundedText(body.detail, "helper detail", 500),
+    detail: boundedHelperDetail(body.detail),
     observedAt,
     ...(body.data === undefined ? {} : { data: body.data as JsonValue }),
   };

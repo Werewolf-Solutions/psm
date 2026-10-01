@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import type { AgentPermission, PermissionSnapshot } from "./agent-permissions.ts";
 import { AgentPermissionStore, PermissionError } from "./agent-permissions.ts";
 import { operationDigest } from "./agent-policy.ts";
+import { compareWorkspaceVersions } from "./deploy/source.ts";
 
 const MAX_FILE = 1024 * 1024;
 const PROTECTED = /^(?:\.git|\.claude|\.codex|\.agents|\.ssh|\.psm-data|\.psm-sessions\.json|\.env(?:\..*)?|\.npmrc|\.netrc|\.mcp\.json|.*\.(?:pem|key|p12|pfx))$/i;
@@ -207,14 +208,68 @@ export class RepositoryTools {
     this.staged.set(key, { index: this.indexDigest(), head: this.headIdentity() });
     return `Staged ${files.join(", ")}`;
   }
+  /** Root X.Y.Z belongs to the managed commit, not to the model remembering a rule. */
+  private prepareCommitVersion(message: string): string | null {
+    const names = this.stagedNames();
+    if (names.length && names.every((file) => /\.(?:md|rst)$/i.test(file))) return null;
+    const tracked = this.git(["ls-files", "-z", "--", "package.json"]).split("\0").includes("package.json");
+    if (!tracked) return null; // Non-package projects retain their existing commit behavior.
+    const stagedText = this.git(["show", ":package.json"]);
+    const pkg = JSON.parse(stagedText);
+    let previous: string | undefined;
+    const hadPackage = this.git(["ls-tree", "--name-only", "HEAD", "--", "package.json"]).trim();
+    if (hadPackage) previous = JSON.parse(this.git(["show", "HEAD:package.json"])).version;
+    if (typeof pkg.version !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(pkg.version))
+      throw new PermissionError("Managed commits require the root package.json version to use X.Y.Z.");
+    let version: string = pkg.version;
+    if (previous) {
+      const compared = compareWorkspaceVersions(version, previous);
+      if (compared < 0 && !/(?:version[- ]regression[- ]reason|version decrease|lower version)\s*:/i.test(message))
+        throw new PermissionError("A lower version requires a version-regression-reason: in the commit message.");
+      if (compared === 0) {
+        const parts = version.split(".");
+        parts[2] = String(BigInt(parts[2]) + 1n);
+        version = parts.join(".");
+      }
+    }
+    const edits: Array<{ file: string; text: string }> = [];
+    const files = ["package.json", "package-lock.json", "npm-shrinkwrap.json"];
+    for (const file of files) {
+      const present = this.git(["ls-files", "-z", "--", file]).split("\0").includes(file);
+      if (!present) {
+        if (fs.existsSync(path.join(this.snapshot.project.path, file)))
+          throw new PermissionError(`Review and stage ${file} before committing; PSM will not include an untracked version file automatically.`);
+        continue;
+      }
+      const text = file === "package.json" ? stagedText : this.git(["show", `:${file}`]);
+      // Never replace or silently include an operator's partially staged edits.
+      if (this.read(file) !== text) throw new PermissionError(`Review and stage ${file} before committing; it has unstaged changes that PSM will preserve.`);
+      const data = JSON.parse(text);
+      const changed = data.version !== version || (file !== "package.json" && data.packages?.[""] && data.packages[""].version !== version);
+      if (!changed) continue;
+      data.version = version;
+      if (file !== "package.json" && data.packages?.[""]) data.packages[""].version = version;
+      const indent = /\n([\t ]+)"/.exec(text)?.[1] ?? "  ";
+      edits.push({ file, text: JSON.stringify(data, null, indent) + "\n" });
+    }
+    if (edits.length) {
+      this.allow("repo.edit");
+      // Validate every destination before the first write.
+      for (const edit of edits) this.resolve(edit.file, false, true);
+      for (const edit of edits) this.write(edit.file, edit.text);
+      this.stage(edits.map((edit) => edit.file));
+    }
+    return version;
+  }
   commit(message: string): string {
     this.allow("git.commit");
     if (!message.trim() || message.length > 4000 || message.includes("\0")) throw new PermissionError("Provide a commit message of 1–4000 characters.");
     const key = this.snapshot.project.path;
     if (!this.staged.has(key) || this.staged.get(key)?.index !== this.indexDigest() || this.staged.get(key)?.head !== this.headIdentity()) throw new PermissionError("Commit only files staged by this turn; the index changed or belongs to another turn.");
+    const version = this.prepareCommitVersion(message);
     const result = this.git(["-c", "core.editor=false", "commit", "--no-verify", "--no-gpg-sign", "-m", message]);
     this.staged.delete(key);
-    return result;
+    return version ? `${result}\nPSM committed release version ${version} (root package and lockfiles synchronized).` : result;
   }
   private branchName(name: string): string {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(name)) throw new PermissionError("Use a simple Git branch or ref name.");

@@ -125,6 +125,8 @@ test("static-ssh-nginx expansion follows dependency, staged TLS, release, activa
   assert.ok(position("dependency:api#asserted") < position("resource:dns#reconciled"));
   assert.ok(position("resource:dns#reconciled") < position("resource:directory#reconciled"));
   assert.ok(position("resource:ingress#http-ready") < position("resource:tls#certificate-ready"));
+  assert.ok(position("resource:ingress#http-ready") < position("resource:ingress#http-reloaded"));
+  assert.ok(position("resource:ingress#http-reloaded") < position("resource:tls#certificate-ready"));
   assert.ok(position("resource:tls#certificate-ready") < position("resource:ingress#tls-ready"));
   assert.ok(position("resource:ingress#tls-ready") < position("resource:ingress#nginx-valid"));
   assert.ok(position("resource:ingress#nginx-valid") < position("resource:ingress#reloaded"));

@@ -47,6 +47,30 @@ test("the same exact inputs produce the same plan digest", () => {
   assert.deepEqual(first.document.acknowledgements.map((item) => item.id), ["production-target"]);
 });
 
+test("HTTP latency does not change plan approval, while changed dependency identity does", () => {
+  const first = inputWithAction("assert-dependency@1");
+  const original = first.observations.dependencies[0];
+  first.observations.dependencies[0] = {
+    ...original, detail: "HTTP 401", evidence: { url: "https://api.example.test/health", status: 401, durationMs: 89, redirects: 0 },
+  };
+  const second = structuredClone(first);
+  second.observations.dependencies[0] = {
+    ...second.observations.dependencies[0], observedAt: 2_000,
+    evidence: { url: "https://api.example.test/health", status: 401, durationMs: 157, redirects: 0 },
+  };
+  const approved = buildDeploymentPlan(first);
+  const rechecked = buildDeploymentPlan(second);
+  assert.equal(rechecked.digest, approved.digest, "a slower identical response cannot make a plan stale");
+  assert.equal(rechecked.actions[0].digest, approved.actions[0].digest);
+  assert.equal(rechecked.document.observations.dependencies[0].evidence?.durationMs, 157, "the real measurement remains visible");
+  const changed = structuredClone(second);
+  changed.observations.dependencies[0] = {
+    ...changed.observations.dependencies[0], fingerprint: "sha256:changed", detail: "HTTP 503",
+    state: "blocked", evidence: { url: "https://api.example.test/health", status: 503, durationMs: 157, redirects: 0 },
+  };
+  assert.notEqual(buildDeploymentPlan(changed).digest, approved.digest);
+});
+
 test("dirty deployment inputs block approval", () => {
   const changed = input();
   changed.sourceInputsDirty = true;
@@ -114,6 +138,62 @@ function inputWithAction(kind: string): BuildDeploymentPlanInput {
   return changed;
 }
 
+test("the exact active unverified artifact may be redeployed for verification", () => {
+  const candidate = inputWithAction("assert-dependency@1");
+  const artifact = candidate.artifact!;
+  const targetId = "werewolf:todo-staging-web";
+  candidate.environment = {
+    ...candidate.environment,
+    units: [{ id: "web", target: { targetId }, executor: { sourceRepository: artifact.sourceRepository }, artifact: { buildProfile: {} } }],
+  } as BuildDeploymentPlanInput["environment"];
+  candidate.manifest = { ...candidate.manifest, environments: [candidate.environment] };
+  const active = {
+    releaseId: `release_${artifact.artifactId}`, artifactId: artifact.artifactId,
+    activationRunId: "run_failed", targetId, projectId: candidate.manifest.projectId,
+    environmentId: candidate.environment.id, unitId: "web", previousReleaseId: null,
+    provenance: "managed" as const, targetContractDigest: "sha256:target",
+    receipt: { verified: false, version: artifact.version, commit: artifact.commitSha, payloadDigest: artifact.payloadDigest },
+    activatedAt: 1, deactivatedAt: null, tombstonedAt: null,
+  };
+  candidate.activeReleases = [active];
+  const hasVersionBlocker = () => buildDeploymentPlan(candidate).document.blockers.some((item) => item.code === "version-not-increased");
+  assert.equal(hasVersionBlocker(), false);
+  active.receipt.verified = true;
+  assert.equal(hasVersionBlocker(), true, "a verified release cannot be repeated at the same version");
+  active.receipt.verified = false;
+  active.artifactId = "art_other";
+  assert.equal(hasVersionBlocker(), true, "another artifact with the same version stays blocked");
+  active.artifactId = artifact.artifactId;
+  active.receipt.payloadDigest = "sha256:other";
+  assert.equal(hasVersionBlocker(), true, "changed content cannot use the verification exception");
+  candidate.source = { ...candidate.source, commit: "2".repeat(40), version: "0.1.1" };
+  assert.equal(hasVersionBlocker(), false, "a stale artifact is a rebuild issue, not another version bump");
+  assert.ok(buildDeploymentPlan(candidate).document.blockers.some((item) => item.code === "artifact-source-mismatch"));
+  candidate.artifact = null;
+  active.receipt.verified = true;
+  candidate.source.version = active.receipt.version;
+  assert.equal(hasVersionBlocker(), true, "external commits without a version bump are caught before spending a build");
+  candidate.source.version = "0.1.1";
+  assert.equal(hasVersionBlocker(), false, "a newer committed version just needs its own build");
+});
+
+test("a build from an older commit asks for a new build, not another version bump", () => {
+  const candidate = inputWithAction("assert-dependency@1");
+  const artifact = candidate.artifact!;
+  candidate.source = { ...candidate.source, commit: "2".repeat(40), version: "0.1.1" };
+  candidate.activeReleases = [{
+    releaseId: `release_${artifact.artifactId}`, artifactId: artifact.artifactId,
+    activationRunId: "run_ok", targetId: "werewolf:todo-staging-web", projectId: candidate.manifest.projectId,
+    environmentId: candidate.environment.id, unitId: "web", previousReleaseId: null,
+    provenance: "managed", targetContractDigest: "sha256:target",
+    receipt: { verified: true, version: artifact.version, commit: artifact.commitSha, payloadDigest: artifact.payloadDigest },
+    activatedAt: 1, deactivatedAt: null, tombstonedAt: null,
+  }];
+  const codes = buildDeploymentPlan(candidate).document.blockers.map((item) => item.code);
+  assert.ok(codes.includes("artifact-source-mismatch"));
+  assert.ok(!codes.includes("version-not-increased"));
+});
+
 test("an action kind no installed executor performs blocks the plan before approval", () => {
   // Without this the same refusal happens inside the runner, after an operator
   // has already approved a production release.
@@ -140,6 +220,18 @@ test("omitting the installed set does not invent an executor blocker", () => {
   // The runner still refuses; the planner simply has nothing to assert on.
   const plan = buildDeploymentPlan(inputWithAction("reconcile-dns@1"));
   assert.ok(!plan.document.blockers.some((item) => item.code === "executor-missing"));
+});
+
+test("nginx reload remains a mutation even when the config file already matches", () => {
+  const changed = input();
+  const node = {
+    id: "resource:ingress#http-reloaded", kind: "reload-nginx@1", phase: "reconcile",
+    ownerRef: "resource:ingress", dependsOn: [], connection: "host",
+  } as BuildDeploymentPlanInput["graph"]["nodes"][number];
+  changed.graph = { ...changed.graph, nodes: [node], order: [node.id] };
+  const plan = buildDeploymentPlan(changed);
+  assert.equal(plan.actions[0].operation, "apply");
+  assert.equal(plan.actions[0].sideEffecting, true);
 });
 
 /** An adoption plan: one unowned provider resource, named as the thing to adopt. */

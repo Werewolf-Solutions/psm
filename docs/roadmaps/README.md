@@ -1,6 +1,6 @@
 # PSM delivery index — start here
 
-Updated 2026-09-23. This is the single execution order for the PSM plans in this
+Updated 2026-10-01. This is the single execution order for the PSM plans in this
 repository. Detailed specifications remain in their linked documents. Follow
 this index to avoid restarting completed work, following obsolete architecture,
 or treating every document as a separate project needing another kickoff.
@@ -9,18 +9,69 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P07 — First complete hosted-to-staging deployment** (P00–P02, P04–P06 verified locally; P03 live hosted acceptance blocked) |
-| Execution state | Merged to `dev`. P07: werewolf-alpha adopted through the Machines flow on 2026-09-24; waiting on the controller target-file push, the GitHub App, the controller pin and release approval (see the latest evidence entry). |
-| Latest product decision | Web-based machine onboarding with automatic setup and a copyable one-time administrator fallback; PSM-hosted runners in the first SaaS version. |
-| First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); host setup and command-account preflight inspected on 2026-09-23. |
+| Next phase | **P07a — Button-only GitHub setup (in progress)**, while completing P07's remaining acceptance. P07's local managed release is verified; P03's live hosted gate remains blocked. |
+| Execution state | `dev` working tree, package 0.3.15. Todo deployment `run_a7ef155bd9f04884` succeeded on 2026-09-29 at 08:54:11 UTC with all four release probes passed. Recent PSM fixes and project onboarding remain uncommitted. |
+| Latest product decision | Every cockpit project should have a managed setup entry point. Static-project generation is implemented; handymanservices exposes the next missing recipe: Vite frontend plus Express/Node server. Hosted runners remain the SaaS target. |
+| First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); successful managed release recorded 2026-09-29. |
 | First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
-| Resume action | Inspect current changes and verification evidence, map remaining work to P01–P11, then start the first incomplete eligible phase. |
+| Resume action | Preserve/review the existing working tree; live-test P07a App and controller setup with GitHub consent. Produce a second verified Todo release before rehearsing rollback; complete browser/workspace and hosted acceptance. The first P08 Node-server recipe against handymanservices follows. |
 
-The server-specific script is a tested preflight/reference, not a shipped
-onboarding feature. `psm-infra`, `psm-release` and the helper exist on the first
-target; the proposed command account has not been created. Its sudo requirement
-is a runtime setup dependency to address through the new feature, not a reason
-to stop building the feature.
+### What the current evidence means
+
+- **2026-10-01 local checkpoint:** managed commits now assign root release
+  versions and synchronize npm lockfiles. Deployment readiness drops artifacts
+  from older commits and detects uncommitted application changes. Preparation
+  refreshes newly built artifacts in the open page. GitHub App source-publication
+  support added in the intervening work is retained. Full suite: **715 passed,
+  5 skipped, 0 failed**; typecheck passed. These PSM changes remain uncommitted.
+  Todo is clean at `ad02646` (0.6.1); its second live release is still unverified.
+
+- **Verified locally:** the machine/access/agent foundations retain their earlier
+  evidence; Todo now also has a successful managed release recorded in PSM.
+- **Implemented and tested, not yet proven on a second live app:** first-time
+  [project setup](../deploy/PROJECT-SETUP.md), static manifest/workflow generation,
+  and explicit unsupported-stack guidance. Onboarding UI does not close P08.
+- **Still open:** P07 rollback, browser and hosted acceptance; P07a's fresh-account
+  button-only GitHub flow; P08 server/worker/database operations. P03 still gates
+  the laptop-disconnected hosted case.
+- **Delivery state:** PSM source and docs are modified on `dev`, not committed or
+  published by this review. The controller fixes and Todo's successful release
+  have separate recorded delivery evidence in [Todo staging](../deploy/TODO-STAGING.md).
+- **Latest tests:** 2026-09-29 typecheck and JS syntax checks passed; full PSM suite
+  **699 passed, 5 skipped, 0 failed**. The P07a implementation includes read-only saved run/receipt evidence and
+  fresh public Todo probes; authenticated browser behavior and Watch remain untested.
+
+The server-specific script remains a preflight/reference alongside the implemented
+machine onboarding UI. The September 23 preflight recorded `psm-infra`,
+`psm-release` and the helper on the first target, with the proposed command account
+still absent. That historical inventory is not a new account check and is not
+the current Todo release blocker.
+
+### 2026-09-29 evidence checkpoint
+
+Read `.psm-data/psm.db` in SQLite read-only mode without starting PSM. The latest
+Todo deployment is `run_a7ef155bd9f04884`, `succeeded` / `complete`, finished at
+08:54:11 UTC. Its active release receipt names controller run `36545610174`,
+Todo commit `9450ccedb9ba08493a6461ab930467ad0ea07625`, version 0.6.0 and four
+passed probes. The recorded Todo run history contains no rollback operation;
+rollback acceptance remains unproven. Historical handoffs later in this document
+that say the release is blocked, unverified or needs the repaired controller
+supersede one another chronologically and must not override this checkpoint.
+
+The current tree adds missing-manifest setup, stable-ID assignment, static
+repository-file generation and unsupported-stack guidance. Setup detects
+handymanservices' Express server and refuses a static-only draft. Reviewed fixes
+reject conflicting build files and publish the manifest last; an AI planning
+button exposes the remaining recipe work. No handymanservices release was made.
+
+P07a implementation checkpoint: App-token authentication, browser-bound App
+registration, installation confirmation, reviewed controller setup/update and
+source-token handoff are implemented locally after explicit scope authorization.
+The live GitHub App is now installed, ready and bound to Todo staging; its
+controller setup and release migration remain pending. See the
+[P07a checkpoint](github-button-setup.md#current-implementation-checkpoint).
+Todo public probes were rechecked successfully; one retained release means a
+rollback rehearsal needs a second verified release first.
 
 ## How to execute continuously
 
@@ -64,8 +115,9 @@ local to those documents; they are not additional competing sequences.
 | **P04 · verified (local)** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
 | **P05 · verified (local)** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
 | **P06 · verified (code); staging rollout needs approval** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
-| **P07 · in progress** | First complete hosted-to-staging deployment | P04–P06 | Adopt/verify the selected host roles, resolve enrollment/controller/App/credential prerequisites through the product flows, publish the intended source, build off-host and deploy through the managed engine. Verify DNS/TLS, exact served version, staging login/workspaces and rollback. Laptop disconnected. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
-| **P08 · pending** | General application deployment and operations | P07 | Frontend + API + worker + database recipes, configuration, migrations, diagnostics, restart/scale, backups and recovery work for a representative app. Typed integrations plus custom API/MCP/CLI adapters cover extensibility. [Application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
+| **P07 · in progress; local release verified** | First complete hosted-to-staging deployment | P04–P06 | Todo run `run_a7ef155bd9f04884` succeeded with version 0.6.0 and four passed release probes. Remaining: staging login/workspace acceptance, retained-release rollback, applicable Watch checks, P07a product setup and laptop-disconnected execution after P03. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
+| **P07a · in progress** | Button-only GitHub setup | P07 first release | Connect GitHub through the App Manifest flow (Create → Install on GitHub), then only PSM buttons: PSM authenticates as its App, creates and pins the release controller from its reviewed bundle, updates and re-pins it, creates the Environment, and gives each release a one-hour `actions: read` source token instead of a stored artifact-reader App key. Acceptance: a fresh organisation deploys Todo staging with no hand-copied key, variable, push or hash. P07 closes only after this, since its acceptance requires the product flows. [Plan](github-button-setup.md). |
+| **P08 · pending; onboarding groundwork implemented** | General application deployment and operations | P07, P07a | Static project setup is implemented; handymanservices is the concrete frontend + Express/Node case, currently blocked because only the static recipe exists. Implement immutable server releases, process/proxy configuration, health checks and rollback first; extend to workers, databases, migrations, restart/scale and backup/recovery with their own acceptance. [Project setup and next recipe](../deploy/PROJECT-SETUP.md), [application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
 | **P09 · pending** | Unattended maintenance and SaaS operations | P08 | Scheduled/monitor-triggered tasks honor standing grants, recover from interruption, avoid duplicate external mutations, and expose usage/retention limits. Prove restore and credential rotation; optional local/user-hosted runners share the protocol. [Runner requirements](agent-access-and-operations.md#runners-and-saas-operation), [machine lifecycle](machine-onboarding.md#ongoing-machine-management). |
 | **P10 · pending** | Complete project governance and agent usage visibility | P05, P09 | Audit the older governance plan against current rules/profile/skills features, then complete only missing applicability/readiness UI, rule provenance and actually observable usage reporting. No duplicate rules system or incompatible metadata migration. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
 | **P11 · pending** | Capability marketplace and conversational scaffolding | P05, P10 | Resolve registry ownership/review/update policy and the new-project conversation contract; deliver the deferred capabilities after assessing current implementation. Preserve attach/detach ownership and scope-based tool policy. [Attach plan, deferred phases 3–4](../attach-plan.md#11-phases). |
@@ -87,7 +139,8 @@ flowchart LR
   P00 --> P06[App release fixes]
   P05 --> P07[Verified staging release]
   P06 --> P07
-  P07 --> P08[General app operations]
+  P07 --> P07a[Button-only GitHub setup]
+  P07a --> P08[General app operations]
   P08 --> P09[Unattended maintenance]
   P09 --> P10[Governance and visibility]
   P05 --> P10
@@ -172,6 +225,8 @@ The table below keeps the original questions for reference.
 | [First machine runbook](../deploy/machines/todo-staging/README.md) | Actual 2026-09-23 preparation evidence and bootstrap reference; not the new product UX. |
 | [Prepared Todo target](../deploy/host-targets/werewolf__todo-staging-web.json) | Example pending contract, not live truth or approved configuration; confirm guessed values and observed UIDs. |
 | [Release controller](../deploy/controller/README.md) | P07 controller/artifact/key prerequisites and contract. |
+| [Button-only GitHub setup](github-button-setup.md) | P07a plan: GitHub App via manifest, PSM-managed controller and pins, per-release source token. |
+| [Project deployment setup](../deploy/PROJECT-SETUP.md) | Implemented static onboarding, current limits and the handymanservices case for P08. |
 | [Publishing a new app](../deploy/PUBLISHING-A-NEW-APP.md) | Historical/manual release reference; managed release is the acceptance path. |
 | [Deployment ADR index](../deploy/adrs/README.md) | Existing decisions: monitoring, keyring, Go helper, controller revisions and retention. Revisit explicitly where hosted execution needs a new implementation. |
 | [Host helper](../../host-helper/README.md) | Existing privileged executor contract and package/build instructions; P01/P04. |
@@ -534,4 +589,152 @@ Verification: npm test 640 pass / 0 fail before bc5ec05; deploy suites 252 pass;
 Remaining blockers: artifact import and the release are not yet observed live; the
   artifact-reader GitHub App is still to be installed; the release needs approval.
 Next action: restart PSM, Make ready to deploy (Claude), watch the import step.
+```
+
+### 2026-09-28 — P07 first release dispatch
+```text
+Phase / step: P07
+State: in progress — reconcile passed on werewolf-alpha (DNS, directory, nginx, certificate,
+  reloads); the release reached GitHub and stopped before the target.
+Findings:
+  1. run_364da54672c3451c: a noop http-ready re-checked the live TLS nginx config against
+     the HTTP-only rendering, so it read "update" and failed. The TLS config keeps the
+     :80 ACME location, so the noop check now uses the same rendering the plan observed.
+  2. run_e19a8daa9f8d4e57: GitHub run 36436534674 failed at "Mint a short-lived
+     source-repository token": todo-staging-web has no PSM_ARTIFACT_READER_APP_ID
+     variable or PSM_ARTIFACT_READER_PRIVATE_KEY secret. The target step was skipped;
+     nothing on the server changed.
+  3. PSM then refused its own finished run: release-static.yml's run-name omits
+     psm_run_id (contrary to DEPLOYMENT-SYSTEM.md), and a finished run had to carry it.
+     The run was held recovery-required with only "GitHubExecutorError", keeping its
+     target locks, and nothing exposed runner.recover().
+Changed (psm dev, working tree): noop http-ready uses the planned rendering; failed
+  read-only checks log the helper's observation; recovery reasons carry the GitHub
+  executor's code and message; a run GitHub named in its dispatch answer is accepted
+  when finished without the title; a failed controller whose target step was provably
+  skipped is a plain failure; "Check again" (POST /api/deployment-runs/:id/recover)
+  re-observes a held run without re-submitting; Check again and both close actions now
+  need the authority that approves the plan (a signed-in Werewolf user was demanded even
+  for local-operator staging, which cannot sign in today); after a PSM restart, recovery
+  takes back the run's own expired lease instead of treating it as another run's; readiness check "Release controller
+  artifact reader"; run events newest first. Controller run-name now includes
+  psm_run_id in PSM's reviewed copy (docs/deploy/controller); it ships to
+  deployment-control with the script fix below, once "Pin new commit" could move the pin.
+Verification: npm run typecheck clean; npm test 672 tests, 667 pass, 0 fail, 5 skipped.
+Live (15:12): Check again closed run_e19a8daa9f8d4e57 as failed, locks released.
+  run_157af2d601354185 minted the App token, then GitHub run 36441914594 stopped at
+  "Download and identify the prepared artifact": HTTP 415, because the controller asked
+  /actions/artifacts/{id}/zip for Accept: application/zip. GitHub only answers its JSON
+  media type, with a 302 to signed storage. Nothing on the server changed.
+Changed next: scripts/psm_controller.py follows that redirect itself without sending the
+  token to storage (verified locally against artifact 10962456283: archive digest
+  matched); the controller run-name fix rides along. Readiness check "Release controller
+  pin" shows a moved controller branch with a GitHub compare link and a "Pin new commit"
+  button (POST .../controller-pin), which re-reads GitHub and pins only the commit shown.
+  The run phase strip is derived from recorded events: passed green, stopped red, held amber.
+Live (15:29): pinned 2756547; run_042a09b37a534682 downloaded the artifact, then GitHub
+  run 36443918468 refused in the target step before any SSH: "dispatch input operation
+  is missing" (the release step's env lacked PSM_OPERATION). No result file, so PSM held
+  the run as unknown. Found statically before the next run: the script sent
+  maximumBytes from payloadLimits.maxBytes (the contract field is maxUnpackedBytes), so
+  the helper would have refused a null limit.
+Changed next: controller passes PSM_OPERATION and maps maxUnpackedBytes; when GitHub
+  cannot prove the target step was skipped, release observation asks the host helper
+  (observe-target): no receipt for the release and not active means nothing was applied,
+  so the step fails cleanly instead of holding. npm test 673 tests, 668 pass, 0 fail.
+Live (15:37): Check again on run_042a09b37a534682 held again within 7 ms: the first
+  "unknown" observation had replaced the step's stored result, so its dispatch receipt
+  was gone and observation stopped at dispatch-receipt-unavailable.
+Changed next: release observation carries the receipt and dispatch on every non-final
+  result; a step that already lost them is resolved from GitHub's run id (repository,
+  workflow, event and the PSM run in the title must match), its job steps and the
+  target's observe-target. npm test 673 tests, 668 pass, 0 fail.
+Live (16:42): Check again closed run_042a09b37a534682 as failed. GitHub's target
+  step had stopped before SSH, and the host observation found no staged or active
+  release. The run is terminal and its locks are clear.
+Changed next: deployment-control commit d81740c (only the missing PSM_OPERATION and
+  maxUnpackedBytes corrections) was reviewed and pinned for Todo staging. The run
+  copy action now offers a short diagnostic with the recent events and steps needing
+  attention, while retaining a separate full-log option.
+Live (17:11): run_bb862beff8c744ea reached the host helper through controller
+  commit d81740c, then failed staging: "archive path is outside site/". GitHub
+  run 36456361009 shows the exact error. The approved artifact's SHA-256 matches
+  the downloaded payload.tar, whose standard directory headers are `site/` and
+  `site/assets/`. The helper rejected their trailing slashes during canonical
+  path validation; no release was staged or activated.
+Changed locally: normalize one trailing slash only for tar directory headers in
+  the host helper, preserving strict validation for files and traversal paths.
+  Go regression test covers both nested directory headers. The run panel now
+  shows a live status and action feedback; copied diagnostics omit the large
+  dispatch contract while retaining the failure detail and GitHub run link.
+Next action: install the rebuilt host helper on Todo staging, verify its service,
+  then check readiness and approve a fresh deployment plan. The helper fix is
+  not yet installed, so retrying now would repeat this failure. The tested x86-64
+  binary is staged as `/home/lorenzo/psm-host-helper-site-dir-fix-20260928`
+  with SHA-256 `491402f0755c66fc940ac5575c46ef921f2546af6a31d304d54d57f8e91dc6b5`.
+  `sudo -n` is unavailable for `lorenzo`; root installation requires the
+  administrator's interactive sudo authentication.
+Live (17:41): the first replacement was installed, but I had built it with
+  cgo enabled on a newer workstation. The Ubuntu 20.04 host has glibc 2.31;
+  the dynamic binary requires GLIBC_2.32 and GLIBC_2.34. The helper service
+  is in auto-restart and deployment checks cannot run. The original binary is
+  backed up at `/usr/local/libexec/psm-host-helper.bak-20260928`.
+Corrected artifact: rebuilt with CGO_ENABLED=0 for Linux amd64 and passed Go
+  tests with cgo disabled. The static binary has no ELF interpreter or dynamic
+  section. It is staged and was executed successfully on the host at
+  `/home/lorenzo/psm-host-helper-static-site-dir-fix-20260928`, SHA-256
+  `6a09a37a278e62cefe3dd902d3f99a09002ba9e62f825bb8d61b4d9e75988468`.
+  Installing it still requires interactive sudo; do not retry deployment until
+  the helper service is active again.
+Live (18:11): helper service is active with the static binary. Run
+  run_c9cd1a9be0404bd0 staged and activated the release, then GitHub run
+  36463370799 failed post-activation verification without rollback authority.
+  PSM correctly held the run as unknown. Public HTTPS probes for `/`,
+  `/auth/callback`, and `/version.json` return 403; `/api/` returns the
+  expected 404. Nginx runs as `www-data`, but the managed site root is 0750
+  owned by the deployment account, preventing traversal. The release may be
+  active but cannot yet be served.
+Changed locally: release-directory observation reports private public-path
+  permissions as drift; reconciliation restores 0755 on the managed root and
+  `releases` directory even when they already exist. Incoming remains unchanged.
+  A Go regression test covers detection and repair. The new static helper
+  binary is staged and was executed on
+  the host at `/home/lorenzo/psm-host-helper-static-public-root-fix-20260928`,
+  SHA-256 `f71786d4124fb1654c447d68ce834f8b6edf8cc0a6033167669987afe41d48dd`.
+  Interactive sudo is needed to restore nginx traversal and install this fix.
+  Do not start another deployment while the current activation is uncertain.
+Changed locally: on Check again, if GitHub's controller failed after reaching
+  the target and the enrolled helper attests the exact approved release as
+  active (target fingerprint, artifact, commit, version and both digests), PSM
+  records that active release and closes the run as failed. It does not call
+  the deployment successful or submit the side effect again. This lets the
+  next reviewed plan use the true current release after public access is
+  repaired. The running PSM process predates this change and needs a restart.
+Handoff (20:15, Claude continues after Codex stopped): Codex's two functions for the
+  above were lost to a concurrent edit and are re-implemented: the target's active
+  receipt must match release, artifact, commit, version, both digests and target
+  fingerprint before PSM records it (unverified); a later successful run verifies it
+  in place; redeploying the active release never "rolls back" to itself.
+Second cause of the 403: the helper unit's UMask=0027 made every staged directory
+  0750 and file 0640, so fixing the root and releases/ alone would still 403. Staging
+  now chmods the release to 0755/0644, and restaging the same release repairs one
+  staged earlier (Go test runs under umask 0027; fails without the fix).
+Install path: PSM has administrator access on werewolf-alpha, so Machines now offers
+  "Update helper" when the installed helper was built from other sources; it builds
+  with CGO_ENABLED=0 and installs through the reviewed admin-ssh plan, no sudo prompt.
+  The hand-staged binaries in /home/lorenzo can be deleted afterwards.
+Verification: npm test 676 tests, 671 pass, 0 fail, 5 skipped; go test ok.
+Live (21:02): helper 0e49a8b… installed through Machines ("Update helper" now also on
+  the single-machine view). Check again still held run_c9cd…: observe-target shows the
+  approved release active, but staged under target digest sha256:c0e8e829… while PSM
+  pinned sha256:69810bb1… at enrollment. Cause: the approved pm2User/pm2Home edit to
+  the live target file (TODO-STAGING.md, "PM2 baseline observation"). Every later
+  release would also fail the controller's final target-digest comparison.
+Changed: a finished controller whose release is active under a different target
+  contract now fails with that explanation instead of holding; readiness gains
+  "Target contract" (helper digest vs pinned) with "Pin current contract", which
+  re-reads the helper and moves every host connection that pinned the old digest.
+  npm test 677 tests, 672 pass, 0 fail, 5 skipped.
+Next action: restart PSM; Check again on run_c9cd… (ends failed); Check readiness →
+  Pin current contract; approve the fresh plan, which redeploys the same artifact.
 ```

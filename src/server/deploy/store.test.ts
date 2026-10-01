@@ -662,6 +662,23 @@ test("startup work returns queued and uncertain runs but never terminal history"
   assert.deepEqual(store.listStartupWork().map((run) => run.runId), ["run_queued", "run_uncertain"]);
 });
 
+test("only an unverified active release takes a later verified receipt", () => {
+  const { store } = readyDeploymentStore();
+  const run = approve(store).run;
+  const base = {
+    releaseId: "rel_todo_052", artifactId: "artifact_todo_052", activationRunId: run.runId, targetId: "target_todo_production",
+    projectId: "prj_todo", environmentId: "production", unitId: "web", provenance: "managed" as const,
+    targetContractDigest: "sha256:target-contract", activatedAt: 100, expectedCurrentReleaseId: null,
+  };
+  store.activateRelease({ ...base, receipt: { releaseId: "rel_todo_052", verified: false } });
+  const verified = { releaseId: "rel_todo_052", state: "activated" };
+  assert.equal(store.verifyActiveRelease({ releaseId: "rel_todo_052", targetId: "target_todo_production", activationRunId: run.runId, receipt: verified }), true);
+  assert.deepEqual(store.getActiveRelease("target_todo_production")?.receipt, verified);
+  // A verified receipt is never rewritten again.
+  assert.equal(store.verifyActiveRelease({ releaseId: "rel_todo_052", targetId: "target_todo_production", activationRunId: run.runId, receipt: { other: true } }), false);
+  assert.deepEqual(store.getActiveRelease("target_todo_production")?.receipt, verified);
+});
+
 test("release activation is exact-current CAS and rollback reuses retained bytes", () => {
   const { store } = readyDeploymentStore();
   const firstRun = approve(store).run;

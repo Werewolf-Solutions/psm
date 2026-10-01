@@ -487,6 +487,10 @@
             </header>
             <div class="dep-envs" id="dep-envs"></div>
             <p class="dep-destination" id="dep-destination"></p>
+            <section class="todo-panel" id="dep-todo" aria-labelledby="dep-todo-title">
+              <div class="todo-head"><h3 id="dep-todo-title">To do</h3><span id="dep-todo-count"></span></div>
+              <ol class="todo-list" id="dep-todo-list"></ol>
+            </section>
             <div class="dep-toolbar">
               <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
               <button class="btn" id="dep-discover">Check readiness</button>
@@ -504,15 +508,34 @@
                 </select>
               </div>
               <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
-              <button class="btn btn-primary" id="dep-approve" disabled>Deploy</button>
+              <button class="btn btn-primary" id="dep-approve">Review plan</button>
             </div>
             <div class="dep-error" id="dep-error" role="alert" hidden></div>
+            <section class="dep-section dep-run-top" id="dep-run-section" hidden>
+              <div class="dep-section-head"><h3 id="dep-run-title">Deployment run</h3><code class="dep-run-id" id="dep-run-id"></code><span id="dep-run-state"></span></div>
+              <div class="activity-times" id="dep-run-times"></div>
+              <p class="dep-run-reason" id="dep-run-reason" hidden></p>
+              <div class="dep-phases" id="dep-phases"></div>
+              <div class="dep-run-progress" id="dep-run-progress" role="status" aria-live="polite" hidden></div>
+              <div class="dep-events" id="dep-events"></div>
+              <div class="dep-run-actions">
+                <button class="btn" id="dep-run-copy">Copy run diagnostics</button>
+                <button class="btn" id="dep-run-copy-full">Copy full run log</button>
+                <a class="btn" id="dep-run-github" target="_blank" rel="noopener noreferrer" hidden>Open GitHub run</a>
+                <button class="btn btn-primary" id="dep-run-retry" hidden>Retry preparation</button>
+                <button class="btn" id="dep-run-close-reload" title="Mark this run failed and release its locks; a fresh reviewed plan will repeat the nginx reload" hidden>Close uncertain reload</button>
+                <button class="btn" id="dep-run-recover" title="Ask the provider again what happened to the submitted work; nothing is re-submitted" hidden>Check again</button>
+                <button class="btn" id="dep-run-close-observation" title="Mark this run failed after completed side effects; a fresh reviewed plan will retry the read-only check" hidden>Close failed observation</button>
+                <button class="btn" id="dep-cancel">Request cancellation</button>
+              </div>
+            </section>
             <section class="dep-prep" id="dep-preparation" hidden>
               <div class="dep-prep-head">
                 <h3 id="dep-prep-title">Preparing this deployment</h3>
                 <span class="dep-prep-state" id="dep-prep-state"></span>
               </div>
               <p class="dep-prep-message" id="dep-prep-message"></p>
+              <div class="activity-times" id="dep-prep-times"></div>
               <p class="dep-prep-failure" id="dep-prep-failure" hidden></p>
               <div class="dep-plan" id="dep-prep-plan" hidden></div>
               <div class="dep-prep-actions">
@@ -520,6 +543,19 @@
                 <button class="btn btn-primary" id="dep-prep-capabilities" hidden>Open Capabilities</button>
                 <button class="btn" id="dep-prep-open" hidden>Open preparation session</button>
                 <button class="btn" id="dep-prep-stop" hidden>Stop preparation</button>
+              </div>
+            </section>
+            <section class="dep-section dep-review" id="dep-plan-section" hidden>
+              <div class="dep-section-head"><h3>Review exact deployment plan</h3><span id="dep-plan-digest"></span></div>
+              <p class="dep-plan-meta" id="dep-plan-meta"></p>
+              <div class="dep-plan" id="dep-plan"></div>
+              <label class="dep-ack" id="dep-ack-wrap" hidden>
+                <input id="dep-ack" type="checkbox" />
+                <span id="dep-ack-copy">I reviewed this exact plan and its rollback behavior.</span>
+              </label>
+              <div class="dep-approve-row">
+                <span id="dep-approval-note"></span>
+                <button class="btn btn-primary" id="dep-confirm" disabled>Confirm &amp; deploy</button>
               </div>
             </section>
             <details class="dep-build-options">
@@ -538,6 +574,7 @@
               <section class="dep-summary" id="dep-summary"></section>
               <section class="dep-section">
                 <div class="dep-section-head"><h3>Readiness</h3><span id="dep-readiness-count"></span></div>
+                <div class="activity-times" id="dep-readiness-times"></div>
                 <div class="dep-list" id="dep-readiness"></div>
               </section>
               <section class="dep-section" id="dep-connections-section">
@@ -545,31 +582,21 @@
                 <div class="dep-connections" id="dep-connections"></div>
                 <div id="dep-connection-setup"></div>
               </section>
-              <section class="dep-section" id="dep-plan-section" hidden>
-                <div class="dep-section-head"><h3>Exact plan</h3><span id="dep-plan-digest"></span></div>
-                <p class="dep-plan-meta" id="dep-plan-meta"></p>
-                <div class="dep-plan" id="dep-plan"></div>
-                <label class="dep-ack" id="dep-ack-wrap" hidden>
-                  <input id="dep-ack" type="checkbox" />
-                  <span id="dep-ack-copy">I reviewed this exact plan and its rollback behavior.</span>
-                </label>
-                <div class="dep-approve-row">
-                  <span id="dep-approval-note"></span>
-                </div>
-              </section>
-              <section class="dep-section" id="dep-run-section" hidden>
-                <div class="dep-section-head"><h3 id="dep-run-title">Deployment run</h3><span id="dep-run-state"></span></div>
-                <div class="dep-phases" id="dep-phases"></div>
-                <div class="dep-events" id="dep-events"></div>
-                <div class="dep-run-actions">
-                  <button class="btn" id="dep-cancel">Request cancellation</button>
-                </div>
-              </section>
               <section class="dep-section">
                 <div class="dep-section-head"><h3>Retained releases</h3><span>rollback never rebuilds</span></div>
                 <div class="dep-releases" id="dep-releases"></div>
               </section>
             </div>
+          </div>
+          <div class="dep-setup" id="ws-deploy-setup" hidden>
+            <header class="dep-head">
+              <div>
+                <div class="dep-kicker">Managed deployment</div>
+                <h2>Set up managed deployment</h2>
+                <p id="dep-setup-subtitle">Reading this project…</p>
+              </div>
+            </header>
+            <div class="dep-setup-body" id="dep-setup-body"></div>
           </div>
           <div class="dep-legacy" id="ws-deploy-legacy">
             <div class="dep-legacy-note"><strong>Unmanaged command</strong><span>PSM cannot prove its artifact, target state, verification or rollback.</span></div>
@@ -900,6 +927,7 @@
 
     <script src="/auth.js"></script>
     <script src="/agent.js"></script>
+    <script src="/external-links.js"></script>
     <script src="/deployment-connections.js"></script>
     <script src="/agent-permissions.js"></script>
     <script src="/machines.js"></script>

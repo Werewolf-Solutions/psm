@@ -10,6 +10,7 @@
  */
 import { defaultDeploymentAdapters, installedExecutorKinds } from "./executors.ts";
 import { DeploymentService } from "./service.ts";
+import { planAuthorityDigest, type DeploymentPlanDocument } from "./planner.ts";
 import {
   DeploymentRunner,
   type DeploymentActionAdapter,
@@ -40,7 +41,7 @@ export interface DeploymentEngine {
   service: DeploymentService;
   runner: DeploymentRunner;
   /** The subset of `DeploymentRunner` the HTTP layer is allowed to reach. */
-  controller: { enqueue(runId: string): void | Promise<void>; cancel(runId: string): unknown };
+  controller: { enqueue(runId: string): void | Promise<void>; cancel(runId: string): unknown; closeUncertainReload(runId: string): unknown; closeFailedReadOnlyObservation(runId: string): unknown; recover(runId: string): void };
   start(): StartupRecovery[];
   shutdown(): Promise<void>;
 }
@@ -61,13 +62,18 @@ export async function recheckAgainstPlanner(
   service: DeploymentService,
   context: PlanRecheckContext,
 ): Promise<PlanRecheckResult> {
-  let rebuilt: { digest: string; lockKeys: readonly string[] };
+  let rebuilt: { digest: string; lockKeys: readonly string[]; authorityDigest: string };
   try {
     rebuilt = await service.recheckPlan(context.plan.planId, context.plan.revision);
   } catch (error) {
     return { ok: false, reason: `plan inputs could not be re-derived: ${error instanceof Error ? error.message : String(error)}` };
   }
-  if (rebuilt.digest !== context.plan.digest) {
+  const approvedAuthority = context.effectStarted
+    ? planAuthorityDigest(context.plan.document as unknown as DeploymentPlanDocument) : null;
+  if (context.effectStarted && rebuilt.authorityDigest !== approvedAuthority) {
+    return { ok: false, reason: `approved source, policy or connections changed during execution (${context.checkpoint})`, planDigest: rebuilt.digest, lockKeys: rebuilt.lockKeys };
+  }
+  if (!context.effectStarted && rebuilt.digest !== context.plan.digest) {
     return {
       ok: false,
       reason: `deployment inputs changed since approval (${context.checkpoint})`,
@@ -78,7 +84,7 @@ export async function recheckAgainstPlanner(
   if (!sameKeys([...context.expectedLockKeys], [...rebuilt.lockKeys])) {
     return { ok: false, reason: "the set of targets this plan mutates changed since approval", planDigest: rebuilt.digest, lockKeys: rebuilt.lockKeys };
   }
-  return { ok: true, planDigest: rebuilt.digest, lockKeys: rebuilt.lockKeys };
+  return { ok: true, planDigest: context.effectStarted ? context.plan.digest : rebuilt.digest, lockKeys: rebuilt.lockKeys };
 }
 
 /**
@@ -143,6 +149,11 @@ export function createDeploymentEngine(options: DeploymentEngineOptions): Deploy
         void runner.enqueue(runId).catch(() => {});
       },
       cancel: (runId) => runner.requestCancellation(runId),
+      closeUncertainReload: (runId) => runner.closeUncertainNginxReload(runId),
+      closeFailedReadOnlyObservation: (runId) => runner.closeFailedReadOnlyObservation(runId),
+      // Recovery only re-observes submitted work, never re-submits it; like
+      // enqueue, its outcome is durable in the run rather than in the request.
+      recover: (runId) => { void runner.recover(runId).catch(() => {}); },
     },
     start: () => runner.start(),
     shutdown: () => runner.shutdown(),

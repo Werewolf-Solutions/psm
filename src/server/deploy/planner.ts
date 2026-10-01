@@ -136,6 +136,27 @@ export interface BuiltDeploymentPlan {
   actions: PlannedActionDocument[];
 }
 
+/** Inputs that must stay approved after this run has changed observed state. */
+export function planAuthorityDigest(document: DeploymentPlanDocument): string {
+  return canonicalDigest("psm-deployment-plan-authority:v1", {
+    projectId: document.projectId,
+    checkoutId: document.checkoutId,
+    environmentId: document.environmentId,
+    operation: document.operation,
+    adoptionResourceId: document.adoptionResourceId,
+    risk: document.risk,
+    engineVersion: document.engineVersion,
+    manifestDigest: document.manifestDigest,
+    source: document.source,
+    artifact: document.artifact,
+    rollbackRelease: document.rollbackRelease,
+    graph: document.graph,
+    connections: document.connections,
+    policy: document.policy,
+    lockKeys: document.lockKeys,
+  });
+}
+
 function planId(): string {
   return `dpl_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
@@ -191,6 +212,7 @@ function actionOperation(
     return dependencyObservation(node, observations)?.state === "ready" ? "assert" : "blocked";
   }
   if (node.phase === "reconcile") {
+    if (node.kind === "reload-nginx@1") return "apply";
     const observation = resourceObservation(node, observations);
     if (!observation) return "blocked";
     if (node.kind === "verify-resource@1" || node.kind === "validate-nginx@1") return "verify";
@@ -354,20 +376,24 @@ function hasRegressionRationale(subject: string): boolean {
  * timestamps do exactly that: they are `Date.now()` at build time, so a rebuild
  * a millisecond later already failed the gate.
  *
- * Only the timestamps are dropped. What was observed — state, detail,
- * fingerprint, evidence — stays in the digest, which is what makes real drift
- * detectable, and plan expiry rather than the digest bounds how stale an
- * observation may be. The document itself keeps its real timestamps: the
- * operator approved a plan that says when each thing was checked.
+ * Timestamps and HTTP response duration are diagnostic measurements, not
+ * changes to the observed service. Keep status, URL, redirects, state and
+ * other evidence in the digest so actual drift still stops execution. The
+ * document retains real measurement times for the operator to inspect.
  */
 function digestableDocument(document: DeploymentPlanDocument): DeploymentPlanDocument {
   const atZero = <T extends { observedAt: number }>(item: T): T => ({ ...item, observedAt: 0 });
+  const stableDependency = (item: DeploymentObservation): DeploymentObservation => ({
+    ...atZero(item),
+    ...(item.evidence && Object.hasOwn(item.evidence, "durationMs")
+      ? { evidence: { ...item.evidence, durationMs: 0 } } : {}),
+  });
   const observations = document.observations;
   return {
     ...document,
     observations: {
       ...observations,
-      dependencies: observations.dependencies.map(atZero),
+      dependencies: observations.dependencies.map(stableDependency),
       resources: observations.resources.map(atZero),
       watch: observations.watch.map(atZero),
       observedAt: 0,
@@ -392,7 +418,7 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
     if (check.purpose === "deploy" && !check.ready) blockers.push(blocker("executor-not-ready", check.detail, `executor:${check.id}`));
   }
   if (input.sourceInputsDirty) {
-    blockers.push(blocker("source-dirty", "Deployment inputs differ from the selected committed source", "source"));
+    blockers.push(blocker("source-dirty", "Local changes are not committed yet. Review changes and commit through PSM; it assigns the release version before preparing a new build.", "source"));
   }
   if (input.environment.releasePolicy.requireReachableFromBranch && !input.sourceReachable) {
     blockers.push(blocker("source-unreachable", `Commit is not reachable from ${input.environment.releasePolicy.allowedBranch}`, "source"));
@@ -431,6 +457,16 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
 
   const needsArtifact = input.operation === "release" || input.operation === "deploy";
   if (needsArtifact && !input.artifact) blockers.push(blocker("artifact-missing", "Select or prepare an immutable artifact", "artifact"));
+  if (needsArtifact && !input.artifact) {
+    for (const release of input.activeReleases ?? []) {
+      const receipt = release.receipt as { version?: unknown; verified?: unknown };
+      if (typeof receipt.version !== "string" || receipt.verified === false) continue;
+      const compared = compareWorkspaceVersions(input.source.version, receipt.version);
+      if (compared <= 0 && !(compared < 0 && hasRegressionRationale(input.source.subject))) {
+        blockers.push(blocker("version-not-increased", `Committed source ${input.source.version} needs a release version newer than active ${receipt.version}. Make ready can create a versioned commit through PSM before publishing and building.`, "source"));
+      }
+    }
+  }
   if (input.artifact) {
     if (input.artifact.tombstonedAt !== null || input.artifact.retainedUntil <= now) blockers.push(blocker("artifact-expired", "The selected artifact is no longer retained", "artifact"));
     if (input.artifact.commitSha !== input.source.commit) blockers.push(blocker("artifact-source-mismatch", "Artifact and exact source commit differ", "artifact"));
@@ -439,16 +475,29 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
       const profileDigest = canonicalDigest("psm-deployment-build-profile:v1", unit.artifact.buildProfile);
       if (input.artifact.buildProfileDigest !== profileDigest) blockers.push(blocker("artifact-build-profile-mismatch", "Artifact was built with different environment inputs", "artifact"));
     }
-    const activeVersions = input.activeReleases ?? [];
+    // An old artifact needs rebuilding, not another source version bump.
+    const activeVersions = input.artifact.commitSha === input.source.commit ? input.activeReleases ?? [] : [];
     for (const release of activeVersions) {
-      const receipt = release.receipt as { version?: unknown };
+      const receipt = release.receipt as { version?: unknown; verified?: unknown; commit?: unknown; payloadDigest?: unknown };
       if (typeof receipt.version !== "string") continue;
       const compared = compareWorkspaceVersions(input.artifact.version, receipt.version);
       if (compared <= 0) {
+        // A controller failure can leave this exact artifact active but unverified.
+        // Repeating its reviewed deployment is the only way to verify it in place.
+        // A different artifact with the same version remains refused.
+        const verifyingActiveArtifact = compared === 0 && receipt.verified === false
+          && release.provenance === "managed"
+          && release.projectId === input.manifest.projectId
+          && release.environmentId === input.environment.id
+          && input.environment.units.some((unit) => unit.id === release.unitId && unit.target.targetId === release.targetId)
+          && release.artifactId === input.artifact.artifactId
+          && receipt.commit === input.artifact.commitSha
+          && receipt.payloadDigest === input.artifact.payloadDigest;
+        if (verifyingActiveArtifact) continue;
         if (compared < 0 && hasRegressionRationale(input.source.subject)) {
           acknowledgements.push({ id: "version-decrease", label: `Deploy lower version ${input.artifact.version} over ${receipt.version}` });
         } else {
-          blockers.push(blocker("version-not-increased", `Artifact ${input.artifact.version} must be newer than active ${receipt.version}`, `release:${release.releaseId}`));
+          blockers.push(blocker("version-not-increased", `Artifact ${input.artifact.version} must be newer than active ${receipt.version}. Increase the project's root package.json version, commit and push it, then prepare and select a new build.`, `release:${release.releaseId}`));
         }
       }
     }

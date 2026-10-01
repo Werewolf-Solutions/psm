@@ -43,6 +43,8 @@ export interface GitHubPrepareWorkflowPolicy {
 
 export interface GitHubReleaseControllerPolicy {
   controller: "werewolf-static@1";
+  /** Workflow delivery revision; the typed release protocol remains v1. */
+  sourceAuthorization?: "installation-token";
   targetId: string;
   repository: string;
   workflow: string;
@@ -68,7 +70,7 @@ export interface GitHubActionsConnectionMetadata {
 export interface GitHubActionsAdapterOptions {
   metadata: GitHubActionsConnectionMetadata;
   /** Resolves the Actions token just in time; the adapter never retains or returns it. */
-  token: () => string | Promise<string>;
+  token: (request: { pathname: string; method?: string }) => string | Promise<string>;
   fetch?: typeof fetch;
   now?: () => number;
 }
@@ -83,6 +85,7 @@ export type GitHubExecutorErrorCode =
   | "github-api-error"
   | "github-run-not-found"
   | "github-run-ambiguous"
+  | "github-run-unsettled"
   | "github-run-mismatch"
   | "artifact-integrity";
 
@@ -365,6 +368,7 @@ function validateMetadata(metadata: GitHubActionsConnectionMetadata): ValidatedM
   }
 
   const releaseControllers = metadata.releaseControllers.map((entry, index) => {
+    if (entry.sourceAuthorization !== undefined && entry.sourceAuthorization !== "installation-token") configError(`releaseControllers[${index}].sourceAuthorization`, "is not supported");
     if (entry.controller !== "werewolf-static@1") {
       configError(`releaseControllers[${index}].controller`, "must be werewolf-static@1");
     }
@@ -534,6 +538,10 @@ function normalizedTimestamp(value: unknown, field: string): string {
   return value;
 }
 
+// The one release-controller step that talks to the target, by its reviewed name
+// in the pinned werewolf-static@1 workflow.
+export const RELEASE_TARGET_STEP = "Stage, activate and verify the release on the target";
+
 function correlationAppears(title: string, psmRunId: string): boolean {
   let offset = title.indexOf(psmRunId);
   const identifierCharacter = /[A-Za-z0-9._:@/-]/;
@@ -571,7 +579,7 @@ function sameReceiptTarget(
 
 export class GitHubActionsAdapter {
   readonly #metadata: ValidatedMetadata;
-  readonly #token: () => string | Promise<string>;
+  readonly #token: GitHubActionsAdapterOptions["token"];
   readonly #fetch: typeof fetch;
   readonly #now: () => number;
 
@@ -596,7 +604,7 @@ export class GitHubActionsAdapter {
       statuses?: readonly number[];
     } = {},
   ): Promise<RequestResult> {
-    const token = await this.#token();
+    const token = await this.#token({ pathname, method: options.method ?? "GET" });
     if (
       typeof token !== "string"
       || token.length < 8
@@ -712,6 +720,15 @@ export class GitHubActionsAdapter {
     return target;
   }
 
+  /** A rejected allowlist check happens before dispatchRelease contacts GitHub. */
+  releaseDispatchPolicyRejection(input: ReleaseControllerDispatch): string | null {
+    try { this.#releaseTarget(input); return null; }
+    catch (error) {
+      if (error instanceof GitHubExecutorError && error.code === "github-target-not-allowed") return error.message;
+      throw error;
+    }
+  }
+
   #controllerFor(targetId: string): GitHubReleaseControllerPolicy {
     const controller = this.#metadata.releaseControllers.find((entry) => entry.targetId === targetId);
     if (!controller) {
@@ -787,6 +804,29 @@ export class GitHubActionsAdapter {
     return Array.isArray(secrets) ? secrets.map((entry) => plainRecord(entry)?.name).filter((name): name is string => typeof name === "string").sort() : [];
   }
 
+  /** Names (never values) of the variables in a target's controller environment. */
+  async listEnvironmentVariableNames(targetId: string, options: { signal?: AbortSignal } = {}): Promise<string[] | null> {
+    const controller = this.#controllerFor(targetId);
+    const result = await this.#request(
+      `${repositoryPath(controller.repository)}/environments/${pathSegment(controller.githubEnvironment)}/variables?per_page=30`,
+      { statuses: [200, 404], signal: options.signal },
+    );
+    if (result.status === 404) return null;
+    const variables = plainRecord(result.body)?.variables;
+    return Array.isArray(variables) ? variables.map((entry) => plainRecord(entry)?.name).filter((name): name is string => typeof name === "string").sort() : [];
+  }
+
+  /** Everyone who can push to a target's controller repository: direct, team, or organization owner. */
+  async listControllerWriters(targetId: string, options: { signal?: AbortSignal } = {}): Promise<string[]> {
+    const controller = this.#controllerFor(targetId);
+    const result = await this.#request(`${repositoryPath(controller.repository)}/collaborators?affiliation=all&per_page=100`, { signal: options.signal });
+    if (!Array.isArray(result.body)) throw new GitHubExecutorError("github-response-invalid", "GitHub returned no collaborator list");
+    if (result.body.length >= 100) throw new GitHubExecutorError("github-response-invalid", "The controller repository has too many collaborators to review");
+    return result.body.map(plainRecord)
+      .filter((person) => plainRecord(person?.permissions)?.push === true && typeof person?.login === "string")
+      .map((person) => String(person!.login)).sort();
+  }
+
   /** A JSON file from the pinned controller commit, e.g. its target description. */
   async readControllerJson(targetId: string, file: string, options: { signal?: AbortSignal } = {}): Promise<unknown | null> {
     const controller = this.#controllerFor(targetId);
@@ -799,6 +839,35 @@ export class GitHubActionsAdapter {
     const content = plainRecord(result.body)?.content;
     if (typeof content !== "string") return null;
     try { return JSON.parse(Buffer.from(content, "base64").toString("utf8")); } catch { return null; }
+  }
+
+  /** Where a target's controller ref points now, beside the reviewed pin, for re-pinning. */
+  async controllerHead(targetId: string, options: { signal?: AbortSignal } = {}): Promise<{
+    repository: string; ref: string; pinnedHeadSha: string; pinnedWorkflowBlobSha: string; headSha: string; workflowBlobSha: string;
+  }> {
+    const controller = this.#controllerFor(targetId);
+    const commit = await this.#request(`${repositoryPath(controller.repository)}/commits/${pathSegment(controller.ref)}`, { signal: options.signal });
+    let headSha: string;
+    try { headSha = validateCommitSha(plainRecord(commit.body)?.sha, "response.sha"); } catch {
+      throw new GitHubExecutorError("github-response-invalid", "GitHub returned an invalid commit identity");
+    }
+    const content = await this.#request(
+      `${repositoryPath(controller.repository)}/contents/${controller.workflowPath.split("/").map(pathSegment).join("/")}?ref=${pathSegment(headSha)}`,
+      { signal: options.signal },
+    );
+    const body = plainRecord(content.body);
+    if (body?.type !== "file" || body.path !== controller.workflowPath) {
+      throw new GitHubExecutorError("github-response-invalid", "GitHub did not return the controller's workflow file");
+    }
+    let workflowBlobSha: string;
+    try { workflowBlobSha = gitObjectId(body.sha, "response.workflow.sha"); } catch {
+      throw new GitHubExecutorError("github-response-invalid", "GitHub returned an invalid workflow blob identity");
+    }
+    return {
+      repository: controller.repository, ref: controller.ref,
+      pinnedHeadSha: controller.expectedHeadSha, pinnedWorkflowBlobSha: controller.expectedWorkflowBlobSha,
+      headSha, workflowBlobSha,
+    };
   }
 
   async verifyWorkflowTrust(
@@ -1040,13 +1109,14 @@ export class GitHubActionsAdapter {
     // identified by the id GitHub returned from this very dispatch may still carry
     // the placeholder while pending; a finished run must always carry the correlation.
     const identifiedByDispatch = receipt.providerRunId !== null && receipt.providerRunId === providerRunId;
-    const titlePending = identifiedByDispatch && providerStatus !== "completed";
     if (
       repository?.full_name !== receipt.repository
       || path !== receipt.workflowPath
       || run.event !== "workflow_dispatch"
       || headSha !== receipt.expectedHeadSha
-      || (!titlePending && !correlationAppears(displayTitle, receipt.psmRunId))
+      // GitHub named this run in its answer to the dispatch itself, which is a
+      // stronger identity than a title; titles correlate runs found by listing.
+      || (!identifiedByDispatch && !correlationAppears(displayTitle, receipt.psmRunId))
     ) {
       throw new GitHubExecutorError(
         "github-run-mismatch",
@@ -1157,6 +1227,139 @@ export class GitHubActionsAdapter {
     };
   }
 
+  /**
+   * Whether a finished release run ever started the step that reaches the
+   * target. A controller that stopped before it changed nothing on the server,
+   * so its failure is final rather than a side effect needing recovery.
+   */
+  async releaseTargetStep(
+    receipt: GitHubDispatchReceipt,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ reached: boolean; stoppedAt: string | null }> {
+    const polled = await this.pollRun(receipt, options);
+    if (!polled.run || polled.run.status !== "completed") return { reached: true, stoppedAt: null };
+    return this.#releaseTargetStepFor(receipt.repository, polled.run.providerRunId, options);
+  }
+
+  /**
+   * A finished release run found by the id GitHub returned for its dispatch, for a
+   * step whose stored receipt was lost. Repository, workflow, event and the PSM run
+   * in its title must all match before its outcome is believed.
+   */
+  async releaseRunById(
+    targetId: string,
+    providerRunId: string,
+    psmRunId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<{ completed: boolean; conclusion: string | null; provenanceUrl: string; reached: boolean; stoppedAt: string | null }> {
+    const controller = this.#controllerFor(targetId);
+    const id = validateProviderId(providerRunId, "providerRunId");
+    const result = await this.#request(`${repositoryPath(controller.repository)}/actions/runs/${pathSegment(id)}`, { signal: options.signal });
+    const run = plainRecord(result.body);
+    const path = typeof run?.path === "string" ? run.path.split("@")[0] : "";
+    if (
+      plainRecord(run?.repository)?.full_name !== controller.repository || path !== controller.workflowPath
+      || run?.head_sha !== controller.expectedHeadSha
+      || run?.event !== "workflow_dispatch" || typeof run.display_title !== "string" || !correlationAppears(run.display_title, psmRunId)
+    ) {
+      throw new GitHubExecutorError("github-run-mismatch", "GitHub workflow run did not match repository, workflow and correlation constraints");
+    }
+    const completed = run.status === "completed";
+    const conclusion = typeof run.conclusion === "string" ? run.conclusion : null;
+    const step = completed ? await this.#releaseTargetStepFor(controller.repository, id, options) : { reached: true, stoppedAt: null };
+    return { completed, conclusion, provenanceUrl: provenanceUrl(controller.repository, id), ...step };
+  }
+
+  /**
+   * Recover a release whose dispatch failed before PSM could save a receipt.
+   * Scan the complete workflow window; an empty first page alone is not proof
+   * that no run was created. An unrelated run near submission also prevents an
+   * absence conclusion because GitHub may not yet have evaluated its run-name.
+   */
+  async findReleaseRunByCorrelation(
+    targetId: string,
+    psmRunId: string,
+    submittedAt: number,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<string | null> {
+    const controller = this.#controllerFor(targetId);
+    if (!Number.isFinite(submittedAt) || submittedAt <= 0 || this.#now() - submittedAt < 10 * 60_000) {
+      throw new GitHubExecutorError("github-run-unsettled", "Release dispatch is too recent to prove no workflow run was created");
+    }
+    const earliest = submittedAt - 10_000;
+    const uncertainUntil = submittedAt + 10 * 60_000;
+    let found: string | null = null;
+    let uncorrelatedNearSubmission = false;
+    let complete = false;
+    let listed = 0;
+    for (let page = 1; page <= 20; page++) {
+      const query = new URLSearchParams({ event: "workflow_dispatch", per_page: "100", page: String(page) });
+      const response = await this.#request(
+        `${repositoryPath(controller.repository)}/actions/workflows/${pathSegment(controller.workflow)}/runs?${query}`,
+        { signal: options.signal },
+      );
+      const body = plainRecord(response.body);
+      const runs = body?.workflow_runs;
+      const total = body?.total_count;
+      if (!Array.isArray(runs) || runs.length > 100 || !Number.isSafeInteger(total) || (total as number) < 0) {
+        throw new GitHubExecutorError("github-response-invalid", "GitHub returned an invalid workflow run list");
+      }
+      listed += runs.length;
+      for (const value of runs) {
+        const run = plainRecord(value);
+        const createdAt = Date.parse(String(run?.created_at ?? ""));
+        if (!Number.isFinite(createdAt)) {
+          throw new GitHubExecutorError("github-response-invalid", "GitHub returned a workflow run without a valid creation time");
+        }
+        if (createdAt < earliest) continue;
+        if (typeof run?.display_title === "string" && correlationAppears(run.display_title, psmRunId)) {
+          const id = validateProviderId(run.id, "run.id");
+          if (found && found !== id) {
+            throw new GitHubExecutorError("github-run-ambiguous", "Several GitHub workflow runs claimed the same PSM correlation ID");
+          }
+          found = id;
+        } else if (createdAt <= uncertainUntil) {
+          uncorrelatedNearSubmission = true;
+        }
+      }
+      if (runs.length < 100) {
+        if (listed !== total) throw new GitHubExecutorError("github-run-unsettled", "GitHub workflow history was incomplete or changed during the search");
+        complete = true; break;
+      }
+    }
+    if (!complete) throw new GitHubExecutorError("github-run-unsettled", "GitHub workflow history did not cover the submission window");
+    if (found) return found;
+    if (uncorrelatedNearSubmission) {
+      throw new GitHubExecutorError("github-run-unsettled", "A workflow run near submission could not be correlated safely");
+    }
+    return null;
+  }
+
+  async #releaseTargetStepFor(
+    repository: string,
+    providerRunId: string,
+    options: { signal?: AbortSignal },
+  ): Promise<{ reached: boolean; stoppedAt: string | null }> {
+    const result = await this.#request(
+      `${repositoryPath(repository)}/actions/runs/${pathSegment(providerRunId)}/jobs?filter=latest&per_page=100`,
+      { signal: options.signal },
+    );
+    const jobs = plainRecord(result.body)?.jobs;
+    if (!Array.isArray(jobs)) throw new GitHubExecutorError("github-response-invalid", "GitHub returned an invalid job list");
+    const steps = jobs.flatMap((job) => {
+      const list = plainRecord(job)?.steps;
+      return Array.isArray(list) ? list.map((step) => plainRecord(step) ?? {}) : [];
+    });
+    const target = steps.filter((step) => step.name === RELEASE_TARGET_STEP);
+    const releaseJobs = jobs.map((job) => plainRecord(job) ?? {}).filter((job) => job.name === "release");
+    // Unknown or partial job data is treated as reached: only a provable skip is safe.
+    const reached = releaseJobs.length === 1 && releaseJobs[0].conclusion === "skipped"
+      ? false
+      : target.length !== 1 || target[0].conclusion !== "skipped";
+    const failed = steps.find((step) => step.conclusion === "failure");
+    return { reached, stoppedAt: typeof failed?.name === "string" ? failed.name.slice(0, 200) : null };
+  }
+
   async cancelRun(
     receipt: GitHubDispatchReceipt,
     options: { signal?: AbortSignal } = {},
@@ -1218,7 +1421,7 @@ export class GitHubActionsAdapter {
     try { artifactId = validateProviderId(plainRecord(matches[0])?.id, "resultArtifact.id"); } catch {
       throw new GitHubExecutorError("github-response-invalid", "GitHub returned an invalid result artifact ID");
     }
-    const token = await this.#token();
+    const token = await this.#token({ pathname: `${repositoryPath(receipt.repository)}/actions/artifacts/${artifactId}/zip`, method: "GET" });
     if (typeof token !== "string" || token.length < 8 || token.length > 4096 || /[\u0000-\u0020\u007f]/.test(token)) {
       throw new GitHubExecutorError("github-config-invalid", "GitHub token is unavailable or invalid");
     }
@@ -1288,11 +1491,14 @@ export class GitHubActionsAdapter {
     resultValue: unknown,
     options: { signal?: AbortSignal } = {},
   ): Promise<ImportedPrepareArtifact> {
+    // Dispatch receipts carry the allowlisted spelling of the ref. Resolve the
+    // original request through that same policy before comparing the receipt.
+    const target = this.#prepareTarget(dispatch);
     if (
       receipt.operation !== "prepare"
       || receipt.repository !== dispatch.repository
       || receipt.workflow !== dispatch.workflow
-      || receipt.ref !== dispatch.ref
+      || receipt.ref !== target.ref
       || receipt.psmRunId !== dispatch.psmRunId
       || receipt.expectedHeadSha !== dispatch.commitSha
     ) {

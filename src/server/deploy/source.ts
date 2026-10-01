@@ -136,15 +136,13 @@ export function readDeploymentSource(
   };
 }
 
-/** Whether the three deployment inputs in the worktree differ from HEAD. */
+/** A build of HEAD cannot include any uncommitted source, including new files. */
 export function deploymentInputsDirty(checkoutPath: string): boolean {
   const output = git(checkoutPath, [
     "status",
     "--porcelain=v1",
-    "--",
-    ".psm/deployments.json",
-    ".psm/identity.json",
-    "package.json",
+    "--untracked-files=normal",
+    "--ignore-submodules=all",
   ]);
   return output.trim().length > 0;
 }

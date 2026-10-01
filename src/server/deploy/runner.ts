@@ -98,6 +98,7 @@ export interface PlanRecheckContext {
   expectedLockKeys: readonly string[];
   checkpoint: "before-locks" | "after-locks" | "before-action";
   action: DeploymentPlanAction | null;
+  effectStarted: boolean;
   signal: AbortSignal;
 }
 
@@ -247,6 +248,14 @@ function errorName(error: unknown): string {
   return error instanceof Error && error.name ? error.name.slice(0, 120) : "Error";
 }
 
+// GitHub executor messages are fixed strings written in psm, never provider
+// text, so they are safe to surface and say what actually went wrong.
+function executorDetail(error: unknown): string {
+  if (!(error instanceof Error) || error.name !== "GitHubExecutorError") return errorName(error);
+  const code = (error as Error & { code?: string }).code;
+  return `${code ?? error.name}: ${error.message}`.slice(0, 300);
+}
+
 function boundedJson(value: JsonValue | undefined): JsonValue {
   const normalized = value ?? {};
   let encoded: string;
@@ -380,6 +389,42 @@ export class DeploymentRunner {
     return this.schedule(runId, true);
   }
 
+  /** Close only an uncertain nginx reload, which a fresh plan can repeat safely. */
+  closeUncertainNginxReload(runId: string): DeploymentRun {
+    const run = this.store.getRun(runId);
+    if (run.state !== "recovery-required") throw new DeploymentRunnerError("run is not waiting for recovery");
+    const unresolved = this.store.listRunSteps(runId).filter((step) =>
+      step.state === "submitted" || step.state === "observed" || step.state === "recovery-required"
+    );
+    if (unresolved.length !== 1 || unresolved[0].adapterKind !== "reload-nginx@1") {
+      throw new DeploymentRunnerError("only an uncertain nginx reload can be closed for a fresh plan");
+    }
+    const step = unresolved[0];
+    this.store.transitionRunStep({
+      runId, ordinal: step.ordinal, expectedState: step.state, state: "failed", at: this.now(),
+      result: storedObservation({ outcome: "unknown", data: { reason: "operator closed an uncertain, repeatable nginx reload" } }, this.now()),
+    });
+    this.emit(runId, "uncertain-reload-closed", step.stepId, "warning", "Operator closed the uncertain nginx reload; a new reviewed plan must reload nginx again", { actionId: step.stepId });
+    return this.terminal(runId, "failed", "Uncertain nginx reload closed so a fresh reviewed plan can retry it");
+  }
+
+  /** End a run stopped at a read-only check after all submitted effects completed. */
+  closeFailedReadOnlyObservation(runId: string): DeploymentRun {
+    const run = this.store.getRun(runId);
+    if (run.state !== "recovery-required" || !run.recoveryReason?.startsWith("post-mutation observation ")) {
+      throw new DeploymentRunnerError("run is not waiting at a failed read-only observation");
+    }
+    const steps = this.store.listRunSteps(runId);
+    if (!steps.some((step) => step.state === "completed") || steps.some((step) =>
+      step.state === "submitted" || step.state === "observed" || step.state === "recovery-required"
+    )) {
+      throw new DeploymentRunnerError("submitted work still needs observation");
+    }
+    this.emit(runId, "read-only-observation-closed", "recovery-required", "warning",
+      "Operator closed the failed read-only observation; a fresh reviewed plan is required");
+    return this.terminal(runId, "failed", "Failed read-only observation closed so a fresh reviewed plan can retry it");
+  }
+
   requestCancellation(runId: string): DeploymentRun {
     return this.store.requestCancellation(runId, this.now());
   }
@@ -465,6 +510,7 @@ export class DeploymentRunner {
     checkpoint: PlanRecheckContext["checkpoint"],
     action: DeploymentPlanAction | null,
     signal: AbortSignal,
+    effectStarted = false,
   ): Promise<void> {
     this.assertFreshAuthority(authority);
     const result = await this.recheckPlan({
@@ -474,6 +520,7 @@ export class DeploymentRunner {
       expectedLockKeys: authority.lockKeys,
       checkpoint,
       action,
+      effectStarted,
       signal,
     });
     if (!result.ok) throw new DeploymentStalePlanError(result.reason || "plan recheck failed");
@@ -588,7 +635,10 @@ export class DeploymentRunner {
       }
 
       for (const lock of claimed.expired) {
-        const observed = await this.observeExpiredLock({
+        // This run's own lease from an earlier PSM boot: recovery is the owner
+        // resuming, and it observes its own durable steps before any new effect.
+        const own = lock.ownerRunId === authority.run.runId;
+        const observed = own ? { safeToRecover: true, reason: "the recovering run owns this lease" } : await this.observeExpiredLock({
           lock,
           nextRun: this.store.getRun(authority.run.runId),
           plan: authority.plan,
@@ -661,6 +711,7 @@ export class DeploymentRunner {
   ): Promise<void> {
     this.move(runId, actionState(action), action.phase);
     let attempts = 0;
+    let failures = 0;
     while (true) {
       if (signal.aborted) throw signal.reason ?? new DeploymentRunnerStoppedError("runner stopped");
       let observation: AdapterObservation;
@@ -668,7 +719,24 @@ export class DeploymentRunner {
         observation = validateObservation(await adapter.check!(this.adapterContext(runId, plan, action, null, signal)));
       } catch (error) {
         if (signal.aborted) throw signal.reason ?? error;
-        if (effectsStarted) throw new DeploymentRecoveryRequiredError("post-mutation observation failed");
+        if (++failures < 3) {
+          await this.sleep(this.observationPollMs, signal);
+          continue;
+        }
+        const helperCode = error instanceof Error && error.name === "HostHelperError"
+          ? (error as Error & { code?: string }).code : undefined;
+        const helperDetail = (helperCode === "helper-invalid" || helperCode === "not-authorized") && error instanceof Error
+          ? error.message.slice(0, 300) : null;
+        this.emit(runId, "action-check-failed", action.phase, "error",
+          `Read-only action ${action.actionId} failed after ${failures} attempts${helperDetail ? `: ${helperDetail}` : `: ${errorName(error)}`}`, {
+            actionId: action.actionId,
+            attempts: failures,
+            errorType: errorName(error),
+            ...(helperDetail ? { helperCode, reason: helperDetail } : {}),
+          });
+        if (effectsStarted) throw new DeploymentRecoveryRequiredError(
+          `post-mutation observation ${action.actionId} failed after ${failures} attempts${helperDetail ? `: ${helperDetail}` : `: ${errorName(error)}`}`.slice(0, 500),
+        );
         throw new DeploymentAdapterFailedError(`read-only adapter failed: ${errorName(error)}`);
       }
       if (observation.outcome === "succeeded") {
@@ -686,6 +754,10 @@ export class DeploymentRunner {
         if (effectsStarted) throw new DeploymentRecoveryRequiredError("post-mutation result is inconclusive");
         throw new DeploymentAdapterFailedError("precondition result is inconclusive");
       }
+      this.emit(runId, "action-check-failed", action.phase, "error", `Read-only action ${action.actionId} did not pass`, {
+        actionId: action.actionId,
+        result: storedObservation(observation, this.now()),
+      });
       throw new DeploymentAdapterFailedError(`read-only action ${action.actionId} did not pass`);
     }
   }
@@ -747,7 +819,7 @@ export class DeploymentRunner {
           observation = validateObservation(await adapter.observe!(this.adapterContext(step.runId, plan, action, step, signal)));
         } catch (error) {
           if (signal.aborted) continue;
-          throw new DeploymentRecoveryRequiredError(`submitted action could not be observed: ${errorName(error)}`);
+          throw new DeploymentRecoveryRequiredError(`submitted action could not be observed: ${executorDetail(error)}`);
         }
       }
 
@@ -755,7 +827,7 @@ export class DeploymentRunner {
         throw new DeploymentRecoveryRequiredError("provider reports no accepted effect; an operator must classify the submission");
       }
       if (observation.outcome === "unknown") {
-        if (step.state === "submitted" || step.state === "observed") {
+        if (step.state === "submitted" || step.state === "observed" || step.state === "recovery-required") {
           step = this.store.transitionRunStep({
             runId: step.runId,
             ordinal: step.ordinal,
@@ -798,7 +870,9 @@ export class DeploymentRunner {
           at: this.now(),
           result: storedObservation(observation, this.now()),
         });
-        throw new DeploymentAdapterFailedError(`executor action ${action.actionId} failed`);
+        const detail = observation.data && typeof observation.data === "object" && !Array.isArray(observation.data)
+          ? (observation.data as Record<string, JsonValue>).detail : null;
+        throw new DeploymentAdapterFailedError(`executor action ${action.actionId} failed${typeof detail === "string" ? `: ${detail.slice(0, 300)}` : ""}`);
       }
 
       if (observation.outcome === "cancelled") {
@@ -887,9 +961,15 @@ export class DeploymentRunner {
         if (adapter.execution === "remote") throw new DeploymentRunnerDetachError("remote submission may still be running");
         throw new DeploymentRecoveryRequiredError("local submission was interrupted");
       }
-      this.emit(runId, "submission-response-lost", action.phase, "warning", "Submission response was not conclusive; observing by idempotency key", {
+      const helperCode = error instanceof Error && error.name === "HostHelperError"
+        ? (error as Error & { code?: string }).code : undefined;
+      const helperDetail = (helperCode === "helper-invalid" || helperCode === "not-authorized") && error instanceof Error
+        ? error.message.slice(0, 400) : null;
+      this.emit(runId, helperDetail ? "submission-failed" : "submission-response-lost", action.phase, "warning",
+        helperDetail ? `Host helper reported failure: ${helperDetail}; observing resulting state` : "Submission response was not conclusive; observing by idempotency key", {
         actionId: action.actionId,
         errorType: errorName(error),
+        ...(helperDetail ? { helperCode, reason: helperDetail } : {}),
       });
     }
 
@@ -1000,7 +1080,7 @@ export class DeploymentRunner {
             cancelled = true;
             continue;
           }
-          await this.exactRecheck(authority, "before-action", action, signal);
+          await this.exactRecheck(authority, "before-action", action, signal, effectStarted);
         }
 
         if (!action.sideEffecting) {
@@ -1033,7 +1113,7 @@ export class DeploymentRunner {
         return this.terminal(runId, "cancelled", "Deployment was cancelled before provider submission");
       }
       if (error instanceof DeploymentStalePlanError) {
-        return this.terminal(runId, "stale-plan", "The exact approved plan is no longer executable");
+        return this.terminal(runId, "stale-plan", `The exact approved plan is no longer executable: ${error.message.slice(0, 300)}`);
       }
       if (error instanceof DeploymentRunnerDetachError) {
         this.move(runId, "interrupting", "interrupting", "remote executor will be reattached on startup");
@@ -1063,7 +1143,7 @@ export class DeploymentRunner {
         });
         return run;
       }
-      return this.terminal(runId, "failed", "Deployment failed before a successful observed completion", {
+      return this.terminal(runId, "failed", error instanceof DeploymentAdapterFailedError ? error.message.slice(0, 500) : "Deployment failed before a successful observed completion", {
         errorType: errorName(error),
         // Bounded, and never a provider response: adapters return redacted
         // observations, and what reaches here is the runner's own refusal.

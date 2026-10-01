@@ -36,7 +36,7 @@ import {
   type InspectionReport,
   type MachineIdentity,
 } from "./plan.ts";
-import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, buildReleaseCiKeyPlan, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan, type ReleaseCiKeyPlan } from "./roles.ts";
+import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, buildReleaseCiKeyPlan, helperSourceDigest, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan, type ReleaseCiKeyPlan } from "./roles.ts";
 import { MachineTransportError, type MachineTransport, type SshEndpoint } from "./ssh.ts";
 import {
   MachineStoreError,
@@ -79,6 +79,7 @@ export interface MachineServiceOptions {
   helper?: HostHelperTransport;
   /** Builds the helper binary for an architecture; tests substitute a fixture. */
   buildHelper?: (arch: string) => HelperBuild;
+  helperSourceDigest?: () => string;
   /** The host target a project environment's deployment manifest names, if any. */
   hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null } | null;
   now?: () => number;
@@ -113,6 +114,7 @@ export class MachineService {
   readonly #transport: MachineTransport;
   readonly #helper: HostHelperTransport;
   readonly #buildHelper: (arch: string) => HelperBuild;
+  readonly #helperSourceDigest: () => string;
   readonly #hostTarget: NonNullable<MachineServiceOptions["hostTarget"]>;
   readonly #now: () => number;
   readonly #owner = `psm_${process.pid}_${randomBytes(4).toString("hex")}`;
@@ -126,6 +128,7 @@ export class MachineService {
     this.#transport = options.transport;
     this.#helper = options.helper ?? new SshHostHelperTransport({ broker: options.broker });
     this.#buildHelper = options.buildHelper ?? ((arch) => buildHostHelper(arch));
+    this.#helperSourceDigest = options.helperSourceDigest ?? helperSourceDigest;
     this.#hostTarget = options.hostTarget ?? (() => null);
     this.#now = options.now ?? Date.now;
   }
@@ -151,6 +154,8 @@ export class MachineService {
     return {
       ...machine,
       trusted: machine.hostKeySource !== "scanned-unverified",
+      // The installed helper was built from other sources than this PSM carries.
+      helperOutdated: Boolean(machine.helper && machine.helper.sourceDigest !== this.#helperSourceDigest()),
       access: access.map((entry) => this.accessView(entry)),
       jobs: this.#store.listJobs(machine.id).slice(0, 10),
     };

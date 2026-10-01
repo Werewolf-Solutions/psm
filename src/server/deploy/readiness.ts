@@ -52,7 +52,7 @@ function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions,
         ?? "Connect the build provider, configure its workflow, and commit the deployment inputs before preparing a build.";
   } else if (blocker.code.startsWith("source-") || blocker.code === "version-not-increased") {
     action = "review-source";
-    title = blocker.code === "source-dirty" ? "Commit deployment inputs" : "Review the release source";
+    title = blocker.code === "source-dirty" ? "Commit local changes" : "Review the release source";
   } else if (blocker.code === "dependency-failed") {
     action = "resolve-dependency";
     title = `Resolve ${blocker.ownerRef?.replace(/^dependency:/, "") ?? "the dependency"}`;

@@ -4,9 +4,11 @@ import test from "node:test";
 import {
   GitHubActionsAdapter,
   GitHubExecutorError,
+  RELEASE_TARGET_STEP,
   type GitHubActionsConnectionMetadata,
 } from "./github.ts";
 import {
+  PREPARE_ARTIFACT_RESULT_SCHEMA,
   RELEASE_EXECUTION_CONTRACT_SCHEMA,
   STATIC_PAYLOAD_ALGORITHM,
   releaseExecutionContractDigest,
@@ -171,6 +173,40 @@ test("a repository, workflow and ref outside the allowlist never reaches the net
     "github-target-not-allowed",
   );
   assert.equal(github.calls.length, 0, "the allowlist is checked before any request is made");
+});
+
+test("receiptless release recovery searches the complete GitHub submission window", async () => {
+  const submittedAt = 1_760_000_000_000 - 60 * 60_000;
+  const path = "/actions/workflows/release-static.yml/runs?";
+  const run = (id: number, title: string, createdAt = submittedAt + 1_000) => ({
+    id, display_title: title, created_at: new Date(createdAt).toISOString(),
+  });
+  const search = (workflow_runs: unknown[]) => adapter(fakeGitHub({ [path]: { body: { total_count: workflow_runs.length, workflow_runs } } }));
+  const target = "werewolf:todo-production-web";
+  const psmRun = "run_deploy_1";
+  assert.equal(await search([run(4, "release unrelated", submittedAt - 20_000)]).findReleaseRunByCorrelation(target, psmRun, submittedAt), null);
+  assert.equal(await search([run(4, `release ${psmRun} to ${target}`)]).findReleaseRunByCorrelation(target, psmRun, submittedAt), "4");
+  assert.equal(await codeOf(() => search([run(4, "release-static")]).findReleaseRunByCorrelation(target, psmRun, submittedAt)), "github-run-unsettled");
+  assert.equal(await codeOf(() => adapter(fakeGitHub({ [path]: { body: { total_count: 2, workflow_runs: [run(4, "release unrelated")] } } }))
+    .findReleaseRunByCorrelation(target, psmRun, submittedAt)), "github-run-unsettled");
+  const firstPage = Array.from({ length: 100 }, (_, index) => run(index + 1, "release unrelated", submittedAt + 20 * 60_000));
+  const paged = adapter(fakeGitHub({
+    [`${path}event=workflow_dispatch&per_page=100&page=1`]: { body: { total_count: 101, workflow_runs: firstPage } },
+    [`${path}event=workflow_dispatch&per_page=100&page=2`]: { body: { total_count: 101, workflow_runs: [run(999, `release ${psmRun}`)] } },
+  }));
+  assert.equal(await paged.findReleaseRunByCorrelation(target, psmRun, submittedAt), "999");
+  assert.equal(await codeOf(() => search([run(4, `release ${psmRun}`), run(5, `release ${psmRun}`)]).findReleaseRunByCorrelation(target, psmRun, submittedAt)), "github-run-ambiguous");
+  assert.equal(await codeOf(() => search([]).findReleaseRunByCorrelation(target, psmRun, 1_760_000_000_000 - 1_000)), "github-run-unsettled");
+});
+
+test("an unpinned release controller is rejected locally before contacting GitHub", () => {
+  const github = fakeGitHub();
+  const policy = metadata();
+  policy.releaseControllers = [];
+  const kit = new GitHubActionsAdapter({ metadata: policy, token: () => TOKEN, fetch: github.fetch });
+  assert.match(kit.releaseDispatchPolicyRejection(releaseDispatch()) || "", /not allowlisted/);
+  assert.equal(github.calls.length, 0);
+  assert.equal(adapter().releaseDispatchPolicyRejection(releaseDispatch()), null);
 });
 
 test("a ref that no longer resolves to its pinned commit is not dispatched", async () => {
@@ -345,8 +381,118 @@ test("a run named by its dispatch may carry GitHub's placeholder title until it 
   assert.equal((await kit(run({})).pollRun(receipt)).run?.status, "queued", "a queued run with the placeholder is still being watched");
   assert.equal((await kit(run({ status: "in_progress" })).pollRun(receipt)).run?.status, "in-progress");
   assert.equal((await kit(run({ status: "completed", conclusion: "success", display_title: "prepare run_b5c3cc107bdd46e7" })).pollRun(receipt)).run?.conclusion, "success");
-  // Finished without the correlation, or any other identity differing, is still refused.
-  await assert.rejects(kit(run({ status: "completed", conclusion: "success" })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
+  // GitHub's own answer to the dispatch names the run, so a finished run keeps that
+  // identity even when the workflow's run-name omits the PSM run (observed 2026-09-28,
+  // run 36436534674). Any other identity differing is still refused.
+  assert.equal((await kit(run({ status: "completed", conclusion: "failure" })).pollRun(receipt)).run?.conclusion, "failure");
   await assert.rejects(kit(run({ head_sha: "a".repeat(40) })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
   await assert.rejects(kit(run({ id: 999 })).pollRun(receipt), (error: GitHubExecutorError) => error.code === "github-run-mismatch");
+});
+
+test("prepared artifacts import across branch spellings while identity checks stay strict", async () => {
+  for (const [allowed, requested] of [["master", "refs/heads/master"], ["refs/heads/master", "master"], ["refs/heads/master", "refs/heads/master"]]) {
+    const dispatch = prepareDispatch({ ref: requested, commitSha: HEAD_SHA });
+    const run = {
+      id: 445566, head_sha: HEAD_SHA, path: ".github/workflows/build-static.yml",
+      event: "workflow_dispatch", repository: { full_name: dispatch.repository },
+      display_title: `prepare ${dispatch.psmRunId}`, status: "completed", conclusion: "success",
+      run_attempt: 1, head_branch: "master", created_at: "2025-10-09T08:53:20Z", updated_at: "2025-10-09T08:54:20Z",
+    };
+    const github = fakeGitHub({
+      "/actions/runs/445566/artifacts": { body: { artifacts: [{
+        id: 778899, name: dispatch.psmArtifactId, expired: false, size_in_bytes: 1024,
+        expires_at: "2027-01-01T00:00:00Z", workflow_run: { id: 445566, head_sha: HEAD_SHA },
+      }] } },
+      "/actions/runs/445566": { body: run },
+    });
+    const saved = metadata();
+    saved.prepareWorkflows = [{ ...saved.prepareWorkflows[0], refs: [{ ref: allowed, expectedWorkflowBlobSha: BLOB_SHA }] }];
+    const kit = new GitHubActionsAdapter({ metadata: saved, token: () => TOKEN, fetch: github.fetch, now: () => 1_760_000_000_000 });
+    const receipt = await kit.dispatchPrepare(dispatch);
+    assert.equal(receipt.ref, allowed, "receipt keeps the policy's spelling");
+    const result = {
+      schema: PREPARE_ARTIFACT_RESULT_SCHEMA,
+      psm_run_id: dispatch.psmRunId, psm_artifact_id: dispatch.psmArtifactId,
+      project_id: dispatch.projectId, environment_id: dispatch.environmentId, unit_id: dispatch.unitId,
+      source_repository: dispatch.repository, producer_run_id: "445566", github_artifact_id: "778899",
+      commit_sha: HEAD_SHA, version: "1.2.3", manifest_digest: dispatch.manifestDigest,
+      build_profile_digest: dispatch.buildProfileDigest, payload_algorithm: STATIC_PAYLOAD_ALGORITHM,
+      payload_limits: artifactIdentity().payloadLimits, payload_digest: digest("1"), archive_digest: digest("2"),
+      retained_until: "2027-01-01T00:00:00Z",
+    };
+    const imported = await kit.importPreparedArtifact(receipt, dispatch, result);
+    assert.equal(imported.githubArtifactId, "778899");
+    assert.equal(imported.provider.runId, "445566");
+    const { provider, ...legacy } = imported;
+    const compatible = await kit.importPreparedArtifact(receipt, dispatch, legacy);
+    assert.deepEqual(compatible.provider, provider, "legacy field spelling preserves provider verification");
+    for (const wrong of [{ commitSha: COMMIT }, { psmRunId: "run_other" }, { githubArtifactId: "999999" }]) {
+      await assert.rejects(kit.importPreparedArtifact(receipt, dispatch, { ...legacy, ...wrong }),
+        (error: GitHubExecutorError) => error.code === "artifact-integrity");
+    }
+    for (const wrong of [{ ref: "refs/tags/master" }, { ref: "refs/heads/other" }]) {
+      await assert.rejects(kit.importPreparedArtifact(receipt, { ...dispatch, ...wrong }, result),
+        (error: GitHubExecutorError) => error.code === "github-target-not-allowed");
+    }
+    for (const wrong of [{ commitSha: COMMIT }, { psmRunId: "run_other" }]) {
+      await assert.rejects(kit.importPreparedArtifact(receipt, { ...dispatch, ...wrong }, result),
+        /Prepare receipt does not match its dispatch/);
+    }
+    await assert.rejects(kit.importPreparedArtifact({ ...receipt, ref: "refs/tags/master" }, dispatch, result),
+      /Prepare receipt does not match its dispatch/);
+    for (const wrong of [{ commit_sha: COMMIT }, { psm_run_id: "run_other" }, { github_artifact_id: "999999" }]) {
+      await assert.rejects(kit.importPreparedArtifact(receipt, dispatch, { ...result, ...wrong }),
+        (error: GitHubExecutorError) => error.code === "artifact-integrity");
+    }
+  }
+});
+
+test("a failed release run proves it never reached the target only by a skipped target step", async () => {
+  const receipt = {
+    schema: "psm.werewolf.solutions/github-dispatch-receipt/v1", policyRevision: "2", operation: "release", repository: "Werewolf-Solutions/deployment-control",
+    workflow: "release-static.yml", workflowPath: ".github/workflows/release-static.yml", ref: "refs/heads/main", expectedHeadSha: "c642f128d7103d5e3aaf3806749b3e925eeb1ad6",
+    workflowBlobSha: "86f6a35672088bd9bb00da3f646c7b32a882bdb4", psmRunId: "run_e19a8daa9f8d4e57", dispatchedAt: "2026-09-28T14:30:49.214Z",
+    providerRunId: "36436534674", controller: "werewolf-static@1", targetId: "werewolf:todo-staging-web", githubEnvironment: "todo-staging-web",
+  } as never;
+  const run = {
+    id: 36436534674, head_sha: "c642f128d7103d5e3aaf3806749b3e925eeb1ad6", path: ".github/workflows/release-static.yml", event: "workflow_dispatch",
+    repository: { full_name: "Werewolf-Solutions/deployment-control" }, created_at: "2026-09-28T14:30:47Z", updated_at: "2026-09-28T14:31:08Z",
+    display_title: "release release_artifact_917da4d6407541cf9105feeb to werewolf:todo-staging-web", status: "completed", conclusion: "failure",
+    run_attempt: 1, head_branch: "main",
+  };
+  const step = (name: string, conclusion: string) => ({ name, status: "completed", conclusion });
+  const kit = (jobs: unknown[]) => new GitHubActionsAdapter({
+    metadata: { revision: 2, prepareWorkflows: [], releaseControllers: [{
+      controller: "werewolf-static@1", targetId: "werewolf:todo-staging-web", repository: "Werewolf-Solutions/deployment-control",
+      workflow: "release-static.yml", workflowPath: ".github/workflows/release-static.yml", ref: "refs/heads/main",
+      expectedHeadSha: "c642f128d7103d5e3aaf3806749b3e925eeb1ad6", expectedWorkflowBlobSha: "86f6a35672088bd9bb00da3f646c7b32a882bdb4",
+      githubEnvironment: "todo-staging-web", allowedSourceRepositories: ["Werewolf-Solutions/todo-app"],
+    }] } as never,
+    token: () => TOKEN,
+    fetch: (async (url: string | URL | Request) => new Response(JSON.stringify(String(url).includes("/jobs") ? { jobs } : run), { status: 200 })) as unknown as typeof fetch,
+  });
+  const contract = { name: "contract", conclusion: "success", steps: [step("Verify the execution contract and resolve the target", "success")] };
+  // Shape of run 36436534674: the token step failed and the target step was skipped.
+  const stopped = { name: "release", conclusion: "failure", steps: [step("Mint a short-lived source-repository token", "failure"), step(RELEASE_TARGET_STEP, "skipped")] };
+  assert.deepEqual(await kit([contract, stopped]).releaseTargetStep(receipt), { reached: false, stoppedAt: "Mint a short-lived source-repository token" });
+  assert.equal((await kit([{ ...contract, conclusion: "failure" }, { name: "release", conclusion: "skipped", steps: [] }]).releaseTargetStep(receipt)).reached, false);
+  // The target step ran, or the job data does not prove it did not: the effect stays uncertain.
+  assert.equal((await kit([contract, { name: "release", conclusion: "failure", steps: [step(RELEASE_TARGET_STEP, "failure")] }]).releaseTargetStep(receipt)).reached, true);
+  assert.equal((await kit([contract, { name: "release", conclusion: "failure", steps: [] }]).releaseTargetStep(receipt)).reached, true);
+
+  // A step whose stored receipt was lost is found again by GitHub's run id, but only
+  // when the run's title names the PSM run (observed 2026-09-28, run 36443918468).
+  const failedInTarget = { name: "release", conclusion: "failure", steps: [step(RELEASE_TARGET_STEP, "failure")] };
+  Object.assign(run, { display_title: "release run_042a09b37a534682 release_artifact_917da4d6407541cf9105feeb to werewolf:todo-staging-web" });
+  const found = await kit([contract, failedInTarget]).releaseRunById("werewolf:todo-staging-web", "36436534674", "run_042a09b37a534682");
+  assert.deepEqual({ completed: found.completed, conclusion: found.conclusion, reached: found.reached }, { completed: true, conclusion: "failure", reached: true });
+  await assert.rejects(
+    kit([contract, failedInTarget]).releaseRunById("werewolf:todo-staging-web", "36436534674", "run_somebody_else"),
+    (error: GitHubExecutorError) => error.code === "github-run-mismatch",
+  );
+  Object.assign(run, { head_sha: "0".repeat(40) });
+  await assert.rejects(
+    kit([contract, failedInTarget]).releaseRunById("werewolf:todo-staging-web", "36436534674", "run_042a09b37a534682"),
+    (error: GitHubExecutorError) => error.code === "github-run-mismatch",
+  );
 });

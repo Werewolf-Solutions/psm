@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {
@@ -240,8 +241,8 @@ test("release dispatch refuses a contract whose digest does not match its own by
 });
 
 test("a prepare result must correlate with the run that asked for it", () => {
-  // The executor speaks snake_case on the wire; PSM's camelCase record is the
-  // parse output, never the accepted input.
+  // Snake case is the canonical wire format. Producer variants must never be
+  // mixed: conflicting aliases could otherwise hide a different identity.
   const result: Record<string, unknown> = {
     schema: PREPARE_ARTIFACT_RESULT_SCHEMA,
     psm_run_id: "run_prepare_1",
@@ -270,8 +271,31 @@ test("a prepare result must correlate with the run that asked for it", () => {
   assert.equal(fieldOf(() => parsePrepareArtifactResult({ ...result, version: "0.5" })), "result.version");
   assert.equal(fieldOf(() => parsePrepareArtifactResult({ ...result, schema: STATIC_RELEASE_RESULT_SCHEMA })), "result.schema");
   assert.equal(fieldOf(() => parsePrepareArtifactResult({ ...result, extra: 1 })), "result.extra");
-  // A camelCase result is a different producer, not a lenient one.
+  // Adding even an agreeing alias is rejected.
   assert.equal(fieldOf(() => parsePrepareArtifactResult({ ...result, psmRunId: "run_prepare_1" })), "result.psmRunId");
+});
+
+test("the published Todo result is accepted as one exact legacy format", () => {
+  // Downloaded from GitHub run 36404335623, before PSM could import it.
+  const result = JSON.parse(fs.readFileSync(new URL("./fixtures/todo-prepare-result-v1.json", import.meta.url), "utf8"));
+  const parsed = parsePrepareArtifactResult(result);
+  assert.deepEqual(parsed, result, "every identity, digest and limit survives normalization");
+  assert.equal(parsed.psmRunId, "run_94a0e5cbee734dda");
+  assert.equal(parsed.githubArtifactId, "10962210235");
+  for (const key of Object.keys(result)) {
+    const incomplete = { ...result }; delete incomplete[key];
+    assert.throws(() => parsePrepareArtifactResult(incomplete), ExecutorContractError, `missing ${key}`);
+  }
+  for (const added of [{ extra: 1 }, { psm_run_id: "run_other" }, { psm_run_id: result.psmRunId }, { commit_sha: result.commitSha }]) {
+    assert.throws(() => parsePrepareArtifactResult({ ...result, ...added }), ExecutorContractError);
+  }
+  for (const changed of [
+    { schema: STATIC_RELEASE_RESULT_SCHEMA }, { psmRunId: "" }, { commitSha: "not-a-commit" },
+    { githubArtifactId: "not-an-id" }, { payloadAlgorithm: "unknown" }, { archiveDigest: "invalid" },
+    { version: "0.6" }, { retainedUntil: "yesterday" },
+    { payloadLimits: { ...result.payloadLimits, maxFiles: 0 } },
+    { payloadLimits: { ...result.payloadLimits, extra: 1 } },
+  ]) assert.throws(() => parsePrepareArtifactResult({ ...result, ...changed }), ExecutorContractError);
 });
 
 test("a release result names both digests and an explicit terminal state", () => {
@@ -307,6 +331,9 @@ test("a release result names both digests and an explicit terminal state", () =>
   assert.equal(parsed.state, "activated");
   assert.equal(parsed.payloadDigest, PAYLOAD);
   assert.equal(parsed.previousReleaseId, null);
+  // The host helper formats observations with Go's RFC3339Nano precision.
+  assert.equal(parseStaticReleaseResult({ ...result, activated_at: "2026-09-29T08:12:52.123456789Z" }).activatedAt, "2026-09-29T08:12:52.123456789Z");
+  assert.equal(fieldOf(() => parseStaticReleaseResult({ ...result, activated_at: "2026-09-29T08:12:52.1234567890Z" })), "result.activated_at");
 
   assert.equal(fieldOf(() => parseStaticReleaseResult({ ...result, state: "probably-fine" })), "result.state");
   assert.equal(fieldOf(() => parseStaticReleaseResult({ ...result, payload_algorithm: "psm-static-tree-sha256@2" })), "result.payload_algorithm");

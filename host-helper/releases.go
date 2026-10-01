@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -54,6 +55,11 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	}
 	if existing, err := readReceipt(target, desired.ReleaseID); err == nil {
 		if existing.PayloadDigest == desired.PayloadDigest && existing.ArchiveDigest == desired.ArchiveDigest && existing.ArtifactID == desired.ArtifactID {
+			// A release staged by an older helper kept the service umask's private
+			// modes; restaging the same release repairs them for nginx.
+			if err := publishRelease(filepath.Join(target.CanonicalRoot, "releases", desired.ReleaseID)); err != nil {
+				return nil, err
+			}
 			return existing, nil
 		}
 		return nil, errors.New("release ID already exists with another identity")
@@ -92,7 +98,13 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 		if err != nil {
 			return nil, fmt.Errorf("read archive: %w", err)
 		}
-		name, err := canonicalRelativePath(header.Name)
+		// tar conventionally appends '/' to directory headers. Normalize only
+		// that suffix before applying the strict relative-path check.
+		archiveName := header.Name
+		if header.Typeflag == tar.TypeDir {
+			archiveName = strings.TrimSuffix(archiveName, "/")
+		}
+		name, err := canonicalRelativePath(archiveName)
 		if err != nil || (name != "site" && !strings.HasPrefix(name, "site/")) {
 			return nil, errors.New("archive path is outside site/")
 		}
@@ -154,6 +166,9 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	if observedPayload != desired.PayloadDigest {
 		return nil, errors.New("extracted payload digest mismatch")
 	}
+	if err := publishRelease(incoming); err != nil {
+		return nil, err
+	}
 	receipt := releaseReceipt{
 		Schema: "psm.werewolf.solutions/target-release/v1", TargetID: target.TargetID, TargetDigest: targetDigest,
 		ReleaseID: desired.ReleaseID, ArtifactID: desired.ArtifactID, CommitSHA: desired.CommitSHA, Version: desired.Version,
@@ -176,6 +191,25 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	}
 	cleanup = false
 	return receipt, nil
+}
+
+// publishRelease makes a staged release readable by nginx whatever the helper's
+// UMask (0027 in the shipped unit): directories 0755, files 0644. Modes are not
+// part of the payload digest, and a link or special file is refused outright.
+func publishRelease(root string) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.Chmod(path, 0755)
+		case entry.Type().IsRegular():
+			return os.Chmod(path, 0644)
+		default:
+			return errors.New("release contains a link or special file")
+		}
+	})
 }
 
 type countingReader struct {

@@ -7,7 +7,8 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { db } from "../db.ts";
 import { canonicalDigest } from "./canonical.ts";
-import type { SecretBroker } from "./connections.ts";
+import type { ConnectionProfile, SecretBroker } from "./connections.ts";
+import { GitHubAppTokens, type GitHubPermissions, githubAppIdentity, githubAppTokens } from "./github-app.ts";
 import type { ArtifactPreparationContext, DeploymentService } from "./service.ts";
 import type { EffectiveDeploymentPolicy } from "./policy.ts";
 
@@ -92,13 +93,24 @@ export class SourcePublicationController {
   // produces a different digest, so a stale entry can only ever miss.
   private readonly verified = new Map<string, number>();
   constructor(private readonly service: DeploymentService, private readonly broker: SecretBroker,
-    private readonly database: () => DatabaseSync = db, private readonly transport: PublicationTransport = githubPublicationTransport) {}
+    private readonly database: () => DatabaseSync = db, private readonly transport: PublicationTransport = githubPublicationTransport,
+    private readonly appTokens: GitHubAppTokens = githubAppTokens(broker)) {}
+  /** A GitHub App connection holds a private key, not a token; publication mints a one-repository token from it. */
+  private credentialSlot(connection: ConnectionProfile): string { return githubAppIdentity(connection) ? "appPrivateKey" : "apiToken"; }
+  private async withToken<T>(connection: ConnectionProfile, repository: string, write: boolean, use: (token: string) => Promise<T>): Promise<T> {
+    if (githubAppIdentity(connection)) {
+      // Pushing a commit that changes .github/workflows needs workflows: write as well.
+      const permissions: GitHubPermissions = write ? { contents: "write", workflows: "write" } : { contents: "read" };
+      return use(await this.appTokens.token(connection, repository, permissions, write));
+    }
+    return this.broker.withLease(connection.connectionId, ["apiToken"], (lease) => lease.useUtf8("apiToken", use));
+  }
   private async context(projectId: string, environmentId: string, unitId?: string) {
     const context = await this.service.sourcePublicationContext(projectId, environmentId, unitId);
     const repository = context.unit.executor.sourceRepository;
     const branch = context.environment.releasePolicy.allowedBranch;
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(branch) || branch.includes("..") || branch.endsWith("/")) throw new Error("Invalid publishing repository or branch.");
-    const status = await this.broker.status(context.connection.connectionId, ["apiToken"]);
+    const status = await this.broker.status(context.connection.connectionId, [this.credentialSlot(context.connection)]);
     if (status.missingSlots.length) throw new Error("The GitHub publishing credential is missing.");
     const digest = canonicalDigest("psm-source-publication-context:v1", { checkout: context.source.checkoutId, commit: context.source.commit, manifest: context.source.manifestDigest, identity: context.source.identityDigest, connection: context.connection, secretGeneration: status.generation, policy: context.policy, repository, branch });
     return { context, digest };
@@ -118,7 +130,7 @@ export class SourcePublicationController {
     const { context, digest } = await this.context(projectId, environmentId, unitId);
     const verifiedAt = this.verified.get(digest);
     if (verifiedAt !== undefined && Date.now() - verifiedAt < REMOTE_VERIFIED_MS) return null;
-    const previousCommit = await this.broker.withLease(context.connection.connectionId, ["apiToken"], (lease) => lease.useUtf8("apiToken", (token) => this.transport.remote(context, token)));
+    const previousCommit = await this.withToken(context.connection, context.unit.executor.sourceRepository, false, (token) => this.transport.remote(context, token));
     if (previousCommit === context.source.commit || this.transport.contains(context.project.path, context.source.commit, previousCommit)) {
       this.remember(digest);
       return null;
@@ -164,12 +176,12 @@ export class SourcePublicationController {
     try {
       const current = await this.context(plan.projectId, plan.environmentId, plan.unitId);
       if (current.digest !== plan.contextDigest) throw new Error("Source, connection or policy changed. Review a new publication plan.");
-      await this.broker.withLease(current.context.connection.connectionId, ["apiToken"], (lease) => lease.useUtf8("apiToken", async (token) => {
+      await this.withToken(current.context.connection, plan.repository, true, async (token) => {
         const remote = await this.transport.remote(current.context, token);
         if (remote !== plan.previousCommit) throw new Error("GitHub branch changed. Review a new publication plan.");
         await this.transport.push(current.context, plan, token);
         if (await this.transport.remote(current.context, token) !== plan.commit) throw new Error("Publication could not be verified. Inspect the remote branch before another review.");
-      }));
+      });
       this.remember(current.digest);
       plan.state = "succeeded"; plan.events.push({ at: Date.now(), actor, state: plan.state, message: "The exact source commit is published and verified on GitHub." });
     } catch (error) {

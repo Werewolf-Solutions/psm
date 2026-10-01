@@ -51,6 +51,10 @@ test("host-helper response must repeat every correlation field", () => {
   assert.equal((decodeHostHelperFrame(response(valid), request).data as { state: string }).state, "in-sync");
   assert.throws(() => decodeHostHelperFrame(response({ ...valid, targetId: "other" }), request), HostHelperError);
   assert.throws(() => decodeHostHelperFrame(response({ ...valid, unexpected: true }), request), HostHelperError);
+  assert.throws(
+    () => decodeHostHelperFrame(response({ ...valid, outcome: "failed", detail: "nginx failed:\nline two" }), request),
+    (error: HostHelperError) => error.message === "nginx failed: line two",
+  );
 });
 
 test("known-host fingerprints use the OpenSSH SHA256 representation", () => {

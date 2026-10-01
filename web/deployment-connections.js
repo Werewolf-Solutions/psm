@@ -188,6 +188,131 @@
     } };
   }
 
+  function githubSetupControls(options, connection, profiles, current) {
+    const { api, projectKey, environment, canManage = true, onChanged, onIssue } = options;
+    const panel = element("section", "dep-github-setup");
+    const status = element("p", "dep-row-detail");
+    status.setAttribute("role", "status");
+    status.setAttribute("aria-live", "polite");
+    const base = `/api/projects/${encodeURIComponent(projectKey)}/deployments/${encodeURIComponent(environment.id)}/github`;
+    const bound = profiles.find((profile) => profile.connectionId === connection.connectionId);
+    const pending = profiles.filter((profile) => profile.publicMetadata?.githubAppSetup?.projectId === environment.projectId
+      && profile.publicMetadata?.githubAppSetup?.environmentId === environment.id);
+    let running = false;
+    const action = async (label, fn) => {
+      if (running || !canManage || !current()) return;
+      running = true;
+      for (const control of panel.querySelectorAll("button, input, select")) control.disabled = true;
+      status.textContent = label;
+      delete status.dataset.state;
+      onIssue?.(null);
+      try { await fn(); }
+      catch (error) {
+        if (!current()) return;
+        // A refusal is the next thing to act on, not a footnote: say it as an error,
+        // point at the control it names, and hand it to the page's To do list.
+        const message = error.message || "GitHub setup failed";
+        if (window.PsmExternalLinks) window.PsmExternalLinks.linkify(status, message);
+        else status.textContent = message;
+        status.dataset.state = "error";
+        const manage = /Manage App repositories/.test(message) ? panel.querySelector('[data-todo="manage-app-repositories"]') : null;
+        const repository = /cannot access (\S+?)\.(\s|$)/.exec(message)?.[1];
+        manage?.classList.add("btn-primary");
+        const planLimit = /^(\S+) is private, and its GitHub plan does not include branch protection/.exec(message);
+        const elsewhere = !!window.PsmExternalLinks?.find(message).length;
+        onIssue?.({
+          title: manage ? `Give the GitHub App access${repository ? ` to ${repository}` : ""}: press “Manage App repositories”, add it and save, then press “Review controller setup / update” again`
+            : planLimit ? `${planLimit[1]} needs branch protection: upgrade the GitHub plan or make the repository public, then press “Review controller setup / update” again`
+            : elsewhere ? "GitHub setup needs a change on GitHub: open the page below, then press “Review controller setup / update” again"
+            : "GitHub setup stopped: read what it needs",
+          detail: message,
+          target: () => (manage?.isConnected ? manage : null) || (status.isConnected ? status : null),
+          kind: manage || elsewhere ? "do" : "read",
+          link: manage?.href ? { href: manage.href, label: "App repositories" } : null,
+        });
+      }
+      finally {
+        running = false;
+        if (current()) for (const control of panel.querySelectorAll("button, input, select")) control.disabled = !canManage;
+      }
+    };
+    panel.append(element("h4", "", "GitHub App setup"));
+    if (!bound?.publicMetadata?.githubApp) {
+      const form = element("form", "dep-setup-form");
+      const ownerLabel = element("label", "dep-setup-field", "GitHub account");
+      const owner = element("input", "dep-connection-input");
+      owner.required = true;
+      owner.value = (connection.setup?.workflows?.[0]?.repository || environment.units?.[0]?.executor?.sourceRepository || "").split("/")[0];
+      ownerLabel.append(owner);
+      const typeLabel = element("label", "dep-setup-field", "Account type");
+      const type = element("select", "dep-connection-select");
+      for (const [value, label] of [["organization", "Organisation"], ["personal", "Personal account"]]) { const option = element("option", "", label); option.value = value; type.append(option); }
+      typeLabel.append(type);
+      const repoLabel = element("label", "dep-setup-field", "Controller repository name");
+      const repo = element("input", "dep-connection-input"); repo.required = true; repo.value = "deployment-control"; repoLabel.append(repo);
+      const connect = element("button", "btn", "Connect GitHub App"); connect.type = "submit";
+      form.append(ownerLabel, typeLabel, repoLabel, element("p", "dep-row-detail", "GitHub will ask you to create and install PSM's App. It requests Actions, Contents, Workflows, Administration and Environments write access; PSM narrows each token to its operation and repository. Existing connections remain available until you check and bind this App."), connect);
+      form.onsubmit = (event) => {
+        event.preventDefault();
+        return action("Opening GitHub App registration…", async () => {
+          const result = await request(api, `${base}/connect`, jsonRequest("POST", { owner: owner.value.trim(), accountKind: type.value, controllerName: repo.value.trim() }));
+          if (!current()) return;
+          const target = element("form"); target.method = "POST"; target.action = result.action;
+          const manifest = element("input"); manifest.type = "hidden"; manifest.name = "manifest"; manifest.value = JSON.stringify(result.manifest);
+          target.append(manifest); document.body.append(target); target.submit(); target.remove();
+        });
+      };
+      panel.append(form);
+    }
+    for (const profile of pending) {
+      const app = profile.publicMetadata.githubAppSetup;
+      if (profile.connectionId === connection.connectionId && profile.publicMetadata.githubApp) continue;
+      const row = element("div", "dep-run-actions");
+      const install = element("a", "btn", `Install ${profile.label}`);
+      install.href = `https://github.com/apps/${encodeURIComponent(app.slug)}/installations/new`; install.target = "_blank"; install.rel = "noopener noreferrer";
+      const check = element("button", "btn", "Check installation and use App"); check.type = "button";
+      check.onclick = () => action("Checking App installation and source access…", async () => {
+        await request(api, `/api/connections/${encodeURIComponent(profile.connectionId)}/github/install`, { method: "POST" });
+        if (current()) { status.textContent = "GitHub App connected."; await onChanged?.(); }
+      });
+      row.append(install, check); panel.append(row);
+    }
+    if (bound?.publicMetadata?.githubApp) {
+      const settings = element("a", "btn", "Manage App repositories");
+      const app = bound.publicMetadata.githubApp;
+      settings.href = bound.publicMetadata.githubAppSetup?.accountKind === "organization"
+        ? `https://github.com/organizations/${encodeURIComponent(app.owner)}/settings/installations/${encodeURIComponent(app.installationId)}`
+        : `https://github.com/settings/installations/${encodeURIComponent(app.installationId)}`;
+      settings.target = "_blank"; settings.rel = "noopener noreferrer";
+      settings.dataset.todo = "manage-app-repositories";
+      const preview = element("button", "btn", "Review controller setup / update"); preview.type = "button";
+      preview.dataset.todo = "controller-review";
+      const review = element("div", "dep-controller-review");
+      preview.onclick = () => action("Reading the controller and preparing its exact changes…", async () => {
+        review.replaceChildren();
+        const plan = await request(api, `${base}/controller/preview`, { method: "POST" });
+        if (!current()) return;
+        review.append(element("p", "dep-row-detail", `${plan.repository} · ${plan.branch} · ${plan.githubEnvironment}`));
+        const list = element("ul"); for (const item of plan.actions) list.append(element("li", "", item)); review.append(list);
+        for (const change of plan.changes) {
+          const details = element("details"); details.append(element("summary", "", change.path));
+          details.append(element("p", "", "Current file"), element("pre", "", change.before || "File does not exist"), element("p", "", "Proposed file"), element("pre", "", change.after)); review.append(details);
+        }
+        if (!plan.changes.length) review.append(element("p", "dep-row-detail", "Controller files already match the reviewed bundle. Protection, credentials and pins will be checked."));
+        const apply = element("button", "btn btn-primary", "Apply reviewed controller setup"); apply.type = "button";
+        apply.onclick = () => action("Applying the reviewed controller setup; this can take a minute…", async () => {
+          await request(api, `${base}/controller/apply`, jsonRequest("POST", { id: plan.id }));
+          if (current()) { review.replaceChildren(); status.textContent = "Controller verified and pinned. Check deployment readiness."; await onChanged?.(); }
+        });
+        review.append(apply); status.textContent = "Review the files and actions before applying. This configures GitHub; deployment still needs its own approved plan.";
+      });
+      panel.append(settings, preview, review);
+    }
+    panel.append(status);
+    for (const control of panel.querySelectorAll("button, input, select")) control.disabled = !canManage;
+    return panel;
+  }
+
   async function render(container, options) {
     const { projectKey, environment, api, onChanged, isCurrent = () => true, canManage = true } = options;
     const token = {};
@@ -250,6 +375,7 @@
     for (const connection of environment.connections) {
       const row = element("div", "dep-row dep-connection-row");
       row.dataset.state = connection.ready ? "ready" : "blocked";
+      row.dataset.slot = connection.slot;
       row.append(element("span", "dep-row-icon", connection.ready ? "✓" : "×"));
       const copy = element("div");
       copy.append(element("div", "dep-row-title", connection.slot));
@@ -259,6 +385,7 @@
       status.setAttribute("aria-live", "polite");
       const matching = profiles.filter((profile) => profile.kind === connection.kind);
       const controls = element("div", "dep-connection-controls");
+      if (connection.kind === "github-actions@1") controls.append(githubSetupControls(options, connection, profiles, current));
       const select = element("select", "dep-connection-select");
       select.setAttribute("aria-label", `Connection for ${connection.slot} in ${environment.id}`);
       const placeholder = element("option", "", matching.length ? "Choose a local connection…" : "No connections of this kind");
@@ -290,6 +417,10 @@
         secretControls = [];
         const profile = selectedProfile();
         if (!profile || scopeIssue(profile, environment)) return;
+        if (profile.publicMetadata?.githubAppSetup) {
+          credentials.append(element("div", "dep-row-detail", profile.publicMetadata.githubApp ? "The GitHub App key is managed by Connect GitHub. Tokens are issued per operation." : "Install the App on GitHub, then use Check installation above."));
+          return;
+        }
         const requiredSlots = profile.requiredSecretSlots?.length
           ? profile.requiredSecretSlots
           : profile.kind === "ssh-host-helper@1" ? ["privateKey"] : ["apiToken"];

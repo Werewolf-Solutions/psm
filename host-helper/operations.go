@@ -288,6 +288,13 @@ func reconcileReleaseDirectory(target TargetConfig, raw json.RawMessage) (any, e
 		if err := os.Chown(directory, int(target.DeployUID), int(target.DeployGID)); err != nil {
 			return nil, err
 		}
+		if directory != filepath.Join(target.CanonicalRoot, "incoming") {
+			// nginx serves through current -> releases/<id>/site. An existing
+			// private root must be traversable after reconciliation too.
+			if err := os.Chmod(directory, 0755); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return map[string]any{"root": target.CanonicalRoot, "retainReleases": desired.RetainReleases, "layout": "ready"}, nil
 }
@@ -423,7 +430,8 @@ func observeResource(target TargetConfig, raw json.RawMessage) (any, error) {
 		if desired.Root != target.CanonicalRoot || desired.RetainReleases < target.RetainReleases {
 			return nil, errors.New("release directory differs from the target contract")
 		}
-		for _, name := range []string{"releases", "incoming"} {
+		publicPermissionsDrifted := false
+		for _, name := range []string{"", "releases", "incoming"} {
 			info, err := os.Stat(filepath.Join(target.CanonicalRoot, name))
 			if errors.Is(err, os.ErrNotExist) {
 				return map[string]any{"state": "create", "root": target.CanonicalRoot}, nil
@@ -431,6 +439,12 @@ func observeResource(target TargetConfig, raw json.RawMessage) (any, error) {
 			if err != nil || !info.IsDir() {
 				return map[string]any{"state": "conflict", "root": target.CanonicalRoot}, nil
 			}
+			if name != "incoming" && info.Mode().Perm() != 0755 {
+				publicPermissionsDrifted = true
+			}
+		}
+		if publicPermissionsDrifted {
+			return map[string]any{"state": "update", "root": target.CanonicalRoot, "detail": "public release directories need nginx traversal"}, nil
 		}
 		return map[string]any{"state": "in-sync", "root": target.CanonicalRoot, "retainReleases": desired.RetainReleases}, nil
 	case "nginx-static-site@1":
@@ -474,7 +488,17 @@ func pm2Snapshot(target TargetConfig) (any, error) {
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8"}
 	raw, err := command.Output()
 	if err != nil {
-		return nil, fmt.Errorf("pm2 snapshot failed")
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			detail := strings.TrimSpace(string(exit.Stderr))
+			if len(detail) > 300 {
+				detail = detail[len(detail)-300:]
+			}
+			if detail != "" {
+				return nil, fmt.Errorf("pm2 snapshot failed: %s", detail)
+			}
+		}
+		return nil, fmt.Errorf("pm2 snapshot failed: %w", err)
 	}
 	if len(raw) > 2*1024*1024 {
 		return nil, errors.New("pm2 response is too large")

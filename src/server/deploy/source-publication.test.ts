@@ -4,21 +4,26 @@ import { openDatabase } from "../db.ts";
 import { SourcePublicationController, type PublicationTransport } from "./source-publication.ts";
 import type { DeploymentService } from "./service.ts";
 import type { SecretBroker } from "./connections.ts";
+import type { GitHubAppTokens } from "./github-app.ts";
 
-function harness(t: test.TestContext) {
+function harness(t: test.TestContext, options: { app?: boolean } = {}) {
   const database = openDatabase(":memory:"); t.after(() => database.close());
   let remote = "a".repeat(40), commit = "b".repeat(40), generation = 1, pushes = 0, remoteCalls = 0;
-  const context = () => ({ project: { id: "prj_test", path: "/checkout" }, source: { checkoutId: "checkout", commit, manifestDigest: "manifest", identityDigest: "identity", subject: "repair" }, unit: { id: "web", executor: { sourceRepository: "owner/repo" } }, environment: { releasePolicy: { allowedBranch: "main" } }, connection: { connectionId: "github", metadataRevision: 1 }, policy: { planTtlSeconds: 600, approval: "local-operator" } });
+  const context = () => ({ project: { id: "prj_test", path: "/checkout" }, source: { checkoutId: "checkout", commit, manifestDigest: "manifest", identityDigest: "identity", subject: "repair" }, unit: { id: "web", executor: { sourceRepository: "owner/repo" } }, environment: { releasePolicy: { allowedBranch: "main" } }, connection: { connectionId: "github", metadataRevision: 1, ...(options.app ? { publicMetadata: { githubApp: { id: "1", installationId: "2", owner: "owner", slug: "psm" } } } : {}) }, policy: { planTtlSeconds: 600, approval: "local-operator" } });
   const service = { sourcePublicationContext: async () => context() } as unknown as DeploymentService;
-  const broker = { status: async () => ({ generation, missingSlots: [] }), withLease: async (_id: string, _slots: string[], action: any) => action({ useUtf8: (_slot: string, callback: any) => callback("secret-token") }) } as unknown as SecretBroker;
+  // An App connection stores only its private key; a personal token connection stores only its token.
+  const stored = options.app ? "appPrivateKey" : "apiToken";
+  const broker = { status: async (_id: string, slots: string[]) => ({ generation, missingSlots: slots.filter((slot) => slot !== stored) }), withLease: async (_id: string, slots: string[], action: any) => { assert.deepEqual(slots, [stored]); return action({ useUtf8: (_slot: string, callback: any) => callback("secret-token") }); } } as unknown as SecretBroker;
+  const minted: { repository: string; permissions: Record<string, string> }[] = [];
+  const appTokens = { token: async (_profile: unknown, repository: string, permissions: Record<string, string>) => { minted.push({ repository, permissions }); return "installation-token"; } } as unknown as GitHubAppTokens;
   const transport: PublicationTransport = {
     remote: async () => { remoteCalls++; return remote; },
     contains: (_root, ancestor, descendant) => ancestor === "a".repeat(40) && descendant === "b".repeat(40),
     describe: () => ({ changes: "app.ts | 2 +-", commits: "bbbbbbb repair" }),
-    push: async (_context, plan) => { assert.equal(plan.previousCommit, remote); remote = plan.commit; pushes++; },
+    push: async (_context, plan, token) => { assert.equal(token, options.app ? "installation-token" : "secret-token"); assert.equal(plan.previousCommit, remote); remote = plan.commit; pushes++; },
   };
-  const publisher = new SourcePublicationController(service, broker, () => database, transport);
-  return { publisher, pushes: () => pushes, remoteCalls: () => remoteCalls, remote: (value: string) => { remote = value; }, source: (value: string) => { commit = value; }, rotate: () => { generation++; }, database };
+  const publisher = new SourcePublicationController(service, broker, () => database, transport, appTokens);
+  return { publisher, minted, pushes: () => pushes, remoteCalls: () => remoteCalls, remote: (value: string) => { remote = value; }, source: (value: string) => { commit = value; }, rotate: () => { generation++; }, database };
 }
 test("publication reviews exact source, requires approval, persists audit, and cannot replay", async (t) => {
   const h = harness(t); const plan = (await h.publisher.review("prj_test", "staging"))!;
@@ -78,4 +83,13 @@ test("a refused push reports GitHub's reason without the token", async () => {
   const said = publicationDiagnostic({ stderr: `remote: Permission to Werewolf-Solutions/todo-app.git denied to ${token}.\nfatal: unable to access 'https://github.com/Werewolf-Solutions/todo-app.git/': The requested URL returned error: 403\n` }, token);
   assert.equal(said, "remote: Permission to Werewolf-Solutions/todo-app.git denied to [token]. fatal: unable to access 'https://github.com/Werewolf-Solutions/todo-app.git/': The requested URL returned error: 403");
   assert.equal(publicationDiagnostic(new Error("spawn failed"), token), "");
+});
+
+test("a GitHub App connection publishes with repository-scoped installation tokens", async (t) => {
+  const h = harness(t, { app: true }); const plan = (await h.publisher.review("prj_test", "staging"))!;
+  assert.equal((await h.publisher.approve(plan.id, plan.digest, "operator")).state, "succeeded");
+  assert.equal(h.pushes(), 1);
+  assert.deepEqual(h.minted.map((item) => item.repository), ["owner/repo", "owner/repo"]);
+  assert.deepEqual(h.minted[0].permissions, { contents: "read" }, "reviewing only reads the branch");
+  assert.equal(h.minted[1].permissions.contents, "write", "only the approved push may write");
 });

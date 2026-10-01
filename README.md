@@ -17,6 +17,15 @@ The [ecosystem integration assessment](docs/roadmaps/ecosystem-integration.md)
 maps PSM, Todo and Werewolf's current boundaries and the path to repeatable app
 rollouts. The first deployment target is Todo staging at `todo.werewolf.solutions`;
 see [current readiness](docs/deploy/TODO-STAGING.md).
+Todo staging completed its first successful managed release on **2026-09-29**:
+PSM recorded run `run_a7ef155bd9f04884` as succeeded, with all four release probes
+passing for version **0.6.0**. This proves the local-agent/GitHub/host release path;
+the full hosted acceptance and live rollback rehearsal remain open.
+For another project, start with [managed deployment setup](docs/deploy/PROJECT-SETUP.md).
+Managed deployment runs appear above readiness details after confirmation;
+**Copy full run log** copies saved events and step results for diagnosis.
+An uncertain nginx reload can be closed by an authenticated operator so a
+fresh reviewed plan can repeat it; other uncertain side effects stay held.
 
 For an operator-run, dry-run-first repair of Todo's staging root permission and a
 staging-only controller scaffold, use [the setup runbook](docs/deploy/TODO-STAGING-SETUP.md).
@@ -234,6 +243,27 @@ agents have actually used.
 
 Click **▶** on a card to open its cockpit:
 
+On **Deploy**, a fresh exact plan appears above the readiness and connection
+details. **Review plan** jumps to it; **Confirm & deploy** inside that plan is
+the action that approves its digest. **Check again** refreshes readiness and
+brings the new plan into view. HTTP response times remain available as evidence,
+but changes in latency alone cannot invalidate an approved plan.
+
+Chats (including planner/reviewer and preparation attempts), Run/Deploy command
+output, and deployment events show their recorded local date and time with seconds.
+Hover a timestamp for its timezone. Preparation and deployment panels also show
+when work started or last changed, and when readiness was checked. Reopening history
+preserves the original event times; older entries without a timestamp say so.
+
+Failed artifact preparations offer **Open GitHub run** (when GitHub supplied a run
+ID) and **Retry preparation** on the Deploy page. Dispatch and artifact-import
+failures show their recorded cause and pause for correction, without spending AI
+attempts editing application source. Retry starts a fresh preparation check;
+infrastructure changes retain their existing approval requirements.
+Artifact import supports both canonical snake_case results and the complete
+legacy camelCase format emitted by published Todo workflows, with the same
+strict identity and provenance checks (mixed formats are rejected).
+
 - **Plan** — structured implementation plans render as editable phase cards and nested
   steps beside a dedicated planning room. A read-only planner and a second-model reviewer
   iterate for up to three revision-bound rounds; reorder or edit the result, then
@@ -297,9 +327,11 @@ Click **▶** on a card to open its cockpit:
   Hard provider limits also pause sending in the AI pane.
 - **Capabilities** — attach reusable workspace pieces (MCP servers, skills, docs, and
   API surfaces) to a project with a preview of the files psm will write.
-- **Deploy** — per-project **Staging** and **Production** commands with a two-click
-  production confirm and a "Guide me with AI" hand-off. These are explicitly unmanaged
-  shell commands, and they remain the only way to actually deploy something today.
+- **Deploy** — projects without a deployment manifest now get **Set up managed
+  deployment**. PSM detects the repository and application, offers setup for supported
+  static Vite projects, and explains blockers for other stacks. The generated files
+  stay local until reviewed and published. Existing Staging/Production commands remain
+  available as explicitly **unmanaged** commands with a "Guide me with AI" hand-off.
 
   Alongside them, the **managed** desired-state engine specified in
   [`docs/deploy/DEPLOYMENT-SYSTEM.md`](docs/deploy/DEPLOYMENT-SYSTEM.md) is built and wired in.
@@ -317,13 +349,18 @@ Click **▶** on a card to open its cockpit:
   preparation stops before another prompt or build. Supply the missing evidence
   or access and resume explicitly; existing build and typecheck gates stay in place.
 
-  **No executor has run against a real target yet.** The repository, droplet helper install
-  and monitor those adapters talk to do not exist, so a managed plan stops at the point it
-  would call a provider and says which connection is missing; filling those slots in is
-  [`CONNECTIONS.md`](docs/deploy/CONNECTIONS.md). Deploying anything today still
-  means the unmanaged commands above or
-  [`PUBLISHING-A-NEW-APP.md`](docs/deploy/PUBLISHING-A-NEW-APP.md). See
-  ["What is not proven yet"](docs/deploy/DEPLOYMENT-SYSTEM.md#0-what-is-built-today).
+  **The supported recipe is still static-only.** Todo staging has completed build,
+  infrastructure reconciliation, activation and release verification on the real target.
+  P07a's GitHub App connection and reviewed controller setup are implemented and
+  locally tested. GitHub Create/Install and Todo's App binding have succeeded;
+  live controller migration and a second verified Todo release remain to be
+  exercised. [P07a status](docs/roadmaps/github-button-setup.md).
+  A project such as handymanservices also needs its Express server: PSM detects this,
+  blocks the static generator and offers **Plan deployment support with AI**. That
+  button drafts a planning prompt; it does not add a Node-server executor or deploy.
+  See [project setup and limits](docs/deploy/PROJECT-SETUP.md),
+  [connections](docs/deploy/CONNECTIONS.md) and
+  [remaining acceptance](docs/deploy/DEPLOYMENT-SYSTEM.md#what-is-not-proven-yet).
 
 ## CLI
 
@@ -450,6 +487,20 @@ todo-app and werewolf-dapp bake that field into the UI at build time (Vite's
 serves it, and the dashboard footer renders it — same guarantee, different plumbing: the
 number in the footer *is* the field, so the two cannot drift. `src/version.test.ts` pins
 that. Every shipped change bumps something; docs-only changes need not.
+
+PSM's managed `git_commit` now assigns the version for code commits: if the root
+version still equals HEAD, it increments Z and synchronizes the root npm lockfiles.
+An explicitly staged newer version is preserved; Markdown/reStructuredText-only
+commits keep their version. This requires `repo.edit` as well as `git.commit`.
+PSM refuses to absorb unstaged or untracked version-file changes into that commit.
+
+Deployment readiness detects uncommitted application files, not just manifest or
+package edits. Builds are selected by the current commit, source repository and
+environment build inputs. A new commit clears the previous artifact selection
+and cached readiness; finishing preparation refreshes the artifact list in the
+open page. External commits that omit a version bump are caught before building,
+and Make ready can create a managed version commit. Publishing still uses the
+reviewed source-publication flow; existing artifacts are never relabelled.
 
 ## Config — `psm.config.json`
 

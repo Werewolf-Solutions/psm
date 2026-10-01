@@ -235,7 +235,18 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
     // the recommended explicit resource edges.
     addDependencies(nodes, directoryReadyId, [dnsReadyId]);
     addDependencies(nodes, actionId(ingressRef, "http-ready"), [dnsReadyId, directoryReadyId]);
-    addDependencies(nodes, actionId(`resource:${certificate.id}`, "certificate-ready"), [dnsReadyId, actionId(ingressRef, "http-ready")]);
+    // Certbot's webroot challenge must be served by the active nginx process,
+    // not merely written to sites-available on disk.
+    const httpReloadId = actionId(ingressRef, "http-reloaded");
+    addNode(nodes, {
+      id: httpReloadId,
+      kind: "reload-nginx@1",
+      phase: "reconcile",
+      ownerRef: ingressRef,
+      dependsOn: [actionId(ingressRef, "http-ready")],
+      connection: ingress.connection,
+    });
+    addDependencies(nodes, actionId(`resource:${certificate.id}`, "certificate-ready"), [dnsReadyId, httpReloadId]);
     const tlsReadyId = actionId(ingressRef, "tls-ready");
     addNode(nodes, {
       id: tlsReadyId,

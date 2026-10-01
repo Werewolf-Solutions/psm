@@ -378,3 +378,42 @@ test("a standing rule applies the plan without pausing, and no rule still waits 
   none.infrastructure(); none.start(); await none.advance();
   assert.equal(none.current().state, "awaiting-approval");
 });
+
+test("artifact import failures show the cause without spending a source repair attempt", async (t) => {
+  for (const failureStage of ["import", "dispatch", undefined]) {
+    const h = harness(); t.after(h.close);
+    h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+    Object.assign(h.runs[0], {
+      terminal: true, state: "failed", events: [{ type: "prepare-failed", level: "error",
+        message: "Prepare receipt does not match its dispatch", data: { failureStage } }],
+    });
+    await h.advance();
+    assert.equal(h.current().state, "blocked");
+    assert.equal(h.current().blockedBy, "artifact");
+    assert.equal(h.current().failure, "Prepare receipt does not match its dispatch");
+    assert.match(h.current().message, failureStage === "dispatch" ? /could not dispatch/ : /GitHub build succeeded/);
+    await h.advance();
+    assert.deepEqual(h.counts(), { repairs: 0, builds: 1, stops: 0 });
+    assert.equal(h.current().runId, "build-1", "failed run stays available for inspection");
+    h.start(); await h.advance();
+    assert.equal(h.current().phase, "build");
+    assert.deepEqual(h.counts(), { repairs: 0, builds: 2, stops: 0 }, "manual retry starts one new build");
+  }
+});
+
+test("workflow failure details reach the source repair room", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["prepare-artifact"]); h.start(); await h.advance();
+  Object.assign(h.runs[0], { terminal: true, state: "failed", events: [{
+    type: "prepare-failed", level: "error", message: "artifact workflow concluded failure", data: { failureStage: "workflow" },
+  }] });
+  let observedFailure: string | null = null;
+  const original = h.controller.options.repairs.start;
+  h.controller.options.repairs.start = async (job, checked, purpose) => {
+    observedFailure = job.failure;
+    return original(job, checked, purpose);
+  };
+  await h.advance();
+  assert.equal(h.current().phase, "repair");
+  assert.equal(observedFailure, "artifact workflow concluded failure");
+});

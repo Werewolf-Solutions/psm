@@ -1,8 +1,10 @@
 # Publishing a new app to `*.werewolf.solutions`
 
-> **Current/manual runbook.** This describes the operations available today. The target
-> PSM-managed model—reconciliation, exact-plan approval, immutable releases, rollback and
-> external monitoring—is specified in [`DEPLOYMENT-SYSTEM.md`](DEPLOYMENT-SYSTEM.md).
+> **Manual reference.** For a supported static project, start with PSM's
+> [managed setup flow](PROJECT-SETUP.md). The managed engine has completed a Todo
+> staging release; [its technical specification](DEPLOYMENT-SYSTEM.md) separates
+> that evidence from remaining acceptance. This runbook preserves the manual
+> static-app path and is not a recipe for a project with its own API server.
 
 The steps to put a new app on its own subdomain, in the order they have to happen,
 with each one marked by how much of it is already automated. Written from todo-app's
@@ -48,13 +50,12 @@ and 5 apply.
 
 ### Choosing the subdomain
 
-Production gets a name people will type: `todo.werewolf.solutions`. Every other
-environment gets random characters — `a6s1j3p3zh.werewolf.solutions` — because every
-project's staging site shares one droplet, one DNS zone and one nginx with all the
-others, and predictable names are how two of them end up fighting over
-`staging.werewolf.solutions` or `<app>-staging`. Random labels cannot collide by
-accident, and a staging site nobody can guess the address of is not one search engines
-or strangers find.
+Choose and verify a hostname for each environment before deployment. Todo's
+explicit choice is now `todo.werewolf.solutions` for **staging**; the former
+`a6s1j3p3zh.werewolf.solutions` name is superseded. The setup UI suggests a readable
+project hostname, but does not establish ownership or availability. A random
+label is an optional way to reduce accidental collisions, not an access control
+or a guarantee against indexing or discovery.
 
 ```bash
 node -e 'const{randomInt}=require("node:crypto");const l="abcdefghjkmnpqrstvwxyz";const a=l+"0123456789";let s=l[randomInt(l.length)];while(s.length<10)s+=a[randomInt(a.length)];console.log(s)'

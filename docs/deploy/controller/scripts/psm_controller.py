@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -269,6 +270,41 @@ def api_get(path: str, token: str, accept: str = "application/vnd.github+json") 
         fail(f"GitHub returned HTTP {error.code} for {path}")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        return None
+
+
+def download_artifact_zip(path: str, token: str) -> bytes:
+    """GitHub answers the artifact download with a 302 to signed storage (and 415 to
+    Accept: application/zip). Follow it by hand so the token never leaves GitHub."""
+    request = urllib.request.Request(
+        f"{API}{path}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "psm-release-controller",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        urllib.request.build_opener(_NoRedirect).open(request, timeout=60)
+        fail(f"GitHub did not redirect the download for {path}")
+    except urllib.error.HTTPError as error:
+        if error.code != 302:
+            fail(f"GitHub returned HTTP {error.code} for {path}")
+        location = error.headers.get("location", "")
+    signed = urllib.parse.urlsplit(location)
+    if signed.scheme != "https" or not signed.hostname or signed.username or signed.password:
+        fail("GitHub returned an unsafe artifact download location")
+    storage = urllib.request.Request(location, headers={"User-Agent": "psm-release-controller"})
+    try:
+        with urllib.request.urlopen(storage, timeout=120) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        fail(f"artifact storage returned HTTP {error.code}")
+
+
 def command_fetch() -> None:
     """Download exactly the approved artifact, from exactly the approved run, and prove
     it is byte-for-byte what was approved before anything touches the target."""
@@ -289,7 +325,7 @@ def command_fetch() -> None:
     if run.get("head_sha") != env("commit_sha"):
         fail("the approved artifact was not produced from the approved commit")
 
-    body, _ = api_get(f"/repos/{repository}/actions/artifacts/{artifact_id}/zip", token, "application/zip")
+    body = download_artifact_zip(f"/repos/{repository}/actions/artifacts/{artifact_id}/zip", token)
     bundle = work / "artifact.zip"
     bundle.write_bytes(body)
     with zipfile.ZipFile(bundle) as archive:
@@ -373,6 +409,29 @@ def helper_request(work: Path, header: dict, archive: Path, host: str, user: str
     return response
 
 
+def release_response(response: dict, contract: dict) -> tuple[str, list, str | None, str]:
+    """Interpret the helper's wire result without confusing outcome with code.
+
+    A successful helper response is outcome=succeeded, code=ok. Its data is
+    authoritative only when the staged target matches the approved contract.
+    """
+    detail = str(response.get("detail", ""))[:200]
+    if response.get("outcome") != "succeeded" or response.get("code") != "ok":
+        return "failed", [], None, detail
+    data = response.get("data")
+    if not isinstance(data, dict):
+        fail("the target helper returned no release result")
+    staged = data.get("staged") or {}
+    if not isinstance(staged, dict) or staged.get("targetDigest") != contract["target"]["fingerprint"]:
+        fail("the target attested a different contract than the one approved")
+    return (
+        data.get("state", "failed"),
+        data.get("verification") or [],
+        (data.get("activated") or {}).get("activatedAt") or response.get("observedAt"),
+        detail,
+    )
+
+
 def command_release() -> None:
     contract = load_contract()
     document = target_file(env("target_id"))
@@ -391,7 +450,7 @@ def command_release() -> None:
             "payloadDigest": contract["intendedRelease"]["payloadDigest"],
             "archiveDigest": artifact["archiveDigest"],
             "maximumFiles": limits.get("maxFiles"),
-            "maximumBytes": limits.get("maxBytes"),
+            "maximumBytes": limits.get("maxUnpackedBytes"),
         },
         "activate": {
             "releaseId": contract["intendedRelease"]["releaseId"],
@@ -421,16 +480,7 @@ def command_release() -> None:
         response = helper_request(
             work, header, payload, document["sshHost"], document["sshUser"], document["sshPort"],
         )
-        detail = str(response.get("detail", ""))[:200]
-        data = response.get("data") or {}
-        if response.get("outcome") == "ok" and isinstance(data, dict):
-            state = data.get("state", "failed")
-            verification = data.get("verification") or []
-            staged = data.get("staged") or {}
-            # The host attests its own target identity. It must be the one PSM approved.
-            if staged.get("targetDigest") != contract["target"]["fingerprint"]:
-                fail("the target attested a different contract than the one approved")
-            activated_at = (data.get("activated") or {}).get("activatedAt") or response.get("observedAt")
+        state, verification, activated_at, detail = release_response(response, contract)
     except ContractError as error:
         detail = str(error)
     finally:

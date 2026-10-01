@@ -1,5 +1,6 @@
 import type { SourcePublicationController } from "./source-publication.ts";
 import { randomUUID } from "node:crypto";
+import { deploymentGitHubToken } from "./github-app.ts";
 
 import { canonicalDigest } from "./canonical.ts";
 import { GitHubActionsAdapter, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
@@ -65,11 +66,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
   #adapter(profile: ConnectionProfile): GitHubActionsAdapter {
     return new GitHubActionsAdapter({
       metadata: metadata(profile),
-      token: () => this.#broker.withLease(
-        profile.connectionId,
-        ["apiToken"],
-        (lease) => lease.useUtf8("apiToken", (token) => token),
-      ),
+      token: (request) => deploymentGitHubToken(this.#broker, profile, request),
     });
   }
 
@@ -102,6 +99,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
 
   async #execute(runId: string, profile: ConnectionProfile, dispatch: PrepareArtifactDispatch): Promise<void> {
     let receipt: GitHubDispatchReceipt | null = null;
+    let failureStage: "dispatch" | "workflow" | "import" = "dispatch";
     try {
       const adapter = this.#adapter(profile);
       this.#move(runId, "dispatching", "dispatching");
@@ -113,6 +111,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
         psmArtifactId: dispatch.psmArtifactId,
       });
       receipt = await adapter.dispatchPrepare(dispatch);
+      failureStage = "workflow";
       this.#event(runId, "prepare-dispatched", "waiting-executor", "Artifact workflow accepted", { receipt: json(receipt) });
       this.#move(runId, "waiting-executor", "waiting-executor");
       let completed = false;
@@ -134,6 +133,8 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
         await new Promise((resolve) => setTimeout(resolve, this.#pollMs));
       }
       if (!completed) throw new Error("artifact workflow exceeded the observation limit");
+      failureStage = "import";
+      this.#event(runId, "prepare-workflow-succeeded", "importing-artifact", "GitHub build succeeded. Verifying the prepared artifact…", { receipt: json(receipt) });
       this.#move(runId, "importing-artifact", "importing-artifact");
       const resultValue = await adapter.downloadRunArtifactJson(
         receipt,
@@ -176,7 +177,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
         "prepare-failed",
         "complete",
         error instanceof Error ? error.message.slice(0, 1_000) : "Artifact preparation failed",
-        { receipt: receipt ? json(receipt) : null },
+        { receipt: receipt ? json(receipt) : null, failureStage },
         "error",
       );
       throw error;

@@ -73,6 +73,16 @@ async function fixture(t: test.TestContext) {
   return { database, deployments, broker, server, store, service, machine, project, advance: (ms: number) => { now += ms; } };
 }
 
+test("a machine whose helper was built from other sources offers an update", async (t) => {
+  const { store, deployments, broker, server, machine } = await fixture(t);
+  const view = (digest: string) => new MachineService({ store, deployments, broker, transport: server, now: () => 1_000_000, helperSourceDigest: () => digest }).getMachine(machine.id, "personal");
+  assert.equal(view("a".repeat(64)).helperOutdated, false, "no helper installed is not an outdated helper");
+  const current = store.getMachine(machine.id);
+  store.updateMachine(machine.id, current.revision, (value) => ({ ...value, helper: { sha256: "b".repeat(64), arch: "x86_64", sourceDigest: "a".repeat(64), verifiedAt: 1 } }));
+  assert.equal(view("a".repeat(64)).helperOutdated, false);
+  assert.equal(view("c".repeat(64)).helperOutdated, true);
+});
+
 test("a scanned key must be confirmed before PSM connects, and a wrong confirmation is refused", async (t) => {
   const { service } = await fixture(t);
   const unverified = service.register({ workspaceId: "personal", name: "beta", host: "203.0.113.4", port: 2222, knownHost: `[203.0.113.4]:2222 ssh-ed25519 ${HOST_BLOB}` });

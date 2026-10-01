@@ -14,6 +14,9 @@ import {
 import { DeploymentManifestValidationError } from "./manifest.ts";
 import type { EnvironmentManifest, UnitManifest } from "./types.ts";
 import { ManagedDeploymentError, DeploymentService } from "./service.ts";
+import { DeploymentSetupError, detectDeploymentSetup, writeStaticDeploymentSetup } from "./setup.ts";
+import { GitHubSetup } from "./github-setup.ts";
+import { GitHubControllerSetup } from "./github-controller-setup.ts";
 import {
   DeploymentConflictError,
   DeploymentNotFoundError,
@@ -22,6 +25,7 @@ import {
   DeploymentValidationError,
   type DeploymentConnection,
   type DeploymentOperation,
+  type DeploymentRun,
   type JsonValue,
 } from "./store.ts";
 import { authorizeDeploymentAction, composeDeploymentPolicy, type DeploymentPolicyLayer, type EffectiveDeploymentPolicy } from "./policy.ts";
@@ -30,6 +34,9 @@ import { preparationActive, preparationView, type DeploymentPreparationControlle
 export interface DeploymentRunController {
   enqueue(runId: string): void | Promise<void>;
   cancel(runId: string): unknown | Promise<unknown>;
+  closeUncertainReload?(runId: string): unknown | Promise<unknown>;
+  closeFailedReadOnlyObservation?(runId: string): unknown | Promise<unknown>;
+  recover?(runId: string): void | Promise<void>;
 }
 
 export interface ArtifactPreparationController {
@@ -49,6 +56,8 @@ export interface DeploymentApiOptions {
   publisher?: SourcePublicationController;
   /** Publishes the CI release key and host key to the pinned controller's GitHub Environment. */
   controllerCredentials?: (unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest; projectId: string }) => Promise<Record<string, unknown>>;
+  controllerPin?: (unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest }, reviewedHeadSha: string) => Promise<Record<string, unknown>>;
+  targetContractPin?: (unit: UnitManifest, context: { checkoutId: string; environment: EnvironmentManifest }, reviewedDigest: string) => Promise<Record<string, unknown>>;
   intents?: ApprovalIntentRegistry;
   streamTickets?: DeploymentStreamTicketRegistry;
   /** Rotates when the long-lived pairing token rotates, invalidating outstanding stream tickets. */
@@ -146,6 +155,46 @@ function requireLocal(options: DeploymentApiOptions, req: Request, res: Response
 export function createDeploymentRouter(options: DeploymentApiOptions): express.Router {
   const router = express.Router();
   const { service } = options;
+  const githubSetup = new GitHubSetup(service);
+  const githubControllerSetup = new GitHubControllerSetup(service);
+  router.post("/api/projects/:id/deployments/:environment/github/controller/preview", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Review controller setup from the local cockpit" });
+    try { res.json(await githubControllerSetup.preview(req.params.id, req.params.environment)); } catch (error) { apiError(res, error); }
+  });
+  router.post("/api/projects/:id/deployments/:environment/github/controller/apply", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Apply controller setup from the local cockpit" });
+    try { res.json(await githubControllerSetup.apply(String(req.body?.id ?? ""), req.params.id, req.params.environment)); } catch (error) { apiError(res, error); }
+  });
+  router.post("/api/projects/:id/deployments/:environment/github/connect", (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Connect GitHub from the local cockpit" });
+    try {
+      const result = githubSetup.start(req.params.id, req.params.environment, req.body, String(req.headers.origin));
+      res.cookie(`psm_github_${result.state}`, result.browserNonce, { httpOnly: true, sameSite: "lax", secure: req.secure, maxAge: 600_000, path: "/api/deployment-github/callback" });
+      const { browserNonce: _nonce, ...publicResult } = result;
+      res.json(publicResult);
+    } catch (error) { apiError(res, error); }
+  });
+  router.get("/api/deployment-github/callback", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    if (!requireLocal(options, req, res)) return;
+    try {
+      const state = String(req.query.state ?? "");
+      if (!/^[a-f0-9]{64}$/.test(state)) throw new Error("Invalid GitHub setup state");
+      const cookie = (req.headers.cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`psm_github_${state}=`));
+      const result = await githubSetup.convert(state, String(req.query.code ?? ""), cookie?.split("=")[1] || "");
+      res.clearCookie(`psm_github_${state}`, { path: "/api/deployment-github/callback" });
+      res.redirect(303, result.installUrl);
+    } catch { res.status(400).type("text").send("GitHub connection could not be completed. Return to the local PSM Deploy page and start Connect GitHub again."); }
+  });
+  router.post("/api/connections/:connectionId/github/install", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Check GitHub installation from the local cockpit" });
+    try { res.json(await githubSetup.finish(req.params.connectionId)); } catch (error) { apiError(res, error); }
+  });
   const intents = options.intents ?? new ApprovalIntentRegistry();
   const streamTickets = options.streamTickets ?? new DeploymentStreamTicketRegistry();
   const preparationRequests = new Map<string, Promise<Record<string, unknown>>>();
@@ -159,6 +208,24 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     if (checkout) checked.readiness.items.unshift({ id: "review-checkout", code: "checkout-not-ready", title: "Prepare the Git checkout", detail: checkout, status: "blocked", action: "review-source", automatic: false });
     return checked;
   };
+
+  // First-time setup for a project with no manifest: what PSM detects, then the drafted files.
+  router.get("/api/projects/:id/deployment-setup", (req, res) => {
+    try { res.json({ setup: detectDeploymentSetup(service.resolveProject(req.params.id)) }); } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/projects/:id/deployment-setup", (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      const project = service.resolveProject(req.params.id);
+      const environment = req.body?.environment === "production" ? "production" : "staging";
+      const written = writeStaticDeploymentSetup(project, { hostname: String(req.body?.hostname || ""), zone: String(req.body?.zone || ""), environment });
+      res.status(201).json({ ok: true, ...written });
+    } catch (error) {
+      if (error instanceof DeploymentSetupError) return apiError(res, new ManagedDeploymentError(error.message, error.code, error.code === "setup-exists" ? 409 : 400));
+      apiError(res, error);
+    }
+  });
 
   router.get("/api/projects/:id/deployments", async (req, res) => {
     try { res.json(await service.overview(req.params.id)); } catch (error) { apiError(res, error); }
@@ -405,6 +472,34 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     }
   });
 
+  router.post("/api/projects/:id/deployments/:environment/controller-pin", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      if (!options.controllerPin) throw new ManagedDeploymentError("re-pinning the release controller is not available", "not-available", 501);
+      const reviewed = String(req.body?.headSha || "");
+      if (!/^[0-9a-f]{40}$/.test(reviewed)) throw new ManagedDeploymentError("name the reviewed controller commit", "controller-pin-invalid", 400);
+      const { unit, environment, checkoutId } = service.releaseControllerUnit(req.params.id, req.params.environment);
+      res.json({ ok: true, pinned: await options.controllerPin(unit, { checkoutId, environment }, reviewed) });
+    } catch (error) {
+      if (error instanceof ManagedDeploymentError) return apiError(res, error);
+      apiError(res, new ManagedDeploymentError(error instanceof Error ? error.message : String(error), "controller-pin-failed", 409));
+    }
+  });
+
+  router.post("/api/projects/:id/deployments/:environment/target-contract-pin", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      if (!options.targetContractPin) throw new ManagedDeploymentError("re-pinning the target contract is not available", "not-available", 501);
+      const reviewed = String(req.body?.digest || "");
+      if (!/^sha256:[0-9a-f]{64}$/.test(reviewed)) throw new ManagedDeploymentError("name the reviewed target contract digest", "target-pin-invalid", 400);
+      const { unit, environment, checkoutId } = service.releaseControllerUnit(req.params.id, req.params.environment);
+      res.json({ ok: true, pinned: await options.targetContractPin(unit, { checkoutId, environment }, reviewed) });
+    } catch (error) {
+      if (error instanceof ManagedDeploymentError) return apiError(res, error);
+      apiError(res, new ManagedDeploymentError(error instanceof Error ? error.message : String(error), "target-pin-failed", 409));
+    }
+  });
+
   router.put("/api/projects/:id/deployments/:environment/connection-bindings/:slot", async (req, res) => {
     if (!requireLocal(options, req, res)) return;
     try {
@@ -438,6 +533,19 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     try { res.json({ run: service.runView(req.params.runId) }); } catch (error) { apiError(res, error); }
   });
 
+  // Resolving a held run takes the same authority as approving its plan: the
+  // plan's approval policy decides, and production stays on the local cockpit.
+  async function heldRunRefusal(req: Request, run: DeploymentRun): Promise<string | null> {
+    if (!run.planId) return "this run has no reviewed plan";
+    const plan = service.store.getPlan(run.planId, run.planRevision!);
+    const user = await options.currentUser();
+    const origin = options.localRequest(req) ? "local" as const : "paired" as const;
+    const decision = authorizeDeploymentAction(effectivePolicy(plan.document), { action: "approve", origin, authenticated: !!user });
+    if (!decision.allowed) return `resolving held work needs the authority that approves this plan: ${decision.reasons.join("; ")}`;
+    if (plan.risk === "production" && !exactLocalCockpitOrigin(req)) return "resolving held production work requires the exact local cockpit origin";
+    return null;
+  }
+
   router.post("/api/deployment-runs/:runId/cancel", async (req, res) => {
     try {
       const run = service.store.getRun(req.params.runId);
@@ -450,6 +558,40 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       }
       if (options.runner) await options.runner.cancel(run.runId);
       else service.store.requestCancellation(run.runId, Date.now());
+      res.status(202).json({ ok: true, run: service.runView(run.runId) });
+    } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/deployment-runs/:runId/close-uncertain-reload", async (req, res) => {
+    try {
+      const run = service.store.getRun(req.params.runId);
+      const refusal = await heldRunRefusal(req, run);
+      if (refusal) return res.status(403).json({ error: refusal, code: "approval-required" });
+      if (!options.runner?.closeUncertainReload) return res.status(503).json({ error: "deployment recovery is unavailable" });
+      await options.runner.closeUncertainReload(run.runId);
+      res.json({ run: service.runView(run.runId) });
+    } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/deployment-runs/:runId/close-failed-read-only-observation", async (req, res) => {
+    try {
+      const run = service.store.getRun(req.params.runId);
+      const refusal = await heldRunRefusal(req, run);
+      if (refusal) return res.status(403).json({ error: refusal, code: "approval-required" });
+      if (!options.runner?.closeFailedReadOnlyObservation) return res.status(503).json({ error: "deployment recovery is unavailable" });
+      await options.runner.closeFailedReadOnlyObservation(run.runId);
+      res.json({ run: service.runView(run.runId) });
+    } catch (error) { apiError(res, error); }
+  });
+
+  router.post("/api/deployment-runs/:runId/recover", async (req, res) => {
+    try {
+      const run = service.store.getRun(req.params.runId);
+      const refusal = await heldRunRefusal(req, run);
+      if (refusal) return res.status(403).json({ error: refusal, code: "approval-required" });
+      if (run.state !== "recovery-required") return res.status(409).json({ error: "only a run waiting for recovery can be checked again", code: "not-recoverable" });
+      if (!options.runner?.recover) return res.status(503).json({ error: "deployment recovery is unavailable" });
+      await options.runner.recover(run.runId);
       res.status(202).json({ ok: true, run: service.runView(run.runId) });
     } catch (error) { apiError(res, error); }
   });

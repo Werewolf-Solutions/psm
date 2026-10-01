@@ -22,7 +22,7 @@ export const AGENT_PERMISSIONS = [
   { id: "repo.read", category: "repository", title: "Read repository", description: "Read and search ordinary project files and inspect Git changes.", supported: true },
   { id: "repo.edit", category: "repository", title: "Edit repository", description: "Create and update ordinary project files. Permission config, credentials and Git internals are protected.", supported: true },
   { id: "repo.delete", category: "repository", title: "Delete repository files", description: "Delete ordinary files and empty directories inside the project checkout.", supported: true },
-  { id: "git.commit", category: "git-local", title: "Stage and commit", description: "Stage named files and commit those changes locally. Hooks and signing are disabled; existing staged work is preserved.", supported: true },
+  { id: "git.commit", category: "git-local", title: "Stage and commit", description: "Stage named files and commit locally. With repo.edit, code commits automatically increment root X.Y.Z and sync root lockfiles unless a newer version is staged. Docs-only commits keep their version. Hooks and signing are disabled; unrelated staged work is preserved.", supported: true },
   { id: "git.branch", category: "git-local", title: "Manage branches", description: "Create and delete local branches using validated branch names.", supported: true },
   { id: "git.switch", category: "git-local", title: "Switch branches", description: "Switch the checkout to an existing local branch.", supported: true },
   { id: "git.merge", category: "git-local", title: "Merge branches", description: "Merge a validated local or remote-tracking ref into the current branch with hooks disabled.", supported: true },

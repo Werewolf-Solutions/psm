@@ -24,6 +24,7 @@ function renderer() {
     el: (tag: string, cls: string) => new Element(tag, cls),
     renderAiText: (node: Element, text: string) => { node.textContent = text; return false; },
   });
+  vm.runInContext(source.slice(source.indexOf("const EVENT_TIME_FORMAT ="), source.indexOf("function compactText(")), context);
   vm.runInContext(source.slice(source.indexOf("function preparationEntryLabel("), source.indexOf("function appendAiEvent(")), context);
   return (event: unknown): Element => context.renderAiBubble(event);
 }

@@ -1,5 +1,12 @@
 # Workspace integration: implementation status
 
+> **Historical evidence as of 2026-09-21.** The findings and delivery states below
+> describe that review, not the current deployment. Todo has since completed a
+> successful managed 0.6.0 release on 2026-09-29. Use the
+> [delivery index](README.md) and [Todo staging status](../deploy/TODO-STAGING.md)
+> for current progress. The successful static release alone does not reverify
+> the cross-workspace/browser regressions recorded here.
+
 Last verified: **2026-09-21**, by Claude Code (Opus 5), working
 [workspace-focused-followup.md](workspace-focused-followup.md).
 

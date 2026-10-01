@@ -71,6 +71,7 @@
         head.append(node("h4", `${machine.name} · ${machine.host}${machine.port === 22 ? "" : `:${machine.port}`}`), node("span", machine.trusted ? "Identity confirmed" : "Identity not confirmed", "cap-badge"));
         card.append(head);
         card.append(node("p", `Host key ${machine.hostKeyFingerprint}${machine.helper ? ` · helper ${machine.helper.sha256.slice(0, 12)}…` : " · no deployment helper"}${machine.adminConnectionId ? " · PSM has administrator access" : ""}`, "hint"));
+        if (machine.helperOutdated) card.append(helperUpdate(machine, view));
         for (const access of machine.access) {
           const row = node("div", "", "machine-access-row");
           const who = access.machineLevel ? (access.role === "admin" ? "PSM administrator" : "Host helper") : `${access.projectName} · ${access.environmentId}`;
@@ -176,9 +177,23 @@
 
   /* ---------- 2. Choose access ---------- */
 
+  // A helper built from older sources is replaced through the same reviewed install.
+  function helperUpdate(machine, view) {
+    const box = node("div", "", "machine-access-row");
+    box.append(node("span", "The deployment helper on this server is older than this PSM's. Update it before deploying."));
+    box.append(button("Update helper", async () => {
+      try {
+        const { access } = await post(`/api/machines/${encodeURIComponent(machine.id)}/helper`);
+        showReview(machine.id, [{ access, method: machine.adminConnectionId ? "admin-ssh" : "manual-command" }]);
+      } catch (error) { view.error(error.message); }
+    }, "btn btn-primary"));
+    return box;
+  }
+
   async function showAccess(machineId) {
     const view = frame("Choose access", 1);
     const machine = (await call(ws(`/api/machines/${encodeURIComponent(machineId)}`))).machine;
+    if (machine.helperOutdated) view.body.append(helperUpdate(machine, view));
     const projectSelect = document.createElement("select");
     for (const project of ctx.projects().filter((entry) => entry.id)) {
       const option = document.createElement("option");

@@ -68,6 +68,31 @@ You have the full context of the project you're launched in — read before you 
 - Leave the codebase a little better than you found it, without scope-creeping the task.
 
 
+## Screens people act on — what to do comes first
+
+Any page where the person may have to do something opens with **what they have to do,
+pinned at the top**. Details, logs, history and settings come below it. Nobody should
+have to read a page top to bottom to find out what is being asked of them.
+
+- **A pinned to-do list.** One item per action, in the order the actions must happen.
+  Each item is one imperative sentence that names the button or text, using the same
+  words that are on it ("Press “Recheck release outcome”"), plus one line on why.
+- **Every item links to the exact place.** A "Take me there" (or "Show me" for
+  something to read) scrolls to the button to press or the sentence to read, and
+  highlights *that element*, not the section around it.
+- **Work the app cannot do itself links straight to where it is done.** When the
+  person has to act on another site (GitHub, a DNS provider, a cloud console), the
+  item carries the direct link to the exact page (the App's installation settings, the
+  repository's Environments page), opening in a new tab. Never just "go to GitHub
+  and find it".
+- **If the app knows, the list shows it.** A blocker that appears only in a log, a
+  tooltip, an API response or a section further down has not been shown. When the
+  server reports something the person must fix, it becomes a to-do item.
+- **Say when there is nothing to do.** An empty list reads "Nothing needs you right
+  now" (or what is running), not a blank space.
+- **Keep it current.** The list is rebuilt from the same state as the rest of the page,
+  so it never points at a step that is already done.
+
 ## Deployment
 - Treat production deploys with extra care; confirm before anything irreversible.
 

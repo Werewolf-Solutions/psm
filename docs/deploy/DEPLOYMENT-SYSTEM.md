@@ -1,7 +1,8 @@
 # PSM deployment system — technical specification
 
-Status: implemented, unproven. The engine described here is built and tested; no executor has
-yet run against a real target. Section 0 says exactly where that line falls.
+Status as of 2026-09-29: the static recipe is implemented and Todo staging has a
+successful managed release with all four release probes passing. Full hosted
+acceptance, a live rollback rehearsal and additional recipes remain open.
 
 This specification defines the managed deployment system that will replace PSM's current
 pair of deploy-command fields. The existing command runner remains available during migration
@@ -42,34 +43,25 @@ The helper itself lives in [`../../host-helper/`](../../host-helper).
 
 ### What is not proven yet
 
-Every executor exists in code and is covered by unit tests against a faked provider. **None has
-run against a real target**, because the operational prerequisites in section 21 are still not
-installed:
+Todo staging run `run_a7ef155bd9f04884` completed successfully on 2026-09-29 at
+08:54:11 UTC. Its saved release receipt verifies the home page, SPA fallback,
+sealed API path and release metadata for version 0.6.0. Earlier certificate,
+helper, controller and result-import failures are historical, not current blockers.
 
-| Missing | Blocks |
-|---|---|
-| `Werewolf-Solutions/deployment-control` — the repository does not exist | `stage-static-release@1`, `activate-static-release@1`, artifact preparation |
-| The host helper is not installed on any droplet, and no target contract is enrolled | the eight host action kinds |
-| No Better Stack monitor is bound | `observe-watch@1` |
-| No DigitalOcean connection profile is configured | `reconcile-dns@1` |
-| No connection profile is bound in any slot, so every environment reports `connection-missing` | approval of anything |
-
-PSM and todo-app both carry a manifest: psm declares `production`
-(`psm.werewolf.solutions`), todo-app declares `staging` and `production`
-(`todo-staging` and `todo.werewolf.solutions`). Both parse, expand into a graph and plan;
-both stop at the same wall. todo-app's is still uncommitted, so it additionally plans
-preview-only.
-
-So a managed plan today reaches the point where it would call a provider and stops there,
-reporting the missing connection or contract. That is the intended failure — an unconfigured
-adapter refuses rather than pretends — but it means the end-to-end claim in this section is
-"the engine is complete", not "a deployment has been performed". Section 20's rule still holds:
+This does not prove a retained-release rollback, browser login/workspace acceptance,
+external Watch, fresh-organisation button-only setup, or hosted execution with the
+laptop disconnected. The exact run and remaining acceptance work are tracked in
+[`TODO-STAGING.md`](TODO-STAGING.md). The first-time
+[project setup flow](PROJECT-SETUP.md) is implemented and tested locally; it has
+not yet demonstrated a second project's complete managed deployment. Node servers,
+workers and databases still have no managed recipe.
+Section 20's rule still holds:
 command execution is not called Release, a local timer is not called Watch, direct
 live-directory rsync is not called immutable and a branch check is not called dependency
 verification.
 
-Until a target is adopted, [`PUBLISHING-A-NEW-APP.md`](PUBLISHING-A-NEW-APP.md) and the two
-unmanaged deploy commands remain how anything actually ships.
+Other environments still require their own target acceptance before managed
+deployment can be considered proven there.
 
 ## 1. Outcome
 
@@ -114,11 +106,16 @@ These are compatibility inputs, not foundations for the managed engine. In parti
 - legacy commands do not acquire managed target locks or create managed release records; and
 - the UI never describes a successful legacy command as a verified release.
 
-If `.psm/deployments.json` is absent, the current Deploy pane continues to show the two legacy
-commands. If the manifest is present, the managed surface is primary and legacy commands move
-under an **Unmanaged commands** disclosure with an explicit warning until a target is adopted.
-Once any unit/resource binding marks that target managed, PSM disables the overlapping legacy
-commands. Break-glass use requires a loopback-only action that first disables the managed binding,
+If `.psm/deployments.json` is absent, the Deploy pane shows first-time managed setup
+above the legacy commands. A supported static Vite project can generate a manifest,
+build workflow and prepare script; unsupported projects get explicit blockers and
+an AI planning action. If the manifest is present, the managed surface is shown
+and the legacy panel is hidden. See [the setup guide](PROJECT-SETUP.md).
+
+The intended adoption/break-glass boundary below remains a migration requirement;
+hiding the command panel alone is not enforcement. Once any unit/resource binding
+marks that target managed, PSM should disable overlapping legacy commands.
+Break-glass use requires a loopback-only action that first disables the managed binding,
 invalidates outstanding plans, marks target state unknown and forces full re-observation before
 managed work can resume. PSM cannot stop an operator using an external terminal, so discovery also
 records unexplained target releases as out-of-band drift.
@@ -1030,6 +1027,16 @@ The prepare workflow:
    redacted `psm-artifact-result.json` containing both IDs; and
 10. runs with a read-only GitHub token, no deployment environment and no release secrets.
 
+The canonical `prepare-artifact-result/v1` JSON uses snake_case identity fields
+(`psm_run_id`, `psm_artifact_id`, `commit_sha`, and so on). For compatibility with
+already published Todo workflows, PSM also accepts the complete camelCase v1
+record (`psmRunId`, `psmArtifactId`, `commitSha`, etc.). It requires exactly one
+complete format: missing fields, mixed aliases, and extra fields are rejected.
+The legacy record is normalized before the same schema/value checks and exact
+dispatch, GitHub run, artifact provenance and retention verification. Nested
+payload limits use `maxFiles`, `maxPathBytes`, `maxFileBytes`, and
+`maxUnpackedBytes` in both formats. New producers should emit snake_case.
+
 #### Static payload digest
 
 `psm-static-tree-sha256@1` is byte-defined so the source runner and target helper compute the same
@@ -1202,10 +1209,11 @@ The recipe's expansion orders these operations:
 2. DNS observation and owned create/update;
 3. release-directory layout;
 4. `ingress#http-ready`: an HTTP-only nginx/ACME vhost when a certificate does not exist;
-5. `tls#certificate-ready`: `certbot certonly --webroot` issuance or renewal-state verification;
-6. `ingress#tls-ready`: the final TLS nginx configuration generated from typed fields;
-7. `nginx -t` and graceful reload; and
-8. re-observation of DNS, HTTP redirect, document root and certificate.
+5. validate and reload nginx so the HTTP challenge location is live;
+6. `tls#certificate-ready`: `certbot certonly --webroot` issuance or renewal-state verification;
+7. `ingress#tls-ready`: the final TLS nginx configuration generated from typed fields;
+8. `nginx -t` and graceful reload; and
+9. re-observation of DNS, HTTP redirect, document root and certificate.
 
 `nginx-static-site@1` is the sole owner of the vhost through both ingress substates;
 `letsencrypt-certificate@1` owns certificate material only and never invokes certbot's nginx

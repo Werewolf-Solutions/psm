@@ -74,7 +74,7 @@ const STEP_TRANSITIONS: Readonly<Record<DeploymentStepState, readonly Deployment
   prepared: ["submitted", "failed", "cancelled"],
   submitted: ["observed", "failed", "cancelled", "recovery-required"],
   observed: ["completed", "failed", "recovery-required"],
-  "recovery-required": ["observed", "failed", "cancelled"],
+  "recovery-required": ["recovery-required", "observed", "failed", "cancelled"],
   completed: [],
   failed: [],
   cancelled: [],
@@ -1750,7 +1750,7 @@ export class DeploymentStore {
       ? current.result
       : input.result === null ? null : json(input.result, "step result");
     const submittedAt = input.state === "submitted" ? at : current.submitted_at;
-    const observedAt = input.state === "observed" ? at : current.observed_at;
+    const observedAt = input.state === "observed" || input.state === "recovery-required" ? at : current.observed_at;
     const completedAt = TERMINAL_STEP_STATES.has(input.state) ? at : current.completed_at;
     const changed = this.database
       .prepare(
@@ -2066,6 +2066,22 @@ export class DeploymentStore {
       }
       return this.getActiveRelease(input.targetId)!;
     }, true);
+  }
+
+  /**
+   * A release recorded as active but unverified (its controller failed after
+   * activation) takes the receipt of the run that later verified it. Only that
+   * unverified receipt is ever replaced.
+   */
+  verifyActiveRelease(input: { releaseId: string; targetId: string; activationRunId: string; receipt: JsonValue }): boolean {
+    const result = this.database
+      .prepare(
+        `UPDATE deployment_releases SET activation_run_id = ?, receipt = ?
+         WHERE release_id = ? AND target_id = ? AND deactivated_at IS NULL AND tombstoned_at IS NULL
+           AND json_extract(receipt, '$.verified') = 0`,
+      )
+      .run(text(input.activationRunId, "activation run id"), json(input.receipt, "release receipt"), text(input.releaseId, "release id"), text(input.targetId, "target id"));
+    return result.changes === 1;
   }
 
   getActiveRelease(targetId: string): DeploymentRelease | null {

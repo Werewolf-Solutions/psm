@@ -123,10 +123,10 @@ function harness(options: HarnessOptions = {}) {
   });
 
   let clock = 1_000;
-  const build = (adapters: DeploymentActionAdapter[]) => new DeploymentRunner({
+  const build = (adapters: DeploymentActionAdapter[], bootId = "boot_test") => new DeploymentRunner({
     store,
     adapters,
-    bootId: "boot_test",
+    bootId,
     now: () => (clock += 1),
     sleep: async () => { clock += 1_000; },
     lockLeaseMs: 30_000,
@@ -144,7 +144,7 @@ function harness(options: HarnessOptions = {}) {
     }),
   });
 
-  return { store, log, rechecks, build, runId: queued.run.runId, lockKeys };
+  return { store, log, rechecks, build, runId: queued.run.runId, lockKeys, advance: (ms: number) => { clock += ms; } };
 }
 
 const stepStates = (store: DeploymentStore, runId: string) =>
@@ -178,6 +178,85 @@ test("an approved run executes its actions, releases its locks and ends succeede
   const events = store.listEvents(runId).map((event) => event.type);
   assert.ok(events.includes("locks-acquired"));
   assert.ok(events.includes("run-started"));
+});
+
+test("a failed observed action records its provider-safe detail in the run event", async () => {
+  const { store, log, build, runId } = harness();
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", {
+      submit: [{ outcome: "pending" }],
+      observe: [{ outcome: "failed", data: { state: "conflict", detail: "The owned DNS record no longer exists" } }],
+    }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ]);
+
+  const run = await runner.enqueue(runId);
+  assert.equal(run.state, "failed");
+  assert.match(store.listEvents(runId).find((event) => event.type === "run-failed")?.message || "", /The owned DNS record no longer exists/);
+  assert.equal(store.listRunSteps(runId).find((step) => step.stepId === "web-staged")?.state, "failed");
+});
+
+test("a failed post-mutation read-only helper check names the action and bounded diagnostic", async () => {
+  const { store, log, build, runId } = harness();
+  const helperError = Object.assign(new Error("pm2 snapshot failed: permission denied"), {
+    name: "HostHelperError", code: "helper-invalid",
+  });
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [{}], observe: [{}] }, log),
+    scripted("verify-release@1", { check: [helperError, helperError, helperError] }, log),
+  ]);
+
+  const run = await runner.enqueue(runId);
+  assert.equal(run.state, "recovery-required");
+  assert.match(run.recoveryReason || "", /web-verified failed after 3 attempts: pm2 snapshot failed: permission denied/);
+  const failure = store.listEvents(runId).find((event) => event.type === "action-check-failed");
+  assert.equal((failure?.data as { actionId?: string }).actionId, "web-verified");
+  assert.match(failure?.message || "", /pm2 snapshot failed: permission denied/);
+  assert.equal(store.listRunSteps(runId).find((step) => step.stepId === "web-staged")?.state, "completed");
+});
+
+test("an unobservable GitHub run names the executor's reason, not only its class", async () => {
+  const { build, runId, log } = harness();
+  const mismatch = Object.assign(new Error("GitHub workflow run did not match repository, workflow, commit and correlation constraints"), {
+    name: "GitHubExecutorError", code: "github-run-mismatch",
+  });
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [{ outcome: "pending" }], observe: [mismatch] }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ]);
+
+  const run = await runner.enqueue(runId);
+  assert.equal(run.state, "recovery-required");
+  assert.match(run.recoveryReason || "", /could not be observed: github-run-mismatch: GitHub workflow run did not match/);
+});
+
+test("a transient read-only helper failure is retried without another mutation", async () => {
+  const { store, log, build, runId } = harness();
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [{}], observe: [{}] }, log),
+    scripted("verify-release@1", { check: [new Error("temporary PM2 failure"), {}] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "succeeded");
+  assert.equal(log.filter((entry) => entry.call === "submit").length, 1);
+  assert.equal(log.filter((entry) => entry.kind === "verify-release@1" && entry.call === "check").length, 2);
+  assert.equal(store.getTargetLock(LOCK_KEY), null);
+});
+
+test("only a failed read-only observation with no unresolved effects can be closed", async () => {
+  const { store, log, build, runId } = harness();
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [{}], observe: [{}] }, log),
+    scripted("verify-release@1", { check: [new Error("PM2 failed"), new Error("PM2 failed"), new Error("PM2 failed")] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "recovery-required");
+  assert.equal(runner.closeFailedReadOnlyObservation(runId).state, "failed");
+  assert.equal(store.getTargetLock(LOCK_KEY), null);
+  assert.throws(() => runner.closeFailedReadOnlyObservation(runId), /not waiting at a failed read-only observation/);
 });
 
 test("a plan naming an uninstalled action kind fails before any lock is taken", async () => {
@@ -222,6 +301,7 @@ test("drift found at a mutation gate ends the run stale-plan without submitting"
 
   const run = await runner.enqueue(runId);
   assert.equal(run.state, "stale-plan");
+  assert.match(store.listEvents(runId).at(-1)?.message || "", /deployment inputs changed since approval/, "the run explains why it stopped");
   assert.equal(log.filter((entry) => entry.call === "submit").length, 0);
   assert.equal(store.getTargetLock(LOCK_KEY), null);
 });
@@ -269,6 +349,75 @@ test("a lost submit response is recovered by observation, never by a second subm
   assert.equal(store.getTargetLock(LOCK_KEY), null);
 });
 
+test("another unknown recovery observation replaces the stale diagnostic", async () => {
+  const { store, log, build, runId } = harness();
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", {
+      submit: [new Error("dispatch response lost")],
+      observe: [
+        { outcome: "unknown", data: { reason: "dispatch-receipt-unavailable" } },
+        { outcome: "unknown", data: { reason: "dispatch-search-inconclusive", detail: "GitHub access is unavailable" } },
+        { outcome: "failed", data: { reason: "release-not-dispatched" } },
+      ],
+    }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "recovery-required");
+  const first = store.listRunSteps(runId).find((step) => step.stepId === "web-staged")!;
+  assert.equal((first.result as { data: { reason: string } }).data.reason, "dispatch-receipt-unavailable");
+  assert.equal((await runner.recover(runId)).state, "recovery-required");
+  const second = store.listRunSteps(runId).find((step) => step.stepId === "web-staged")!;
+  assert.equal((second.result as { data: { reason: string } }).data.reason, "dispatch-search-inconclusive");
+  assert.ok((second.observedAt ?? 0) > (first.observedAt ?? 0));
+  assert.equal((await runner.recover(runId)).state, "failed");
+  assert.equal(log.filter((entry) => entry.call === "submit").length, 1);
+});
+
+test("a host-helper refusal retains its bounded diagnostic while observation decides the outcome", async () => {
+  const { store, log, build, runId } = harness();
+  const helperError = Object.assign(new Error("certbot failed: challenge returned HTTP 404"), {
+    name: "HostHelperError", code: "helper-invalid", retryable: false,
+  });
+  const runner = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", {
+      submit: [helperError],
+      observe: [{ outcome: "failed", data: { state: "create" } }],
+    }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ]);
+
+  const run = await runner.enqueue(runId);
+  assert.equal(run.state, "failed");
+  const refusal = store.listEvents(runId).find((event) => event.type === "submission-failed");
+  assert.match(refusal?.message || "", /certbot failed: challenge returned HTTP 404/);
+  assert.equal((refusal?.data as { helperCode?: string }).helperCode, "helper-invalid");
+  assert.equal(log.filter((entry) => entry.call === "submit").length, 1);
+});
+
+test("only an uncertain nginx reload can be closed for a fresh reviewed plan", async () => {
+  const actions = [
+    { actionId: "nginx-reloaded", kind: "reload-nginx@1", phase: "reconcile", sideEffecting: true },
+    { actionId: "web-staged", kind: "stage-static-release@1", phase: "release", sideEffecting: true },
+  ];
+  const { store, log, build, runId } = harness({ actions });
+  const runner = build([
+    scripted("reload-nginx@1", { submit: [new Error("response lost")], observe: [{ outcome: "unknown" }] }, log),
+    scripted("stage-static-release@1", { submit: [{}], observe: [{}] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "recovery-required");
+  assert.ok(store.getTargetLock(LOCK_KEY));
+  const closed = runner.closeUncertainNginxReload(runId);
+  assert.equal(closed.state, "failed");
+  assert.deepEqual(stepStates(store, runId), { "nginx-reloaded": "failed", "web-staged": "cancelled" });
+  assert.equal(store.getTargetLock(LOCK_KEY), null);
+  assert.ok(store.listEvents(runId).some((event) => event.type === "uncertain-reload-closed"));
+
+  const unrelated = harness();
+  assert.throws(() => unrelated.build([]).closeUncertainNginxReload(unrelated.runId), /not waiting for recovery/);
+});
+
 test("a stable idempotency key reaches the adapter and survives a restart", async () => {
   const { log, build, runId } = harness();
   const runner = build([
@@ -282,6 +431,31 @@ test("a stable idempotency key reaches the adapter and survives a restart", asyn
   assert.ok(submit?.idempotencyKey, "a side effect must carry a durable idempotency key");
   // A read-only check has nothing to deduplicate and must not invent one.
   assert.equal(log.find((entry) => entry.call === "check")?.idempotencyKey, null);
+});
+
+test("after a restart, recovery takes back the run's own expired lease and re-observes", async () => {
+  // Observed 2026-09-28 (run_e19a8daa9f8d4e57): after a PSM restart, Check again was held
+  // because the run's own lease, from the previous boot, was classified as a stranger's.
+  const { store, log, build, runId, advance } = harness({ safeToRecover: false });
+  const unobservable = Object.assign(new Error("run mismatch"), { name: "GitHubExecutorError", code: "github-run-mismatch" });
+  const first = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [{ outcome: "pending" }], observe: [unobservable] }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ]);
+  assert.equal((await first.enqueue(runId)).state, "recovery-required");
+  assert.ok(store.getTargetLock(LOCK_KEY), "a held run keeps its lease");
+
+  advance(60_000);
+  const second = build([
+    scripted("assert-dependency@1", { check: [{}] }, log),
+    scripted("stage-static-release@1", { submit: [], observe: [{ outcome: "failed", data: { detail: "stopped before reaching the target" } }] }, log),
+    scripted("verify-release@1", { check: [{}] }, log),
+  ], "boot_second");
+  const run = await second.recover(runId);
+  assert.equal(run.state, "failed", run.recoveryReason ?? "");
+  assert.equal(log.filter((entry) => entry.call === "submit").length, 1, "recovery never re-submits");
+  assert.equal(store.getTargetLock(LOCK_KEY), null);
 });
 
 test("startup resumes interrupted work but holds recovery-required and prepare runs", async () => {

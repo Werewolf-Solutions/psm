@@ -91,7 +91,7 @@ function fingerprint(kind: string, value: unknown): string {
 }
 
 function detailFromProbe(result: HttpProbeResult): string {
-  return `HTTP ${result.status} in ${result.durationMs}ms`;
+  return `HTTP ${result.status}`;
 }
 
 async function observeHttpDependency(
@@ -131,7 +131,9 @@ async function observeHttpDependency(
       title: dependency.id,
       detail: failures.join("; ") || detailFromProbe(result),
       observedAt: result.observedAt,
-      fingerprint: fingerprint(dependency.kind, evidence),
+      // Duration is useful diagnostic evidence, but varies between identical
+      // checks. It must not make the approved deployment plan stale.
+      fingerprint: fingerprint(dependency.kind, { ...evidence, durationMs: 0 }),
       evidence,
     };
   } catch (error) {

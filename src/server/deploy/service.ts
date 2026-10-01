@@ -16,7 +16,7 @@ import {
 import { expandDeploymentGraph } from "./graph.ts";
 import { loadDeploymentManifest, parseDeploymentManifest } from "./manifest.ts";
 import { observeEnvironment, type ObservationAdapters } from "./observations.ts";
-import { buildDeploymentPlan, planView, type DeploymentPlanDocument, type PlanConnectionSnapshot } from "./planner.ts";
+import { buildDeploymentPlan, planAuthorityDigest, planView, type DeploymentPlanDocument, type PlanConnectionSnapshot } from "./planner.ts";
 import { composeDeploymentPolicy, type DeploymentPolicyLayer } from "./policy.ts";
 import { deploymentReadiness, type DeploymentReadiness } from "./readiness.ts";
 import {
@@ -382,9 +382,11 @@ export class DeploymentService {
       operation: run.operation,
       state: run.state,
       phase: run.phase,
+      recoveryReason: run.recoveryReason,
       auditDegraded: run.auditDegraded,
       cancellationRequestedAt: run.cancellationRequestedAt,
       createdAt: run.createdAt,
+      startedAt: run.startedAt,
       updatedAt: run.updatedAt,
       finishedAt: run.finishedAt,
       terminal: runTerminal(run.state),
@@ -458,7 +460,11 @@ export class DeploymentService {
     const blockers = [
       ...(!context.committed ? [{ id: "source-uncommitted", code: "source-dirty", title: "Commit deployment inputs", message: "The managed manifest is preview-only until committed" }] : []),
       ...connections.filter((item) => !item.ready).map((item) => ({ id: `connection:${item.slot}`, code: "connection-missing", title: `${item.slot} connection`, message: item.detail })),
-      ...unpinned.map((unit) => ({ id: `release-controller:${unit.id}`, code: "release-controller-unpinned", title: "Release controller not pinned", message: `The ${unit.executor.connection} connection has no reviewed release workflow for ${unit.target.targetId}. PSM pins it once it can read the release repository.` })),
+      ...unpinned.map((unit) => {
+        const binding = connections.find((item) => item.slot === unit.executor.connection);
+        const name = binding?.connectionId ? bound.get(binding.connectionId)?.name : null;
+        return { id: `release-controller:${unit.id}`, code: "release-controller-unpinned", title: "Release controller not pinned", message: `The ${unit.executor.connection} connection${name ? ` (${name})` : ""} runs no release controller for ${unit.target.targetId}, so every release is refused before it reaches GitHub. Review controller setup for it, or choose a connection that has one.` };
+      }),
     ];
     const activeFirst = firstUnit ? active.find((release) => release.unitId === firstUnit.id) ?? null : null;
     const projects = this.#projects();
@@ -499,7 +505,9 @@ export class DeploymentService {
           monitorIds: environment.watch.filter((watch) => watch.connection === item.slot).map((watch) => watch.monitorKey),
         },
       })),
-      units: environment.units.map((unit) => ({ id: unit.id, recipe: unit.recipe, executor: unit.executor.kind, target: unit.target.targetId })),
+      units: environment.units.map((unit) => ({ id: unit.id, recipe: unit.recipe, executor: unit.executor.kind, target: unit.target.targetId,
+        sourceRepository: unit.executor.sourceRepository,
+        buildProfileDigest: canonicalDigest("psm-deployment-build-profile:v1", unit.artifact.buildProfile) })),
       releases: all.map((release) => releaseView(release, active.find((item) => item.targetId === release.targetId)?.releaseId ?? null)),
       canPrepare: this.artifactPreparationAvailable && context.committed && !context.sourceInputsDirty && environment.units.length === 1 && connections.some((item) => item.slot === firstUnit?.executor.connection && item.ready),
       canPlan: true,
@@ -601,6 +609,11 @@ export class DeploymentService {
   /** The most recent readiness check for an environment, as it was answered; never a new check. */
   lastReadiness(idOrName: string, environmentId: string) {
     const last = this.#lastReadiness.get(`${this.resolveProject(idOrName).id}\0${environmentId}`);
+    if (last) {
+      const current = this.loadCurrent(idOrName);
+      const source = last.environment.source as { commit?: string; inputsDirty?: boolean };
+      if (source.commit !== current.source.commit || source.inputsDirty !== current.sourceInputsDirty) return null;
+    }
     return last ? structuredClone(last) : null;
   }
 
@@ -615,13 +628,16 @@ export class DeploymentService {
     const unit = environment.units.length === 1 ? environment.units[0] : null;
     // Automatic selection must not carry a production build (or a different
     // commit) into staging merely because it is the newest recorded artifact.
-    const matching = unit ? this.artifacts(context.project.id).find((artifact) =>
+    const matching = unit ? this.artifacts(context.project.id).filter((artifact) =>
       artifact.commitSha === context.source.commit
       && artifact.sourceRepository === unit.executor.sourceRepository
       && artifact.buildProfileDigest === canonicalDigest("psm-deployment-build-profile:v1", unit.artifact.buildProfile)
       && artifact.retainedUntil > Date.now() && artifact.tombstonedAt === null
-    ) : null;
-    const result = await this.createPlan(context.project.id, { environment: environmentId, operation: "deploy", artifactId: options.artifactId ?? matching?.artifactId ?? null });
+    ) : [];
+    // Readiness follows the current source, even if an open browser still sends
+    // a selection from the previous commit. Exact deploy plans remain strict.
+    const selected = matching.find((artifact) => artifact.artifactId === options.artifactId) ?? matching[0];
+    const result = await this.createPlan(context.project.id, { environment: environmentId, operation: "deploy", artifactId: selected?.artifactId ?? null });
     const document = this.store.getPlan(String(result.plan.id), Number(result.plan.revision)).document as unknown as DeploymentPlanDocument;
     let canPrepare = (options.preparationAvailable ?? this.artifactPreparationAvailable) && !!unit
       && !(document.observations.execution ?? []).some((item) => item.purpose === "prepare" && !item.ready);
@@ -877,7 +893,7 @@ export class DeploymentService {
    * approved. Any failure to rebuild is itself a mismatch — an unreadable
    * manifest or an unbound connection is not evidence that nothing moved.
    */
-  async recheckPlan(planId: string, revision: number): Promise<{ digest: string; lockKeys: readonly string[] }> {
+  async recheckPlan(planId: string, revision: number): Promise<{ digest: string; lockKeys: readonly string[]; authorityDigest: string }> {
     const plan = this.store.getPlan(planId, revision);
     const document = plan.document as unknown as DeploymentPlanDocument;
     const project = this.resolveProject(plan.projectId);
@@ -892,6 +908,6 @@ export class DeploymentService {
       },
       { planId: plan.planId, revision: plan.revision, now: document.createdAt },
     );
-    return { digest: built.digest, lockKeys: built.document.lockKeys };
+    return { digest: built.digest, lockKeys: built.document.lockKeys, authorityDigest: planAuthorityDigest(built.document) };
   }
 }

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { openDatabase } from "../db.ts";
 import { createDeploymentEngine, observeExpiredLockFromRecords, recheckAgainstPlanner } from "./engine.ts";
+import { planAuthorityDigest, type DeploymentPlanDocument } from "./planner.ts";
 import { installedExecutorKinds, defaultDeploymentAdapters } from "./executors.ts";
 import type { DeploymentService } from "./service.ts";
 import type { ExpiredLockObservationContext, PlanRecheckContext } from "./runner.ts";
@@ -12,7 +13,7 @@ import { SecretBroker } from "./connections.ts";
 const PLAN_DIGEST = "sha256:plan-1";
 const LOCK_KEY = "target/werewolf:todo-production-web";
 
-function serviceStub(recheck: () => Promise<{ digest: string; lockKeys: readonly string[] }>): DeploymentService {
+function serviceStub(recheck: () => Promise<{ digest: string; lockKeys: readonly string[]; authorityDigest?: string }>): DeploymentService {
   return { recheckPlan: recheck } as unknown as DeploymentService;
 }
 
@@ -24,6 +25,7 @@ function recheckContext(overrides: Partial<PlanRecheckContext> = {}): PlanRechec
     expectedLockKeys: [LOCK_KEY],
     checkpoint: "before-action",
     action: null,
+    effectStarted: false,
     signal: new AbortController().signal,
     ...overrides,
   };
@@ -65,6 +67,28 @@ test("a rebuild that throws is drift, never a pass", async () => {
   );
   assert.equal(result.ok, false);
   assert.match(result.ok === false ? result.reason : "", /could not be re-derived/);
+});
+
+test("post-mutation recheck accepts this run's observations but rejects changed authority", async () => {
+  const document = {
+    projectId: "todo", checkoutId: "checkout", environmentId: "staging", operation: "deploy",
+    adoptionResourceId: null, risk: "staging", engineVersion: "0.3.11", manifestDigest: "manifest",
+    source: { commit: "abc", version: "1", branch: "main", identityDigest: "identity", packageDigest: "package", subject: "release", inputsDirty: false, reachableFromAllowedBranch: true },
+    artifact: null, rollbackRelease: null, graph: { nodes: [], order: [] }, connections: [], policy: {}, lockKeys: [LOCK_KEY],
+  } as unknown as DeploymentPlanDocument;
+  const authorityDigest = planAuthorityDigest(document);
+  const context = recheckContext({ effectStarted: true, plan: { planId: "plan", revision: 1, digest: PLAN_DIGEST, document } as unknown as DeploymentPlan });
+  const observedChange = await recheckAgainstPlanner(
+    serviceStub(async () => ({ digest: "sha256:changed-by-our-own-dns-action", lockKeys: [LOCK_KEY], authorityDigest })),
+    context,
+  );
+  assert.deepEqual(observedChange, { ok: true, planDigest: PLAN_DIGEST, lockKeys: [LOCK_KEY] });
+  const sourceChange = await recheckAgainstPlanner(
+    serviceStub(async () => ({ digest: "sha256:changed", lockKeys: [LOCK_KEY], authorityDigest: "sha256:other" })),
+    context,
+  );
+  assert.equal(sourceChange.ok, false);
+  assert.match(sourceChange.ok === false ? sourceChange.reason : "", /approved source, policy or connections changed/);
 });
 
 function lockContext(ownerRunId: string, sideEffecting: boolean): ExpiredLockObservationContext {

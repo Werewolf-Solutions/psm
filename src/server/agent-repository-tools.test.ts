@@ -28,6 +28,86 @@ function fixture(t: test.TestContext) {
   return { root, database, store, project, tools, git };
 }
 
+function versionedFixture(t: test.TestContext) {
+  const kit = fixture(t);
+  fs.writeFileSync(path.join(kit.root, "package.json"), JSON.stringify({ name: "app", version: "0.6.0" }, null, 2) + "\n");
+  fs.writeFileSync(path.join(kit.root, "package-lock.json"), JSON.stringify({ name: "app", version: "0.6.0", lockfileVersion: 3, packages: { "": { name: "app", version: "0.6.0" }, "node_modules/dep": { version: "2.0.0" } } }, null, 2) + "\n");
+  kit.git("add", "package.json", "package-lock.json"); kit.git("commit", "-qm", "initial version");
+  return kit;
+}
+
+test("managed code commits assign the next version and synchronize only root lockfile versions", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.write("app.txt", "fixed\n"); tools.write("other.txt", "unrelated edits\n");
+  tools.stage(["app.txt"]);
+  assert.match(tools.commit("fix calendar"), /release version 0.6.1/);
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.1");
+  const lock = JSON.parse(git("show", "HEAD:package-lock.json"));
+  assert.equal(lock.version, "0.6.1"); assert.equal(lock.packages[""].version, "0.6.1");
+  assert.equal(lock.packages["node_modules/dep"].version, "2.0.0");
+  assert.equal(git("show", "HEAD:other.txt"), "unrelated\n");
+});
+
+test("managed commits preserve an explicit newer version and sync its lockfile", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.write("package.json", '{"name":"app","version":"0.7.0"}\n');
+  tools.stage(["package.json"]); tools.commit("new work line");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.7.0");
+  assert.equal(JSON.parse(git("show", "HEAD:package-lock.json")).version, "0.7.0");
+});
+
+test("documentation-only commits do not consume a release version", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.write("README.md", "Updated docs\n"); tools.stage(["README.md"]); tools.commit("docs");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.0");
+});
+
+test("version assignment preserves partially staged package edits and makes no writes", (t) => {
+  const { tools, root, git } = versionedFixture(t);
+  const before = git("rev-parse", "HEAD");
+  const pkg = fs.readFileSync(path.join(root, "package.json"), "utf8");
+  tools.write("app.txt", "fix\n"); tools.stage(["app.txt"]);
+  tools.write("package-lock.json", '{"version":"9.0.0"}\n');
+  assert.throws(() => tools.commit("fix"), /unstaged changes/);
+  assert.equal(git("rev-parse", "HEAD"), before);
+  assert.equal(fs.readFileSync(path.join(root, "package.json"), "utf8"), pkg);
+  assert.equal(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"), '{"version":"9.0.0"}\n');
+});
+
+test("an externally committed change can receive a managed version-only release commit", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.stage(["package.json"]); tools.commit("assign release version to external changes");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.1");
+});
+
+test("automatic version changes require repo.edit even with commit permission", (t) => {
+  const { root, project, store, git } = versionedFixture(t);
+  store.change(project, "repo.edit", false, store.snapshot(project).revision, "operator");
+  const tools = new RepositoryTools(store.snapshot(project), store);
+  fs.writeFileSync(path.join(root, "app.txt"), "fix\n"); tools.stage(["app.txt"]);
+  assert.throws(() => tools.commit("fix"), /repo.edit/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version, "0.6.0");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.0");
+});
+
+test("a staged version decrease requires an explicit rationale", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.write("package.json", '{"name":"app","version":"0.5.0"}\n'); tools.stage(["package.json"]);
+  assert.throws(() => tools.commit("fix"), /version-regression-reason/);
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.0");
+  tools.commit("version-regression-reason: restore the previous release line");
+  assert.equal(JSON.parse(git("show", "HEAD:package-lock.json")).version, "0.5.0");
+});
+
+test("untracked root lockfiles are preserved rather than silently committed", (t) => {
+  const { tools, root, git } = versionedFixture(t);
+  fs.writeFileSync(path.join(root, "npm-shrinkwrap.json"), '{"version":"0.6.0"}\n');
+  tools.write("app.txt", "fix\n"); tools.stage(["app.txt"]);
+  assert.throws(() => tools.commit("fix"), /untracked version file/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version, "0.6.0");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "0.6.0");
+});
+
 test("explicit staging and committing works without hooks, filters, or unrelated edits", (t) => {
   const { root, tools, git } = fixture(t);
   fs.writeFileSync(path.join(root, ".git/hooks/pre-commit"), "#!/bin/sh\ntouch hook-ran\nexit 1\n", { mode: 0o755 });

@@ -42,6 +42,9 @@ async function harness(options: HarnessOptions = {}) {
   const store = new DeploymentStore(openDatabase(":memory:"));
   const enqueued: string[] = [];
   const cancelled: string[] = [];
+  const closed: string[] = [];
+  const closedReadOnly: string[] = [];
+  const recovered: string[] = [];
 
   store.createPlan({
     planId: "plan_todo_production",
@@ -89,6 +92,9 @@ async function harness(options: HarnessOptions = {}) {
       runner: {
         enqueue: (runId: string) => { enqueued.push(runId); },
         cancel: (runId: string) => { cancelled.push(runId); return store.requestCancellation(runId, Date.now()); },
+        closeUncertainReload: (runId: string) => { closed.push(runId); },
+        closeFailedReadOnlyObservation: (runId: string) => { closedReadOnly.push(runId); },
+        recover: (runId: string) => { recovered.push(runId); },
       },
     }),
   }));
@@ -108,7 +114,7 @@ async function harness(options: HarnessOptions = {}) {
   // The one header that proves the request came from the page psm itself serves.
   const cockpit = { origin: base, host: base.replace("http://", "") };
 
-  return { store, call, cockpit, enqueued, cancelled, close: () => new Promise((resolve) => server.close(resolve)) };
+  return { store, call, cockpit, enqueued, cancelled, closed, closedReadOnly, recovered, close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
 async function mintIntent(kit: Awaited<ReturnType<typeof harness>>): Promise<string> {
@@ -142,6 +148,21 @@ test("a production approval requires the exact local cockpit origin", async (t) 
   }, { origin: "https://psm.werewolf.solutions" });
   assert.equal(evil.status, 403);
   assert.equal(kit.enqueued.length, 0);
+});
+
+test("GitHub App setup and controller writes require the exact cockpit origin", async (t) => {
+  const kit = await harness();
+  t.after(kit.close);
+  const attempts = [
+    ["/api/projects/prj_todo/deployments/production/github/connect", { owner: "example", accountKind: "organization", controllerName: "control" }],
+    ["/api/projects/prj_todo/deployments/production/github/controller/preview", {}],
+    ["/api/projects/prj_todo/deployments/production/github/controller/apply", { id: "unreviewed" }],
+    ["/api/connections/unbound/github/install", {}],
+  ] as const;
+  for (const [route, body] of attempts) {
+    assert.equal((await kit.call("POST", route, body)).status, 403, route);
+    assert.equal((await kit.call("POST", route, body, { origin: "http://127.0.0.1:1" })).status, 403, route);
+  }
 });
 
 test("approval without a matching one-use intent is refused", async (t) => {
@@ -243,6 +264,82 @@ test("cancelling a production run requires the authenticated local cockpit", asy
   });
   assert.equal(authorized.status, 202, JSON.stringify(authorized.body));
   assert.deepEqual(kit.cancelled, [runId]);
+});
+
+test("closing an uncertain reload requires the authenticated local cockpit", async (t) => {
+  const kit = await harness();
+  t.after(kit.close);
+  const intent = await mintIntent(kit);
+  const approved = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", {
+    revision: 1, digest: PLAN_DIGEST, intent,
+  }, { origin: kit.cockpit.origin });
+  const runId = String((approved.body.run as { id: string }).id);
+  const bare = await kit.call("POST", `/api/deployment-runs/${runId}/close-uncertain-reload`);
+  assert.equal(bare.status, 403);
+  assert.equal(kit.closed.length, 0);
+  const authorized = await kit.call("POST", `/api/deployment-runs/${runId}/close-uncertain-reload`, undefined, { origin: kit.cockpit.origin });
+  assert.equal(authorized.status, 200);
+  assert.deepEqual(kit.closed, [runId]);
+});
+
+test("an authenticated staging operator can close a held reload from the paired cockpit", async (t) => {
+  const kit = await harness({ risk: "staging" });
+  t.after(kit.close);
+  const intent = await mintIntent(kit);
+  const approved = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", {
+    revision: 1, digest: PLAN_DIGEST, intent,
+  }, { origin: kit.cockpit.origin });
+  const runId = String((approved.body.run as { id: string }).id);
+  const response = await kit.call("POST", `/api/deployment-runs/${runId}/close-uncertain-reload`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(kit.closed, [runId]);
+});
+
+test("closing a failed read-only observation requires the authenticated local cockpit for production", async (t) => {
+  const kit = await harness();
+  t.after(kit.close);
+  const intent = await mintIntent(kit);
+  const approved = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", {
+    revision: 1, digest: PLAN_DIGEST, intent,
+  }, { origin: kit.cockpit.origin });
+  const runId = String((approved.body.run as { id: string }).id);
+  assert.equal((await kit.call("POST", `/api/deployment-runs/${runId}/close-failed-read-only-observation`)).status, 403);
+  assert.deepEqual(kit.closedReadOnly, []);
+  assert.equal((await kit.call("POST", `/api/deployment-runs/${runId}/close-failed-read-only-observation`, undefined, { origin: kit.cockpit.origin })).status, 200);
+  assert.deepEqual(kit.closedReadOnly, [runId]);
+});
+
+test("checking a held run again needs the local cockpit for production and only applies to held runs", async (t) => {
+  const kit = await harness();
+  t.after(kit.close);
+  const intent = await mintIntent(kit);
+  const approved = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", {
+    revision: 1, digest: PLAN_DIGEST, intent,
+  }, { origin: kit.cockpit.origin });
+  const runId = String((approved.body.run as { id: string }).id);
+  assert.equal((await kit.call("POST", `/api/deployment-runs/${runId}/recover`, undefined, { origin: kit.cockpit.origin })).status, 409);
+  const state = kit.store.getRun(runId).state;
+  kit.store.transitionRun({ runId, expectedStates: [state], state: "recovery-required", phase: "recovery-required", at: Date.now(), recoveryReason: "submitted action could not be observed" });
+  assert.equal((await kit.call("POST", `/api/deployment-runs/${runId}/recover`)).status, 403);
+  assert.deepEqual(kit.recovered, []);
+  assert.equal((await kit.call("POST", `/api/deployment-runs/${runId}/recover`, undefined, { origin: kit.cockpit.origin })).status, 202);
+  assert.deepEqual(kit.recovered, [runId]);
+});
+
+test("a local operator who could approve the plan can check a held run again without signing in", async (t) => {
+  // Observed 2026-09-28: staging approves as local-operator, yet Check again demanded a Werewolf sign-in.
+  const kit = await harness({ user: null, approval: "local-operator", risk: "staging" });
+  t.after(kit.close);
+  const intent = await mintIntent(kit);
+  const approved = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", {
+    revision: 1, digest: PLAN_DIGEST, intent,
+  }, { origin: kit.cockpit.origin });
+  const runId = String((approved.body.run as { id: string }).id);
+  const state = kit.store.getRun(runId).state;
+  kit.store.transitionRun({ runId, expectedStates: [state], state: "recovery-required", phase: "recovery-required", at: Date.now(), recoveryReason: "submitted action could not be observed" });
+  const response = await kit.call("POST", `/api/deployment-runs/${runId}/recover`, undefined, { origin: kit.cockpit.origin });
+  assert.equal(response.status, 202, JSON.stringify(response.body));
+  assert.deepEqual(kit.recovered, [runId]);
 });
 
 test("changing deployment authority is refused from a paired origin", async (t) => {

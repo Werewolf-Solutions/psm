@@ -1,0 +1,25 @@
+{
+  "schema": "psm.werewolf.solutions/prepare-artifact-result/v1",
+  "psmRunId": "run_94a0e5cbee734dda",
+  "psmArtifactId": "artifact_e3e70de53c084df99ea325fa",
+  "projectId": "prj_e4713173923933470bd3",
+  "environmentId": "staging",
+  "unitId": "web",
+  "sourceRepository": "Werewolf-Solutions/todo-app",
+  "producerRunId": "36404335623",
+  "githubArtifactId": "10962210235",
+  "commitSha": "9450ccedb9ba08493a6461ab930467ad0ea07625",
+  "version": "0.6.0",
+  "manifestDigest": "sha256:3e26abce4372b552a23a12805e633d15689e296f91af26ff1c0425cc13192aa5",
+  "buildProfileDigest": "sha256:b95e01930c9554a2d9b3f3eab6e820b8bafbbdb9d8ade77259b5ed4d4b363b1a",
+  "payloadAlgorithm": "psm-static-tree-sha256@1",
+  "payloadLimits": {
+    "maxFiles": 5000,
+    "maxPathBytes": 1024,
+    "maxFileBytes": 20000000,
+    "maxUnpackedBytes": 200000000
+  },
+  "payloadDigest": "sha256:c86e900c1a3496a15350ea96e43d90e1308c645bb1669529967b874e0ceacccc",
+  "archiveDigest": "sha256:d5e45d5d9d8d27c391c25dcc70407bd6015ebbee70a08e63b352e0cf4c79e96c",
+  "retainedUntil": "2026-10-27T09:34:28.901Z"
+}

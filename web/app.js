@@ -1158,7 +1158,9 @@ function logView(con) {
 
 function logNode(entry) {
   const line = el("div", "logline s-" + entry.stream);
-  line.textContent = entry.line;
+  const body = el("span", "logline-text");
+  body.textContent = entry.line;
+  line.append(eventTimeNode(entry.t), body);
   return line;
 }
 
@@ -2023,7 +2025,8 @@ async function applyDevNotes() {
   const name = WS.name;
   if (!WS.aiEs) connectAi(name);
   WS.pending.push(message);
-  const optimistic = renderAiBubble({ role: "user", text: message });
+  const optimistic = renderAiBubble({ t: Date.now(), role: "user", text: message });
+  optimistic.pendingMessage = message;
   const wasBusy = WS.aiBusy;
   setAiBusy(true);
   const { ok, body } = await postAiMessage(name, message);
@@ -2828,6 +2831,7 @@ function renderPlanner() {
       const row = el("div", `planner-event ${event.role}`);
       const meta = el("div", "planner-event-meta");
       meta.textContent = `${PLANNER.role} · ${event.role}`;
+      meta.append(eventTimeNode(event.t));
       const body = el("div");
       body.textContent = event.text;
       row.append(meta, body);
@@ -3490,6 +3494,38 @@ function formatDateTime(ms) {
   return ms ? new Date(ms).toLocaleString() : "—";
 }
 
+// Absolute local times keep yesterday's history distinct from today's activity.
+// Never substitute render time for a missing timestamp in an older saved event.
+const EVENT_TIME_FORMAT = new Intl.DateTimeFormat(undefined, {
+  year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+});
+const EVENT_TIME_DETAIL = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "long" });
+
+function eventTimeNode(ms, className = "event-time") {
+  const node = el("time", className);
+  const date = typeof ms === "number" && Number.isFinite(ms) ? new Date(ms) : null;
+  if (!date || !Number.isFinite(date.getTime())) {
+    node.textContent = "Time unavailable";
+    return node;
+  }
+  node.dateTime = date.toISOString();
+  node.textContent = EVENT_TIME_FORMAT.format(date);
+  node.title = `${EVENT_TIME_DETAIL.format(date)} (${EVENT_TIME_FORMAT.resolvedOptions().timeZone})`;
+  return node;
+}
+
+function renderActivityTimes(node, entries) {
+  node.replaceChildren();
+  for (const [label, ms] of entries) {
+    if (ms == null) continue;
+    const item = el("span");
+    item.textContent = `${label} `;
+    item.append(eventTimeNode(ms));
+    node.append(item);
+  }
+}
+
 function compactText(text, max = 260) {
   const clean = String(text || "").replace(/\s+/g, " ").trim();
   return clean.length > max ? clean.slice(0, max - 1) + "…" : clean;
@@ -3550,7 +3586,7 @@ function renderSessionPane(data) {
   for (const ev of recent) {
     const row = el("div", "session-event session-" + ev.role);
     const meta = el("div", "session-event-meta");
-    meta.append(el("span", null, ev.role), el("time", null, formatDateTime(ev.t)));
+    meta.append(el("span", null, ev.role), eventTimeNode(ev.t));
     const body = el("div", "session-event-body");
     body.textContent = compactText(ev.text, 900);
     row.append(meta, body);
@@ -4387,6 +4423,7 @@ function renderAiBubble(ev) {
   if (preparation) {
     const summary = el("summary");
     summary.textContent = preparation;
+    summary.append(eventTimeNode(ev.t, "ai-time"));
     const brief = el("div", "ai-preparation-brief");
     brief.textContent = ev.text;
     b.append(summary, brief);
@@ -4395,6 +4432,7 @@ function renderAiBubble(ev) {
   } else {
     b.textContent = ev.text;
   }
+  if (!preparation) b.append(eventTimeNode(ev.t, "ai-time"));
   t.append(b);
   if (nearBottom) t.scrollTop = t.scrollHeight;
   return b;
@@ -4406,6 +4444,11 @@ function appendAiEvent(ev) {
     const i = WS.pending.indexOf(ev.text);
     if (i >= 0) {
       WS.pending.splice(i, 1);
+      const optimistic = [...$("#ws-transcript").children].find((node) => node.pendingMessage === ev.text);
+      if (optimistic) {
+        optimistic.querySelector(".ai-time").replaceWith(eventTimeNode(ev.t, "ai-time"));
+        delete optimistic.pendingMessage;
+      }
       scheduleSessionRefresh();
       return;
     }
@@ -4707,7 +4750,8 @@ async function sendAi() {
   // pending is a multiset: several messages may be in flight/queued at once, and
   // each server echo cancels one so we don't double-render it.
   WS.pending.push(message);
-  const optimistic = renderAiBubble({ role: "user", text: message });
+  const optimistic = renderAiBubble({ t: Date.now(), role: "user", text: message });
+  optimistic.pendingMessage = message;
   setAiBusy(true);
   const { ok, body: e } = await postAiMessage(name, message);
   if (!ok) {
@@ -4797,7 +4841,22 @@ function deploymentReadyToApprove() {
   return !(plan.acknowledgements || []).length || $("#dep-ack").checked;
 }
 
+function deploymentReadinessControls(state, readiness, supersededPreparation) {
+  const preparing = !!state.preparation?.active;
+  const resumable = !!state.preparation && !preparing && state.preparation.state !== "succeeded" && !supersededPreparation;
+  // A recovery-required run is held, not executing. It still blocks deployment
+  // approval, but must not block the read-only check or preparation of new input.
+  const activeRun = !!state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state) && state.run.state !== "recovery-required";
+  return {
+    busy: state.loading || !!state.preparationRunId || activeRun,
+    preparing,
+    resumable,
+    showPreparation: resumable || !!readiness && !readiness.ready,
+  };
+}
+
 function renderDeploymentReadiness() {
+  scheduleDeploymentTodo();
   const state = WS.managedDeploy;
   const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
   const rows = (readiness?.items || []).map((item) => ({
@@ -4808,6 +4867,7 @@ function renderDeploymentReadiness() {
   depRows($("#dep-readiness"), rows, "Check readiness to see the steps needed for this environment.");
   const outstanding = rows.filter((item) => item.status !== "ready");
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
+  renderActivityTimes($("#dep-readiness-times"), [["Checked", readiness?.checkedAt]]);
   for (const [index, item] of rows.entries()) {
     // The release controller's GitHub Environment is filled from here, with the CI key PSM enrolled.
     if (item.status !== "ready" && item.code === "executor-not-ready" && /controller-credentials/.test(item.id) && /Publish the CI release key/.test(item.detail || "")) {
@@ -4831,6 +4891,74 @@ function renderDeploymentReadiness() {
         }
       };
       row?.append(publish);
+    }
+    // A target contract changed on the server is pinned from here, with the exact digest shown.
+    const contractTo = item.status !== "ready" && /target-contract/.test(item.id) && /changed from \S+ to (sha256:[0-9a-f]{64})/.exec(item.detail || "");
+    if (contractTo) {
+      const row = $("#dep-readiness").children[index];
+      const pin = depText("button", "dep-mini-btn primary", "Pin current contract");
+      pin.type = "button";
+      pin.title = `Release against target contract ${contractTo[1]}`;
+      pin.onclick = async () => {
+        pin.disabled = true;
+        pin.textContent = "Pinning…";
+        row?.querySelector(".dep-row-error")?.remove();
+        try {
+          const scope = deploymentRequestScope({ environment: true });
+          const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployments/${encodeURIComponent(state.environment)}/target-contract-pin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: contractTo[1] }) });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          toast(`Target contract pinned to ${contractTo[1].slice(0, 19)}…`);
+          void discoverDeploymentPlan();
+        } catch (error) {
+          pin.disabled = false;
+          pin.textContent = "Try again";
+          row?.append(depText("div", "dep-row-error", `Pinning failed: ${error.message}`));
+        }
+      };
+      row?.append(pin);
+    }
+    // A moved controller branch is reviewed on GitHub, then pinned from here: the button
+    // sends the exact commit shown, and PSM refuses if the branch moved again.
+    const movedTo = item.status !== "ready" && /controller-pin/.test(item.id) && /moved from [0-9a-f]{12} to ([0-9a-f]{40})/.exec(item.detail || "");
+    if (movedTo) {
+      const row = $("#dep-readiness").children[index];
+      const compare = /\((https:\/\/github\.com\/[^)\s]+\/compare\/[^)\s]+)\)/.exec(item.detail || "");
+      if (compare) {
+        const link = depText("a", "dep-mini-btn", "Review changes");
+        link.href = compare[1];
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        row?.append(link);
+      }
+      const pin = depText("button", "dep-mini-btn primary", "Pin new commit");
+      pin.type = "button";
+      pin.title = `Release with controller commit ${movedTo[1]}`;
+      pin.onclick = async () => {
+        pin.disabled = true;
+        pin.textContent = "Pinning…";
+        row?.querySelector(".dep-row-error")?.remove();
+        try {
+          const scope = deploymentRequestScope({ environment: true });
+          const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployments/${encodeURIComponent(state.environment)}/controller-pin`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ headSha: movedTo[1] }) });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          toast(`Release controller pinned to ${movedTo[1].slice(0, 12)}`);
+          void discoverDeploymentPlan();
+        } catch (error) {
+          pin.disabled = false;
+          pin.textContent = "Try again";
+          row?.append(depText("div", "dep-row-error", `Pinning failed: ${error.message}`));
+        }
+      };
+      row?.append(pin);
+    }
+    // A connection that runs no release controller for this target is fixed in its own setup.
+    if (item.status !== "ready" && /controller-pin/.test(item.id) && /pins no /.test(item.detail || "")) {
+      const setup = depText("button", "dep-mini-btn", "Go to controller setup");
+      setup.type = "button";
+      setup.onclick = () => showMe(() => deploymentControllerSetupTarget(item.slot || "github"));
+      $("#dep-readiness").children[index]?.append(setup);
     }
     // Building the release is one click from its own row.
     if (item.status !== "ready" && item.action === "prepare-artifact" && item.automatic) {
@@ -4867,24 +4995,27 @@ function renderDeploymentReadiness() {
     next.querySelector(".dep-mini-btn")?.classList.add("primary");
   }
   const expired = readiness && Number(readiness.expiresAt) <= Date.now();
-  const preparing = !!state.preparation?.active;
+  const { busy, preparing, resumable, showPreparation } = deploymentReadinessControls(state, readiness, preparationSuperseded(state));
+  const heldRun = state.run?.state === "recovery-required";
   $("#dep-status").textContent = preparing ? state.preparation.message
     : state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
     : state.loading ? "Checking deployment readiness…"
     : state.error ? "The check could not finish. Resolve the error and check again."
+    : deploymentUpToDate() && (!readiness || expired) ? "Deployed and up to date. Check readiness again after you commit something new."
     : expired ? "Readiness has expired. Check again before deploying."
+    : heldRun && readiness?.ready ? "Release inputs are ready, but the previous deployment is held. Resolve that run before deploying."
     : readiness?.ready ? "Ready to deploy. Review the plan below, then deploy."
     : readiness ? `${outstanding.length} step${outstanding.length === 1 ? "" : "s"} need attention before deployment.`
+    : heldRun ? "The deployment run is held. You can still check readiness and prepare a new build."
     : "Check readiness to see what this environment needs.";
-  const busy = state.loading || !!state.preparationRunId || !!(state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state));
   $("#dep-discover").disabled = busy;
-  $("#dep-discover").textContent = readiness ? "Check again" : "Check readiness";
+  $("#dep-discover").textContent = readiness ? "Check readiness again" : "Check readiness";
   // The button is no longer offered only for the steps psm can run unattended:
   // preparation repairs what it can and asks for the rest, so anything short of
   // ready is something it has a next move on.
-  $("#dep-make-ready").hidden = !readiness || readiness.ready;
+  $("#dep-make-ready").hidden = !showPreparation;
   $("#dep-make-ready").disabled = state.loading || preparing;
-  $("#dep-make-ready").textContent = state.preparation && !preparing && state.preparation.state !== "succeeded" && !preparationSuperseded(state)
+  $("#dep-make-ready").textContent = resumable
     ? "Resume preparation"
     : "Make ready to deploy";
   $("#dep-make-ready").title = preparing
@@ -4906,8 +5037,9 @@ function renderDeploymentReadiness() {
   engineWrap.title = preparing
     ? "Stop preparation to change the AI it uses"
     : "The provider, model, and reasoning effort that fix what psm cannot fix alone";
-  $("#dep-approve").disabled = !deploymentReadyToApprove();
-  $("#dep-approve").textContent = state.plan?.operation === "rollback" ? "Deploy rollback" : "Deploy";
+  $("#dep-approve").disabled = busy;
+  $("#dep-confirm").disabled = !deploymentReadyToApprove();
+  $("#dep-confirm").textContent = state.plan?.operation === "rollback" ? "Confirm & roll back" : "Confirm & deploy";
   $("#dep-error").hidden = !state.error;
   $("#dep-error").textContent = state.error || "";
   // An error that names the next step offers it, even when the readiness it came from was cleared.
@@ -4926,6 +5058,156 @@ function renderDeploymentReadiness() {
   }
 }
 
+/** A deploy-page element, only while it is on screen. */
+function shownDeployControl(selector) {
+  const node = $(selector);
+  return node && !node.hidden && !node.closest("[hidden]") ? node : null;
+}
+
+function deploymentConnectionRow(slot) {
+  return [...document.querySelectorAll("#dep-connection-setup .dep-connection-row")].find((row) => row.dataset.slot === slot) || null;
+}
+
+/** The button that sets up a release controller on the bound GitHub connection, or its connection picker. */
+function deploymentControllerSetupTarget(slot = "github") {
+  const row = deploymentConnectionRow(slot);
+  return row?.querySelector('[data-todo="controller-review"]') || row?.querySelector(".dep-connection-select") || row
+    || $("#dep-connections-section");
+}
+
+/** Everything the operator has to do on this page now, in the order it must happen. */
+function deploymentTodoItems() {
+  const state = WS.managedDeploy;
+  const environment = deploymentEnvironment();
+  if (!environment) return [];
+  const items = [];
+  const named = (node, fallback) => `“${(node?.textContent || fallback).trim()}”`;
+  if (state.error) {
+    items.push({ kind: "read", title: "The last check could not finish", detail: state.error, target: () => shownDeployControl("#dep-error") });
+  }
+
+  const run = state.run;
+  if (run?.state === "recovery-required") {
+    const button = ["#dep-run-recover", "#dep-run-close-reload", "#dep-run-close-observation"].map(shownDeployControl).find(Boolean);
+    items.push({
+      title: `Resolve the held deployment: press ${named(button, "Recheck release outcome")}`,
+      detail: $("#dep-run-reason").textContent || run.recoveryReason || "A submitted change has to be observed before anything else can deploy.",
+      target: () => button, fallback: () => $("#dep-run-reason"),
+    });
+  } else if (run && ["failed", "interrupted", "stale-plan"].includes(run.state)) {
+    const failed = (run.steps || []).find((step) => step.state === "failed")?.result?.data?.detail;
+    const retry = shownDeployControl("#dep-run-retry");
+    items.push(retry
+      ? { title: "The build failed: press “Retry preparation”", detail: typeof failed === "string" ? failed : run.recoveryReason || "", target: () => shownDeployControl("#dep-run-retry") }
+      : { kind: "read", title: `Read why the last ${run.kind === "prepare" ? "build" : "deployment"} stopped`, detail: typeof failed === "string" ? failed : run.recoveryReason || run.state,
+        target: () => $("#dep-events .dep-event[data-level='error']"), fallback: () => $("#dep-run-section") });
+  }
+
+  const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
+  const readinessRows = [...$("#dep-readiness").children];
+  const outstanding = (readiness?.items || []).map((item, index) => ({ item, row: readinessRows[index] })).filter(({ item }) => item.status !== "ready");
+  const controllerUnpinned = ({ item }) => /controller-pin/.test(item.id || "") && /pins no /.test(item.detail || "");
+
+  // A connection action that just failed names its own fix.
+  if (state.connectionIssue) items.push(state.connectionIssue);
+
+  // What the server already knows, before or without a readiness check.
+  for (const blocker of environment.blockers || []) {
+    // A readiness check lists the same problem with its own button; one item per action.
+    if (readiness && blocker.code === "connection-missing") continue;
+    if (blocker.code === "release-controller-unpinned" && outstanding.some(controllerUnpinned)) continue;
+    if (blocker.code === "release-controller-unpinned") {
+      const slot = String(blocker.message || "").match(/^The (\S+) connection/)?.[1] || "github";
+      items.push({ title: `Set up the release controller: press “Review controller setup / update”, or choose a ${slot} connection that has one`, detail: blocker.message, target: () => deploymentControllerSetupTarget(slot) });
+    } else if (blocker.code === "connection-missing") {
+      const slot = String(blocker.id || "").replace(/^connection:/, "");
+      items.push({ title: `Choose a ${slot} connection`, detail: blocker.message, target: () => deploymentConnectionRow(slot)?.querySelector(".dep-connection-select") || deploymentConnectionRow(slot), fallback: () => $("#dep-connections-section") });
+    } else if (blocker.code === "source-dirty") {
+      items.push({ title: "Commit the deployment inputs", detail: blocker.message, action: () => switchPane("changes"), actionLabel: "Open Changes" });
+    } else {
+      items.push({ title: blocker.title || "Resolve this blocker", detail: blocker.message });
+    }
+  }
+
+  // Preparation repairs what it can; a blocker the server already named comes first.
+  const job = preparationSuperseded(state) ? null : state.preparation;
+  if (job) {
+    const approve = shownDeployControl("#dep-prep-approve");
+    const grants = shownDeployControl("#dep-prep-capabilities");
+    if (job.state === "waiting-input") {
+      items.push({ title: "Answer the preparation session's question: press “Open preparation session”", detail: job.message || "", target: () => shownDeployControl("#dep-prep-open"), fallback: () => $("#dep-prep-message") });
+    } else if (approve && !approve.disabled) {
+      items.push({ title: `Review, then press ${named(approve, "Approve")}`, detail: job.message || "", target: () => shownDeployControl("#dep-prep-approve") });
+    } else if (grants) {
+      items.push({ title: "Grant what preparation asked for: press “Open Capabilities”", detail: job.message || "", target: () => shownDeployControl("#dep-prep-capabilities") });
+    } else if (job.state !== "succeeded" && !job.active && shownDeployControl("#dep-make-ready")?.textContent === "Resume preparation") {
+      items.push({ title: "Press “Resume preparation”", detail: job.failure || job.message || "", target: () => shownDeployControl("#dep-make-ready") });
+    } else if (job.state === "blocked") {
+      items.push({ kind: "read", title: $("#dep-prep-title").textContent || "Preparation needs you", detail: job.failure || job.message || "", target: () => $("#dep-prep-failure:not([hidden])") || $("#dep-prep-message") });
+    }
+  }
+
+  const busy = state.loading || !!state.preparationRunId;
+  const expired = readiness && Number(readiness.expiresAt) <= Date.now();
+  const upToDate = deploymentUpToDate(environment);
+  // A fresh answer is only needed to deploy something new.
+  if (!busy && (!readiness || expired) && !upToDate) {
+    items.push({ title: `Press ${named($("#dep-discover"), "Check readiness")}`, detail: expired ? "The last answer expired; deploying needs a fresh one." : "psm has not checked what this environment needs yet.", target: () => $("#dep-discover") });
+  } else if (readiness && !expired) {
+    const makeReady = shownDeployControl("#dep-make-ready");
+    const automatic = outstanding.filter(({ item }) => item.automatic);
+    if (makeReady && automatic.length && !automatic.some(({ row }) => row?.querySelector(".dep-mini-btn"))) {
+      items.push({ title: `Press ${named(makeReady, "Make ready to deploy")}`, detail: `psm can do ${automatic.length === 1 ? "this step" : `these ${automatic.length} steps`} itself: ${automatic.map(({ item }) => item.title).join(", ")}.`, target: () => shownDeployControl("#dep-make-ready") });
+    }
+    for (const entry of outstanding) {
+      const { item, row } = entry;
+      if (item.automatic && makeReady && !row?.querySelector(".dep-mini-btn")) continue;
+      if (controllerUnpinned(entry)) {
+        items.push({ title: "Set up the release controller: press “Review controller setup / update”, or choose a GitHub connection that has one", detail: item.detail, target: () => deploymentControllerSetupTarget(item.slot || "github") });
+        continue;
+      }
+      const button = row?.querySelector(".dep-mini-btn.primary") || row?.querySelector(".dep-mini-btn");
+      items.push(button
+        ? { title: `${item.title}: press ${named(button, "the button")}`, detail: item.detail, target: () => button.isConnected ? button : null, fallback: () => row }
+        : { kind: "read", title: `${item.title}: read what it needs`, detail: item.detail, target: () => row });
+    }
+  }
+
+  // Deploying is the last step: it is not offered while anything above it is still open.
+  if (items.some((item) => item.kind !== "read")) return items;
+  const plan = state.plan;
+  const held = run?.state === "recovery-required";
+  if (readiness?.ready && !expired && !held && !busy && !plan) {
+    items.push({ title: "Press “Review plan”", detail: "Everything is ready. psm will show the exact changes before anything happens.", target: () => $("#dep-approve") });
+  }
+  if (plan && !plan.blocked && Number(plan.expiresAt) > Date.now()) {
+    if ((plan.acknowledgements || []).length && !$("#dep-ack").checked) {
+      items.push({ title: "Read the plan, then tick the acknowledgement", detail: $("#dep-ack-copy").textContent, target: () => $("#dep-ack-wrap") });
+    } else if (!$("#dep-confirm").disabled) {
+      items.push({ title: `Press ${named($("#dep-confirm"), "Confirm & deploy")}`, detail: $("#dep-approval-note").textContent, target: () => $("#dep-confirm") });
+    }
+  }
+  return items;
+}
+
+/** Rebuilt once after any deploy-page render, so it reads what that render left on screen. */
+function scheduleDeploymentTodo() {
+  if (WS.managedDeploy.todoQueued) return;
+  WS.managedDeploy.todoQueued = true;
+  queueMicrotask(() => {
+    WS.managedDeploy.todoQueued = false;
+    const run = WS.managedDeploy.run;
+    const running = run && !DEPLOYMENT_TERMINAL_STATES.has(run.state) && run.state !== "recovery-required";
+    const environment = deploymentEnvironment();
+    const live = environment?.activeRelease;
+    renderTodoList($("#dep-todo-list"), $("#dep-todo-count"), deploymentTodoItems(),
+      running ? "Nothing needs you right now. The deployment is running."
+        : deploymentUpToDate(environment) ? `Nothing needs you right now. ${environment.hostname || environment.id} runs ${live.version || "the active release"} (${String(live.commit).slice(0, 10)}), the latest committed source.`
+        : WS.managedDeploy.loading ? "Checking what this environment needs…"
+        : "Nothing needs you right now.");
+  });
+}
+
 function loadDeploymentConnectionSetup() {
   const scope = deploymentRequestScope({ environment: true });
   const environment = deploymentEnvironment();
@@ -4933,8 +5215,14 @@ function loadDeploymentConnectionSetup() {
   window.PsmDeploymentConnections.render($("#dep-connection-setup"), {
     projectKey: scope.projectKey, environment, api: agentApi,
     isCurrent: () => deploymentRequestIsCurrent(scope),
+    onIssue: (issue) => {
+      if (!deploymentRequestIsCurrent(scope)) return;
+      WS.managedDeploy.connectionIssue = issue;
+      scheduleDeploymentTodo();
+    },
     onChanged: async () => {
       if (!deploymentRequestIsCurrent(scope)) return;
+      WS.managedDeploy.connectionIssue = null;
       invalidateDeploymentReadiness();
       await loadManagedDeploy({ quiet: true });
       if (deploymentRequestIsCurrent(scope)) await checkDeploymentReadiness();
@@ -4963,10 +5251,17 @@ function usableDeploymentArtifacts() {
 }
 
 function selectDeploymentArtifact(environment) {
-  const artifacts = usableDeploymentArtifacts();
+  const artifacts = usableDeploymentArtifacts().filter((artifact) =>
+    artifact.commitSha === environment?.source?.commit
+    && environment?.units?.some((unit) => unit.sourceRepository === artifact.sourceRepository
+      && unit.buildProfileDigest === artifact.buildProfileDigest)
+  );
   if (!artifacts.some((artifact) => artifact.artifactId === WS.managedDeploy.artifactId)) {
-    const exactSource = artifacts.find((artifact) => artifact.commitSha === environment?.source?.commit);
-    WS.managedDeploy.artifactId = (exactSource || artifacts[0])?.artifactId || null;
+    const next = artifacts[0]?.artifactId || null;
+    if (WS.managedDeploy.artifactId !== next) {
+      WS.managedDeploy.artifactId = next;
+      invalidateDeploymentReadiness();
+    }
   }
   return artifacts;
 }
@@ -4978,7 +5273,7 @@ function renderDeploymentArtifacts(environment) {
   if (!artifacts.length) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = "No prepared artifacts";
+    option.textContent = `No build for ${environment?.source?.version || "current source"} · ${environment?.source?.commit?.slice(0, 10) || "uncommitted"} — Prepare build`;
     select.append(option);
   } else {
     for (const artifact of artifacts) {
@@ -5108,15 +5403,16 @@ function renderPlanActions(target, plan) {
 }
 
 function renderDeploymentPlan(plan) {
+  scheduleDeploymentTodo();
   const changed = WS.managedDeploy.plan?.digest !== plan?.digest;
   WS.managedDeploy.plan = plan || null;
   WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
   const section = $("#dep-plan-section");
   section.hidden = !plan;
-  if (!plan) { $("#dep-approve").disabled = true; return; }
+  if (!plan) { $("#dep-confirm").disabled = true; return; }
   $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
   $("#dep-plan-meta").textContent = plan.expiresAt
-    ? `Exact plan · expires ${new Date(plan.expiresAt).toLocaleTimeString()}`
+    ? `Exact plan · expires ${EVENT_TIME_FORMAT.format(new Date(plan.expiresAt))}`
     : "Exact plan ready for review";
   renderPlanActions($("#dep-plan"), plan);
   const acknowledgements = plan.acknowledgements || [];
@@ -5124,54 +5420,289 @@ function renderDeploymentPlan(plan) {
   $("#dep-ack-copy").textContent = acknowledgements.map((item) => item.label || item.message || item.id).join(" ") || "I reviewed this exact plan.";
   if (changed) $("#dep-ack").checked = false;
   $("#dep-approval-note").textContent = plan.blocked
-    ? `${(plan.blockers || []).length || 1} blocker${(plan.blockers || []).length === 1 ? "" : "s"} must be resolved`
+    ? (plan.blockers || []).map((item) => item.message).filter(Boolean).join(" · ") || "Resolve the readiness blockers before deploying"
+    : Number(plan.expiresAt) <= Date.now() ? "This plan expired. Check again to review a new exact plan"
     : plan.risk === "production" ? "Production requires the signed-in local operator" : "Approval is bound to this digest";
-  $("#dep-approve").disabled = !deploymentReadyToApprove();
+  $("#dep-confirm").disabled = !deploymentReadyToApprove();
+}
+
+function focusDeploymentPlan() {
+  const section = $("#dep-plan-section");
+  if (!section.hidden) section.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function reviewDeploymentPlan() {
+  const state = WS.managedDeploy;
+  const plan = state.plan;
+  if (!plan || Number(plan.expiresAt) <= Date.now()
+    || !state.readiness || Number(state.readiness.expiresAt) <= Date.now()) {
+    await checkDeploymentReadiness();
+  }
+  focusDeploymentPlan();
 }
 
 const DEPLOY_PHASES = ["queued", "locks", "preflight", "reconcile", "dispatch", "executor", "verify"];
 
+function deploymentWorkflowUrl(run) {
+  for (const event of [...(run.events || [])].reverse()) {
+    const receipt = event.data?.receipt;
+    // Use only GitHub repository/run identities, never a URL from log text.
+    if (typeof receipt?.repository === "string"
+      && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(receipt.repository)
+      && /^\d+$/.test(String(receipt.providerRunId || ""))) {
+      return `https://github.com/${receipt.repository}/actions/runs/${receipt.providerRunId}`;
+    }
+  }
+  return null;
+}
+
 function renderDeploymentRun(run) {
+  scheduleDeploymentTodo();
   WS.managedDeploy.run = run || null;
   const section = $("#dep-run-section");
   section.hidden = !run;
   if (!run) return;
   $("#dep-run-title").textContent = run.kind === "prepare" ? "Artifact preparation" : "Deployment run";
+  $("#dep-run-title").title = run.id || "";
+  $("#dep-run-id").textContent = run.id || "";
   $("#dep-run-state").textContent = run.state || "queued";
-  const current = String(run.phase || run.state || "queued");
-  const aliases = { "acquiring-locks": "locks", "checking-preconditions": "preflight", reconciling: "reconcile", dispatching: "dispatch", "waiting-executor": "executor", "observing-result": "executor", verifying: "verify", succeeded: "verify", "rolled-back": "verify" };
-  const currentPhase = aliases[current] || current;
-  const currentIndex = DEPLOY_PHASES.indexOf(currentPhase);
+  const recoveryReason = $("#dep-run-reason");
+  recoveryReason.hidden = !run.recoveryReason;
+  const heldStep = run.state === "recovery-required" ? (run.steps || []).find((step) => step.state === "recovery-required") : null;
+  const heldDetail = heldStep?.result?.data?.detail;
+  const missingDispatchReceipt = heldStep?.result?.data?.reason === "dispatch-receipt-unavailable";
+  recoveryReason.textContent = missingDispatchReceipt
+    ? `${run.recoveryReason || "Provider outcome is unknown"}. The release dispatch receipt is missing. Recheck release outcome will search GitHub and observe the target; it will close the run only when the outcome is established. You can prepare a new build while this deployment remains held.`
+    : [run.recoveryReason, typeof heldDetail === "string" ? heldDetail : null].filter(Boolean).join(" · ");
+  const progress = $("#dep-run-progress");
+  const active = !DEPLOYMENT_TERMINAL_STATES.has(run.state) && run.state !== "recovery-required";
+  const pendingAction = WS.managedDeploy.runAction?.runId === run.id ? WS.managedDeploy.runAction.label : null;
+  progress.hidden = !active && !pendingAction;
+  progress.replaceChildren();
+  if (active || pendingAction) {
+    progress.append(depText("span", "spinner", ""));
+    const latest = run.events?.at(-1);
+    const activity = latest?.data?.actionId ? `${latest.message} · ${latest.data.actionId}` : latest?.message || "Waiting for the first update";
+    progress.append(depText("span", "", pendingAction || `${activity} · checking for updates…`));
+  }
+  const workflowUrl = deploymentWorkflowUrl(run);
+  const githubLink = $("#dep-run-github");
+  githubLink.hidden = !workflowUrl;
+  if (workflowUrl) githubLink.href = workflowUrl;
+  else githubLink.removeAttribute("href");
+  const retry = $("#dep-run-retry");
+  retry.hidden = run.kind !== "prepare" || !["failed", "cancelled", "interrupted"].includes(run.state);
+  retry.disabled = WS.managedDeploy.loading || !!WS.managedDeploy.preparation?.active;
+  retry.onclick = () => { retry.disabled = true; void checkDeploymentReadiness(true); };
+  const uncertainReload = run.state === "recovery-required"
+    && (run.steps || []).filter((step) => ["submitted", "observed", "recovery-required"].includes(step.state)).length === 1
+    && (run.steps || []).some((step) => step.adapterKind === "reload-nginx@1" && ["submitted", "observed", "recovery-required"].includes(step.state));
+  $("#dep-run-close-reload").hidden = !uncertainReload;
+  const failedReadOnlyObservation = run.state === "recovery-required"
+    && String(run.recoveryReason || "").startsWith("post-mutation observation ")
+    && (run.steps || []).some((step) => step.state === "completed")
+    && !(run.steps || []).some((step) => ["submitted", "observed", "recovery-required"].includes(step.state));
+  $("#dep-run-close-observation").hidden = !failedReadOnlyObservation;
+  $("#dep-run-recover").hidden = run.state !== "recovery-required" || uncertainReload || failedReadOnlyObservation;
+  $("#dep-run-recover").textContent = "Recheck release outcome";
+  $("#dep-run-recover").title = missingDispatchReceipt
+    ? "Search the controller workflow and observe the target without dispatching another release"
+    : "Observe the submitted release again; nothing is re-submitted";
+  renderActivityTimes($("#dep-run-times"), [
+    ["Created", run.createdAt], ["Started", run.startedAt],
+    [run.finishedAt ? "Finished" : "Updated", run.finishedAt || run.updatedAt],
+  ]);
+  // Each phase's state comes from what the run actually recorded: a finished run's
+  // phase is "complete", which is not on the strip, so it cannot say how far it got.
+  const aliases = { "acquiring-locks": "locks", "checking-preconditions": "preflight", dependencies: "preflight", reconciling: "reconcile", dispatching: "dispatch", release: "executor", "waiting-executor": "executor", "observing-result": "executor", "importing-artifact": "verify", verifying: "verify", watch: "verify" };
+  const phaseIndex = (name) => DEPLOY_PHASES.indexOf(aliases[name] || name);
+  const reached = Math.max(0, phaseIndex(String(run.phase || "")), ...(run.events || []).map((event) => phaseIndex(String(event.phase || ""))));
+  const stopped = ["failed", "cancelled", "interrupted", "stale-plan"].includes(run.state) ? "failed"
+    : run.state === "recovery-required" ? "held" : null;
   const phases = $("#dep-phases");
   phases.replaceChildren();
   DEPLOY_PHASES.forEach((phase, index) => {
     const item = depText("div", "dep-phase", "");
-    item.dataset.state = index < currentIndex || ["succeeded", "rolled-back"].includes(run.state) ? "done" : index === currentIndex ? "active" : "pending";
+    item.dataset.state = ["succeeded", "rolled-back"].includes(run.state) || index < reached ? "done"
+      : index === reached ? stopped || "active" : "pending";
+    item.title = { done: "Passed", active: "In progress", failed: "Stopped here", held: "Waiting for recovery here", pending: "Not reached" }[item.dataset.state];
     item.append(depText("span", "dep-phase-dot", ""), depText("span", "dep-phase-copy", phase));
     phases.append(item);
     if (index < DEPLOY_PHASES.length - 1) phases.append(depText("span", "dep-phase-line", ""));
   });
   const events = $("#dep-events");
-  events.replaceChildren();
+  // Newest first, so the latest update is visible without scrolling.
+  const lines = [];
   for (const event of run.events || []) {
     const line = depText("div", "dep-event", "");
     line.dataset.level = event.level || "info";
     line.append(
-      depText("span", "dep-event-time", new Date(event.at).toLocaleTimeString()),
+      eventTimeNode(event.at, "dep-event-time"),
       depText("span", "dep-event-phase", event.phase || "run"),
       depText("span", "dep-event-message", event.message || event.type || "event"),
     );
-    events.append(line);
+    lines.push({ at: event.at, line });
   }
+  for (const step of run.steps || []) {
+    if (step.state !== "failed") continue;
+    const detail = step.result?.data?.detail;
+    const line = depText("div", "dep-event", "");
+    line.dataset.level = "error";
+    line.append(
+      eventTimeNode(step.observedAt || step.updatedAt, "dep-event-time"),
+      depText("span", "dep-event-phase", "action"),
+      depText("span", "dep-event-message", `${step.stepId}: ${typeof detail === "string" ? detail : "Failed; copy the full run log for details"}`),
+    );
+    lines.push({ at: step.observedAt || step.updatedAt, line });
+  }
+  events.replaceChildren(...lines.map((entry, index) => ({ ...entry, index }))
+    .sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0) || b.index - a.index)
+    .map((entry) => entry.line));
   if (!(run.events || []).length) events.append(depText("div", "dep-empty", "Waiting for the first durable event…"));
-  $("#dep-cancel").disabled = ["succeeded", "failed", "cancelled", "interrupted", "stale-plan", "rolled-back"].includes(run.state);
+  $("#dep-cancel").disabled = ["succeeded", "failed", "cancelled", "interrupted", "stale-plan", "rolled-back", "recovery-required"].includes(run.state)
+    || WS.managedDeploy.runAction?.label === "Requesting cancellation…";
+}
+
+function deploymentRunLog(run, { full = false } = {}) {
+  const at = (value) => typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : "—";
+  const events = run.events || [];
+  const steps = run.steps || [];
+  const selectedEvents = full || events.length <= 24 ? events : events.slice(-24);
+  const lines = [
+    `PSM ${run.kind === "prepare" ? "artifact preparation" : "deployment"} run ${run.id}`,
+    `State: ${run.state || "unknown"} | Phase: ${run.phase || "unknown"}`,
+    ...(run.recoveryReason ? [`Recovery reason: ${run.recoveryReason}`] : []),
+    `Created: ${at(run.createdAt)} | Started: ${at(run.startedAt)} | Finished: ${at(run.finishedAt)}`,
+    ...(full ? [] : [`Events: ${events.length} total | Steps: ${steps.length} total`,
+      ...(selectedEvents.length < events.length ? [`Showing the last ${selectedEvents.length} events; ${events.length - selectedEvents.length} earlier events omitted.`] : [])]),
+    "", "Events:",
+  ];
+  for (const event of selectedEvents) {
+    lines.push(`[${at(event.at)}] [${event.phase || "run"}] [${event.level || "info"}] ${event.message || event.type || "event"}`);
+    if (event.data != null && (full || ["error", "warning"].includes(event.level))) lines.push(`  data: ${JSON.stringify(event.data)}`);
+  }
+  if (!events.length) lines.push("(none)");
+  lines.push("", "Steps:");
+  const selectedSteps = full ? steps : steps.filter((step) => ["failed", "recovery-required", "submitted", "observed"].includes(step.state));
+  if (!full && selectedSteps.length < steps.length) lines.push(`${steps.length - selectedSteps.length} completed or cancelled steps omitted.`);
+  for (const step of selectedSteps) {
+    lines.push(`${step.ordinal}. ${step.stepId} | ${step.state} | ${step.adapterKind}`);
+    lines.push(`  submitted: ${at(step.submittedAt)} | observed: ${at(step.observedAt)} | completed: ${at(step.completedAt)}`);
+    if (step.result != null) {
+      if (full) lines.push(`  result: ${JSON.stringify(step.result)}`);
+      else {
+        const data = step.result.data || {};
+        lines.push(`  outcome: ${step.result.outcome || "unknown"}${data.reason ? ` | reason: ${data.reason}` : ""}`);
+        if (data.detail) lines.push(`  detail: ${data.detail}`);
+        if (data.receipt?.providerRunId && data.receipt?.repository) lines.push(`  GitHub run: https://github.com/${data.receipt.repository}/actions/runs/${data.receipt.providerRunId}`);
+      }
+    }
+  }
+  if (!selectedSteps.length) lines.push("(none requiring attention)");
+  return lines.join("\n");
+}
+
+function beginDeploymentRunAction(runId, label) {
+  const action = { runId, label };
+  WS.managedDeploy.runAction = action;
+  if (WS.managedDeploy.run?.id === runId) renderDeploymentRun(WS.managedDeploy.run);
+  return () => {
+    if (WS.managedDeploy.runAction !== action) return;
+    WS.managedDeploy.runAction = null;
+    if (WS.managedDeploy.run?.id === runId) renderDeploymentRun(WS.managedDeploy.run);
+  };
+}
+
+async function copyDeploymentRunLog(full = false) {
+  const runId = WS.managedDeploy.run?.id;
+  if (!runId) return;
+  const button = $(full ? "#dep-run-copy-full" : "#dep-run-copy");
+  button.disabled = true;
+  const endAction = beginDeploymentRunAction(runId, full ? "Loading the complete run log…" : "Preparing run diagnostics…");
+  try {
+    const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(runId)}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || body.run?.id !== runId) throw new Error(body.error || "Could not load the complete run log");
+    if (WS.managedDeploy.run?.id !== runId) return;
+    if (!await copyText(deploymentRunLog(body.run, { full }))) throw new Error("The browser refused clipboard access");
+    toast(full ? `Copied full run log (${body.run.events?.length || 0} events, ${body.run.steps?.length || 0} steps)` : "Copied recent events and steps requiring attention");
+  } catch (error) {
+    toast(error.message || "Could not copy the run log");
+  } finally {
+    button.disabled = false;
+    endAction();
+  }
+}
+
+async function closeUncertainDeploymentReload() {
+  const runId = WS.managedDeploy.run?.id;
+  if (!runId) return;
+  const button = $("#dep-run-close-reload");
+  button.disabled = true;
+  const endAction = beginDeploymentRunAction(runId, "Closing the paused reload…");
+  try {
+    const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(runId)}/close-uncertain-reload`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not close the paused run");
+    renderDeploymentRun(body.run);
+    await loadManagedDeploy({ quiet: true });
+    toast("Paused run closed. Check readiness and review a fresh plan after repairing the host helper.");
+  } catch (error) {
+    toast(error.message || "Could not close the paused run");
+  } finally {
+    button.disabled = false;
+    endAction();
+  }
+}
+
+async function recoverDeploymentRun() {
+  const runId = WS.managedDeploy.run?.id;
+  if (!runId) return;
+  const button = $("#dep-run-recover");
+  button.disabled = true;
+  const endAction = beginDeploymentRunAction(runId, "Checking the provider and target…");
+  try {
+    const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(runId)}/recover`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not check the run again");
+    renderDeploymentRun(body.run);
+    toast("Checking the provider again…");
+  } catch (error) {
+    toast(error.message || "Could not check the run again");
+  } finally {
+    button.disabled = false;
+    endAction();
+  }
+}
+
+async function closeFailedDeploymentObservation() {
+  const runId = WS.managedDeploy.run?.id;
+  if (!runId) return;
+  const button = $("#dep-run-close-observation");
+  button.disabled = true;
+  const endAction = beginDeploymentRunAction(runId, "Closing the paused observation…");
+  try {
+    const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(runId)}/close-failed-read-only-observation`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not close the paused run");
+    renderDeploymentRun(body.run);
+    await loadManagedDeploy({ quiet: true });
+    toast("Paused run closed. Check readiness and review a fresh plan.");
+  } catch (error) {
+    toast(error.message || "Could not close the paused run");
+  } finally {
+    button.disabled = false;
+    endAction();
+  }
 }
 
 function renderManagedDeploy() {
+  scheduleDeploymentTodo();
   const data = WS.managedDeploy.data;
   const environment = deploymentEnvironment();
   if (!data?.managed || !environment) return;
   $("#ws-deploy-managed").hidden = false;
+  $("#ws-deploy-setup").hidden = true;
   $("#ws-deploy-legacy").hidden = true;
   $("#dep-managed-title").textContent = `${data.project?.name || WS.name} · ${environment.id}`;
   $("#dep-managed-subtitle").textContent = environment.hostname || environment.target?.hostname || "Managed desired state";
@@ -5232,18 +5763,23 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       agentApi(projectBase),
       agentApi(`${projectBase.slice(0, -"/deployments".length)}/deployment-artifacts`),
     ]);
-    if (!response.ok) throw new Error("managed deployment is unavailable");
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw Object.assign(new Error("managed deployment is unavailable"), { code: failure.code });
+    }
     const data = await response.json();
     if (!data.managed) throw new Error("no managed manifest");
     const artifactBody = artifactsResponse.ok ? await artifactsResponse.json().catch(() => ({})) : {};
     if (!deploymentRequestIsCurrent(scope)) return;
     const previousEnvironment = state.environment;
+    const previousSource = deploymentEnvironment()?.source;
     state.data = data;
     state.artifacts = Array.isArray(artifactBody.artifacts) ? artifactBody.artifacts : state.artifacts;
     if (!state.environment || !data.environments.some((item) => item.id === state.environment)) {
       state.environment = data.environments.find((item) => item.id === "staging")?.id || data.environments[0]?.id || null;
     }
     const environment = deploymentEnvironment();
+    if (previousSource?.commit !== environment?.source?.commit || previousSource?.inputsDirty !== environment?.source?.inputsDirty) invalidateDeploymentReadiness(state);
     selectDeploymentArtifact(environment);
     if (!hadData || previousEnvironment !== state.environment) {
       state.plan = environment?.latestPlan || null;
@@ -5274,14 +5810,143 @@ async function loadManagedDeploy({ quiet = false } = {}) {
     scheduleDeploymentPreparationPoll(0);
     const run = state.run;
     if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
-  } catch {
+  } catch (error) {
     if (!deploymentRequestIsCurrent(scope)) return;
     state.loading = false;
     $("#ws-deploy-managed").hidden = true;
+    // No manifest yet, or no PSM id yet: offer the managed setup first.
+    const settingUp = error?.code === "manifest-missing" || error?.code === "project-not-found";
+    $("#ws-deploy-setup").hidden = !settingUp;
+    if (settingUp) void renderDeploymentSetup(scope);
     $("#ws-deploy-legacy").hidden = false;
     renderDeployControls();
     connectDeployLogs();
   }
+}
+
+function offerProjectId(subtitle, body) {
+  subtitle.textContent = "Managed deployment keeps its plans and releases under the project's stable id, and this project has none yet.";
+  const assign = depText("button", "btn btn-primary", "Give this project a PSM id");
+  assign.type = "button";
+  assign.title = "Writes .psm/identity.json in the project; nothing else changes";
+  assign.onclick = async () => {
+    assign.disabled = true;
+    try {
+      const id = await assignProjectId(projectByName(WS.name) || { name: WS.name });
+      WS.id = id;
+      toast(`Assigned ${id}`);
+      openDeployPane();
+    } catch (error) {
+      assign.disabled = false;
+      toast(error.message);
+    }
+  };
+  body.append(assign);
+}
+
+/**
+ * A project with no deployment manifest: show what PSM detected and, when the
+ * static recipe fits, draft the manifest and its build files from a hostname.
+ */
+async function renderDeploymentSetup(scope) {
+  const body = $("#dep-setup-body");
+  const subtitle = $("#dep-setup-subtitle");
+  body.replaceChildren();
+  subtitle.textContent = "Reading this project…";
+  const base = deploymentBase(scope.projectKey).slice(0, -"/deployments".length);
+  let setup;
+  try {
+    const response = await agentApi(`${base}/deployment-setup`);
+    const payload = await response.json().catch(() => ({}));
+    // Managed deployment is keyed by the project's stable id; a folder without one gets it first.
+    if (payload.code === "project-not-found") {
+      if (deploymentRequestIsCurrent(scope)) offerProjectId(subtitle, body);
+      return;
+    }
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    setup = payload.setup;
+  } catch (error) {
+    if (deploymentRequestIsCurrent(scope)) subtitle.textContent = `Could not read this project: ${error.message}`;
+    return;
+  }
+  if (!deploymentRequestIsCurrent(scope)) return;
+  subtitle.textContent = setup.recipe
+    ? "PSM can build this project on GitHub Actions and serve it through nginx on your server, with plans, readiness checks, verification and rollback."
+    : "This project cannot use managed deployment yet. The command deploy below still works.";
+  const facts = depText("dl", "dep-setup-facts", "");
+  for (const [label, value] of [
+    ["Repository", setup.repository || "no GitHub origin"],
+    ["Branch", setup.branch || "detached"],
+    ["Version", setup.version || "none"],
+    ["App", setup.app ? `${setup.app.dir || "repository root"} → ${setup.app.output}` : "no Vite app found"],
+    ["Server", setup.server ? `${setup.server.framework} in ${setup.server.dir}` : "none"],
+  ]) facts.append(depText("dt", "", label), depText("dd", "", value));
+  body.append(facts);
+  if (!setup.recipe) {
+    const list = depText("ul", "dep-setup-blockers", "");
+    for (const blocker of setup.blockers) list.append(depText("li", "", blocker));
+    body.append(list);
+    const plan = depText("button", "btn btn-primary", "Plan deployment support with AI");
+    plan.type = "button";
+    plan.onclick = () => {
+      switchPane("ai");
+      $("#ws-msg").value = `Review managed deployment support for ${WS.name}. PSM detected ${setup.server ? `${setup.server.framework} in ${setup.server.dir}` : "an unsupported project structure"}, and its current static recipe cannot deploy this project safely. Inspect the project, its API and current deployment, then propose a concrete managed build, release, health-check and rollback plan. Do not deploy or change the live target. Explain which PSM recipe work is required before this project can use the managed Deploy page.`;
+      stashDraft();
+      $("#ws-msg").focus();
+      toast("Loaded a managed deployment planning prompt — review and Send");
+    };
+    body.append(plan);
+    return;
+  }
+  const form = document.createElement("form");
+  form.className = "dep-setup-form";
+  const field = (label, value, help) => {
+    const wrap = depText("label", "dep-setup-field", "");
+    const input = document.createElement("input");
+    input.value = value;
+    input.required = true;
+    input.spellcheck = false;
+    wrap.append(depText("span", "", label), input, depText("small", "dep-connection-help", help));
+    form.append(wrap);
+    return input;
+  };
+  const hostname = field("Hostname", setup.suggested.hostname, "Where the site will be served. PSM creates its DNS record, nginx site and certificate.");
+  const zone = field("DNS zone", setup.suggested.zone, "The domain whose DNS PSM manages; the hostname must be inside it.");
+  const environment = document.createElement("select");
+  for (const value of ["staging", "production"]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    environment.append(option);
+  }
+  const envWrap = depText("label", "dep-setup-field", "");
+  envWrap.append(depText("span", "", "Environment"), environment, depText("small", "dep-connection-help", "Start with staging; add production once staging deploys cleanly."));
+  form.append(envWrap);
+  const submit = depText("button", "btn btn-primary", "Create deployment setup");
+  submit.type = "submit";
+  const status = depText("p", "dep-connection-help", "Writes .psm/deployments.json, a GitHub build workflow and its prepare script into this project. Nothing is committed or pushed; readiness then walks you through connections, the server and publishing.");
+  form.append(submit, status);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    submit.textContent = "Writing…";
+    try {
+      const response = await agentApi(`${base}/deployment-setup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname: hostname.value, zone: zone.value, environment: environment.value }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      toast(`Wrote ${payload.files.join(", ")}${payload.skipped.length ? `; kept your ${payload.skipped.join(", ")}` : ""}`);
+      openDeployPane();
+    } catch (error) {
+      submit.disabled = false;
+      submit.textContent = "Create deployment setup";
+      status.textContent = `Setup failed: ${error.message}`;
+    }
+  };
+  body.append(form);
 }
 
 function scheduleDeploymentPoll() {
@@ -5313,6 +5978,7 @@ function scheduleDeploymentPoll() {
 
 function openDeployPane() {
   $("#ws-deploy-managed").hidden = true;
+  $("#ws-deploy-setup").hidden = true;
   $("#ws-deploy-legacy").hidden = true;
   loadManagedDeploy();
 }
@@ -5442,6 +6108,15 @@ async function checkDeploymentReadiness(makeReady = false) {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || "Could not check deployment readiness");
     if (!deploymentRequestIsCurrent(scope)) return;
+    // A preparation poll can discover a new artifact while this page still has
+    // the pre-build list. Refresh before rendering, or selection discards it.
+    if (body.readiness?.artifactId && !state.artifacts.some((item) => item.artifactId === body.readiness.artifactId)) {
+      const artifactsResponse = await agentApi(`${deploymentBase(scope.projectKey).slice(0, -"/deployments".length)}/deployment-artifacts`);
+      if (!artifactsResponse.ok) throw new Error("The build finished, but its artifact list could not be refreshed. Check again.");
+      const artifactsBody = await artifactsResponse.json();
+      if (!deploymentRequestIsCurrent(scope)) return;
+      state.artifacts = Array.isArray(artifactsBody.artifacts) ? artifactsBody.artifacts : [];
+    }
     state.readiness = body.readiness;
     state.readinessEnvironment = scope.environmentId;
     state.artifactId = body.readiness?.artifactId || null;
@@ -5645,22 +6320,39 @@ async function approvePreparationPublication() {
  * time is kept apart from the readiness itself, which is cleared while a new
  * check runs, so the old banner does not come back during it.
  */
+/** The environment already runs the committed source: there is nothing new to deploy. */
+function deploymentUpToDate(environment = deploymentEnvironment()) {
+  const active = environment?.activeRelease?.commit || "";
+  const source = environment?.source || {};
+  const commit = source.commit || "";
+  return active.length >= 7 && commit.length >= 7 && (active.startsWith(commit) || commit.startsWith(active))
+    && source.committed !== false && !source.inputsDirty;
+}
+
 function preparationSuperseded(state) {
   const readiness = state.readinessEnvironment === state.environment ? state.readiness : null;
   state.lastCheckedAt ||= {};
   if (readiness) state.lastCheckedAt[state.environment] = Math.max(state.lastCheckedAt[state.environment] || 0, Number(readiness.checkedAt) || 0);
   const job = state.preparation;
-  return !!job && !job.active && job.state === "blocked" && job.blockedBy === "external"
+  if (!job || job.active) return false;
+  // A release that went live after this preparation began, and is the committed
+  // source, finished what the preparation was for.
+  const environment = deploymentEnvironment();
+  if (job.state !== "succeeded" && deploymentUpToDate(environment)
+    && Number(environment.activeRelease?.activatedAt) > Number(job.createdAt)) return true;
+  return job.state === "blocked" && job.blockedBy === "external"
     && (state.lastCheckedAt[state.environment] || 0) > Number(job.updatedAt);
 }
 
 function renderDeploymentPreparation() {
+  scheduleDeploymentTodo();
   const state = WS.managedDeploy;
   const job = preparationSuperseded(state) ? null : state.preparation;
   const section = $("#dep-preparation");
   section.hidden = !job;
   if (!job) return;
   section.dataset.state = job.state;
+  renderActivityTimes($("#dep-prep-times"), [["Started", job.createdAt], ["Updated", job.updatedAt]]);
   const waitingForGrants = job.state === "blocked" && job.blockedBy === "capabilities";
   const waitingForCheckout = job.state === "blocked" && job.blockedBy === "checkout";
   $("#dep-prep-title").textContent = job.state === "succeeded" ? "This deployment is ready"
@@ -5795,11 +6487,14 @@ async function approveDeploymentPlan() {
   if (acknowledgements.length && !$("#dep-ack").checked) return toast("Review and acknowledge the production plan first");
   state.loading = true;
   state.error = null;
+  let started = false;
   renderDeploymentReadiness();
+  $("#dep-approval-note").textContent = "Submitting the approved deployment plan…";
   try {
     const body = await submitPlanApproval(plan, acknowledgements.map((item) => item.id));
     if (!deploymentRequestIsCurrent(scope)) return;
     renderDeploymentRun(body.run);
+    started = true;
     scheduleDeploymentPoll();
   } catch (error) {
     if (deploymentRequestIsCurrent(scope)) {
@@ -5811,6 +6506,7 @@ async function approveDeploymentPlan() {
     if (deploymentRequestIsCurrent({ state, projectKey: scope.projectKey, environmentId: scope.environmentId })) {
       state.loading = false;
       renderManagedDeploy();
+      if (started) $("#dep-run-section").scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
 }
@@ -5818,10 +6514,20 @@ async function approveDeploymentPlan() {
 async function cancelDeploymentRun() {
   const run = WS.managedDeploy.run;
   if (!run) return;
-  const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST" });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) return toast(body.error || "Cancellation request failed");
-  renderDeploymentRun(body.run);
+  const button = $("#dep-cancel");
+  button.disabled = true;
+  const endAction = beginDeploymentRunAction(run.id, "Requesting cancellation…");
+  try {
+    const response = await agentApi(`/api/deployment-runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Cancellation request failed");
+    if (WS.managedDeploy.run?.id === run.id) renderDeploymentRun(body.run);
+  } catch (error) {
+    toast(error.message || "Cancellation request failed");
+  } finally {
+    endAction();
+    if (WS.managedDeploy.run?.id === run.id) renderDeploymentRun(WS.managedDeploy.run);
+  }
 }
 
 async function deployRun() {
@@ -6081,7 +6787,7 @@ $("#dep-releases").onclick = (e) => {
   if (button) discoverDeploymentPlan("rollback", button.dataset.rollbackRelease);
 };
 $("#dep-prepare").onclick = prepareDeploymentArtifact;
-$("#dep-discover").onclick = () => discoverDeploymentPlan();
+$("#dep-discover").onclick = async () => { await discoverDeploymentPlan(); focusDeploymentPlan(); };
 $("#dep-make-ready").onclick = () => checkDeploymentReadiness(true);
 $("#dep-artifact").onchange = (event) => {
   WS.managedDeploy.artifactId = event.target.value || null;
@@ -6114,7 +6820,13 @@ $("#dep-prep-open").onclick = () => {
   const roomId = WS.managedDeploy.preparation?.workroomId;
   if (roomId) openWorkroom(roomId, false, "ai");
 };
-$("#dep-approve").onclick = approveDeploymentPlan;
+$("#dep-approve").onclick = reviewDeploymentPlan;
+$("#dep-confirm").onclick = approveDeploymentPlan;
+$("#dep-run-copy").onclick = () => copyDeploymentRunLog();
+$("#dep-run-copy-full").onclick = () => copyDeploymentRunLog(true);
+$("#dep-run-close-reload").onclick = closeUncertainDeploymentReload;
+$("#dep-run-close-observation").onclick = closeFailedDeploymentObservation;
+$("#dep-run-recover").onclick = recoverDeploymentRun;
 $("#dep-cancel").onclick = cancelDeploymentRun;
 $("#dep-ack").onchange = () => {
   renderDeploymentReadiness();
@@ -6126,6 +6838,82 @@ $("#ws-dep-download").onclick = () => downloadLog(depKind());
 
 /* ---------- actions ---------- */
 let toastTimer;
+/**
+ * Scroll to the exact control or sentence a to-do item names and make it stand
+ * out for a moment. `target` may be a function, so content rendered after the
+ * list (connection setup loads on its own) still resolves when it is clicked.
+ */
+function showMe(target) {
+  const node = typeof target === "function" ? target() : target;
+  if (!node || !node.isConnected) return false;
+  const details = node.closest("details");
+  if (details) details.open = true;
+  node.scrollIntoView({ behavior: "smooth", block: "center" });
+  node.classList.remove("attention");
+  void node.offsetWidth; // restart the animation when the same item is clicked twice
+  node.classList.add("attention");
+  clearTimeout(node.attentionTimer);
+  node.attentionTimer = setTimeout(() => node.classList.remove("attention"), 2600);
+  if (node.matches("button, a[href], input, select, textarea") && !node.disabled) node.focus({ preventScroll: true });
+  return true;
+}
+
+/**
+ * The pinned "To do" list a page opens with (house rule: what to do comes first).
+ * Each item: { title, detail?, kind?: "do" | "read", target?, fallback?, action?, actionLabel?, link? }.
+ * `link` ({ href, label }) is the direct page on another site, for work psm cannot do itself.
+ */
+function renderTodoList(list, count, items, emptyCopy) {
+  list.replaceChildren();
+  const actions = items.filter((item) => item.kind !== "read").length;
+  count.textContent = actions ? `${actions} to do` : items.length ? "Read first" : "All clear";
+  if (!items.length) {
+    const empty = el("li", "todo-empty");
+    empty.textContent = emptyCopy;
+    list.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = el("li", "todo-item");
+    row.dataset.kind = item.kind || "do";
+    const copy = el("div");
+    const title = el("div", "todo-title");
+    title.textContent = item.title;
+    copy.append(title);
+    if (item.detail) {
+      const detail = el("div", "todo-detail");
+      if (window.PsmExternalLinks) window.PsmExternalLinks.linkify(detail, item.detail);
+      else detail.textContent = item.detail;
+      copy.append(detail);
+    }
+    row.append(copy);
+    const controls = el("div", "todo-actions");
+    // Pages on other sites named in the detail are offered directly, not left to be copied.
+    const links = item.link ? [item.link] : (window.PsmExternalLinks?.find(item.detail) || []).slice(0, 3);
+    for (const link of links) {
+      const open = el("a", "dep-mini-btn primary");
+      open.href = link.href;
+      open.target = "_blank";
+      open.rel = "noopener noreferrer";
+      open.title = link.href;
+      open.textContent = `${link.label || "Open"} ↗`;
+      controls.append(open);
+    }
+    if (item.target || item.action) {
+      const go = el("button", "dep-mini-btn");
+      go.type = "button";
+      go.textContent = item.actionLabel || (item.kind === "read" ? "Show me" : "Take me there");
+      go.onclick = () => {
+        if (item.action) return item.action();
+        if (!showMe(item.target) && item.fallback) showMe(item.fallback);
+      };
+      controls.append(go);
+    }
+    if (controls.children.length) row.append(controls);
+    list.append(row);
+  }
+}
+
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg;
