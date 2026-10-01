@@ -1,8 +1,9 @@
 # Setting up managed deployment for another project
 
-Status: implemented in the PSM working tree, reviewed and tested on 2026-09-29.
-Todo has a [successful managed static release](TODO-STAGING.md); the generated
-setup flow has not yet completed a second project's live acceptance.
+Status: static and Node-service setup are implemented. Todo has a
+[successful managed static release](TODO-STAGING.md); Handymanservices staging
+completed a managed Node-service deployment on 2026-10-01 (PSM run
+`run_29d57729336843e6`, version 1.0.1).
 
 ## Start in Deploy
 
@@ -53,36 +54,25 @@ Express server in `server/`, and a production build that copies the client into
 the server's public directory. Its PM2 commands run that server. Publishing
 `client/dist` alone is not an equivalent deployment.
 
-PSM therefore blocks static setup and offers **Plan deployment support with AI**.
-This opens a draft prompt for review and sending; it does not create a managed
-server recipe, a deployable plan, or a release. Existing command deployment remains
-available only when configured and is explicitly unmanaged.
-
-P08's first concrete server case should be handymanservices. Before a managed
-release is possible, implement and test:
-
-- an immutable frontend-plus-server artifact and runtime configuration contract;
-- a scoped Node process lifecycle and reverse-proxy configuration that preserve
-  other workloads on the host;
-- application/API health checks, retained releases and rollback, including a
-  failed verification after activation;
-- planning, readiness and recovery support for those typed operations;
-- staging acceptance through the same review-and-confirm flow as Todo.
+PSM selects `node-service-ssh-nginx@1` for this shape. The first live
+Handymanservices release exercised an immutable frontend-plus-server artifact,
+scoped systemd process, nginx/TLS, brokered runtime secrets and public health
+checks through the same reviewed plan flow as Todo. Retained-release rollback,
+failed-verification recovery and a zero-downtime switch still need acceptance.
 
 Databases, migrations, workers and backup/restore support remain separate P08
 requirements; do not add them to the handymanservices recipe without evidence
 that it needs them. The [delivery index](../roadmaps/README.md) keeps the phase
 order and the remaining P07/P07a gates.
 
-The recipe's design is in [NODE-SERVICE-RECIPE.md](NODE-SERVICE-RECIPE.md) (draft,
-awaiting decisions).
+The recipe and remaining acceptance are in
+[NODE-SERVICE-RECIPE.md](NODE-SERVICE-RECIPE.md).
 
 ## Evidence and implementation
 
-The 2026-09-29 verification passed typecheck, JavaScript syntax checks and the
-full PSM suite: **680 passed, 5 skipped, 0 failed**. Setup tests cover a valid
-static manifest, conflicting build files, server rejection and DNS-zone validation.
-They do not prove a generated workflow has run successfully on GitHub.
+The 2026-10-01 PSM verification passed typecheck and the full suite:
+**740 passed, 5 skipped, 0 failed**. The live Handymanservices build and release
+also completed through GitHub Actions and the enrolled target.
 
 Implementation: `src/server/deploy/setup.ts`, its `templates/` prepare script,
 the `deployment-setup` routes in `src/server/deploy/api.ts`, and the setup view

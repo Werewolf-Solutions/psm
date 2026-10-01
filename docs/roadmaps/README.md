@@ -10,36 +10,42 @@ or treating every document as a separate project needing another kickoff.
 | Field | Value |
 | --- | --- |
 | Next phase | **P07a — Button-only GitHub setup (in progress)**, while completing P07's remaining acceptance. P07's local managed release is verified; P03's live hosted gate remains blocked. |
-| Execution state | `dev` working tree, package 0.3.15. Todo deployment `run_a7ef155bd9f04884` succeeded on 2026-09-29 at 08:54:11 UTC with all four release probes passed. Recent PSM fixes and project onboarding remain uncommitted. |
-| Latest product decision | Every cockpit project should have a managed setup entry point. Static-project generation is implemented; handymanservices exposes the next missing recipe: Vite frontend plus Express/Node server. Hosted runners remain the SaaS target. |
+| Execution state | PSM `dev`, package 0.3.21. Todo managed static release succeeded; Handymanservices managed Node-service staging verification succeeded as `run_29d57729336843e6` on 2026-10-01. The PSM fixes are committed locally. |
+| Latest product decision | Every cockpit project should have a managed setup entry point. Static and Node-service recipes are implemented; zero-downtime Node switching remains P08 work. Hosted runners remain the SaaS target. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); successful managed release recorded 2026-09-29. |
 | First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
-| Resume action | Preserve/review the existing working tree; live-test P07a App and controller setup with GitHub consent. Produce a second verified Todo release before rehearsing rollback; complete browser/workspace and hosted acceptance. The first P08 Node-server recipe against handymanservices follows. |
+| Resume action | Complete Todo's remaining P07/P07a acceptance and a retained-release rollback rehearsal. For P08, test a newer Handymanservices release and rollback, then implement a health-checked switch without a restart gap. Complete browser/workspace and hosted acceptance. |
 
 ### What the current evidence means
 
-- **2026-10-01 local checkpoint:** managed commits now assign root release
-  versions and synchronize npm lockfiles. Deployment readiness drops artifacts
-  from older commits and detects uncommitted application changes. Preparation
-  refreshes newly built artifacts in the open page. GitHub App source-publication
-  support added in the intervening work is retained. Full suite: **715 passed,
-  5 skipped, 0 failed**; typecheck passed. These PSM changes remain uncommitted.
-  Todo is clean at `ad02646` (0.6.1); its second live release is still unverified.
+- **2026-10-01 Handymanservices checkpoint:** version 1.0.1 from commit
+  `ff17b6a` was built by GitHub Actions, installed through the pinned App
+  controller and verified in PSM run `run_29d57729336843e6`. The active target
+  and public `/`, `/healthz` and `/version.json` probes passed. PSM 0.3.21
+  verifies an identical active artifact without uploading it again. Typecheck
+  passed; full suite: **740 passed, 5 skipped, 0 failed**. This proves a second
+  project's first managed staging deployment, not Node rollback or zero downtime.
+
+- **Earlier 2026-10-01 local checkpoint:** managed commits assigned root release
+  versions and synchronized npm lockfiles; readiness rejected old artifacts and
+  uncommitted inputs. Preparation refreshed new artifacts in the open page.
+  At that checkpoint the suite had **715 passed, 5 skipped, 0 failed** and
+  Todo was clean at `ad02646` (0.6.1). Those were historical observations;
+  the current Handymanservices result and test count are recorded above.
 
 - **Verified locally:** the machine/access/agent foundations retain their earlier
   evidence; Todo now also has a successful managed release recorded in PSM.
-- **Implemented and tested, not yet proven on a second live app:** first-time
-  [project setup](../deploy/PROJECT-SETUP.md), static manifest/workflow generation,
-  and explicit unsupported-stack guidance. Onboarding UI does not close P08.
+- **Proven on a second live app:** first-time
+  [project setup](../deploy/PROJECT-SETUP.md) and the Node-service path completed
+  Handymanservices staging. This does not close P08's rollback and zero-downtime work.
 - **Still open:** P07 rollback, browser and hosted acceptance; P07a's fresh-account
   button-only GitHub flow; P08 server/worker/database operations. P03 still gates
   the laptop-disconnected hosted case.
-- **Delivery state:** PSM source and docs are modified on `dev`, not committed or
-  published by this review. The controller fixes and Todo's successful release
-  have separate recorded delivery evidence in [Todo staging](../deploy/TODO-STAGING.md).
-- **Latest tests:** 2026-09-29 typecheck and JS syntax checks passed; full PSM suite
-  **699 passed, 5 skipped, 0 failed**. The P07a implementation includes read-only saved run/receipt evidence and
-  fresh public Todo probes; authenticated browser behavior and Watch remain untested.
+- **Delivery state:** PSM 0.3.21 source is committed locally on `dev`; this
+  documentation records the first Handymanservices deployment. Todo's earlier
+  release evidence remains in [Todo staging](../deploy/TODO-STAGING.md).
+- **Latest tests:** 2026-10-01 typecheck and full PSM suite passed: **740 passed,
+  5 skipped, 0 failed**. Authenticated browser behavior and Watch remain untested.
 
 The server-specific script remains a preflight/reference alongside the implemented
 machine onboarding UI. The September 23 preflight recorded `psm-infra`,
@@ -47,7 +53,7 @@ machine onboarding UI. The September 23 preflight recorded `psm-infra`,
 still absent. That historical inventory is not a new account check and is not
 the current Todo release blocker.
 
-### 2026-09-29 evidence checkpoint
+### Historical 2026-09-29 evidence checkpoint
 
 Read `.psm-data/psm.db` in SQLite read-only mode without starting PSM. The latest
 Todo deployment is `run_a7ef155bd9f04884`, `succeeded` / `complete`, finished at
@@ -117,7 +123,7 @@ local to those documents; they are not additional competing sequences.
 | **P06 · verified (code); staging rollout needs approval** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
 | **P07 · in progress; local release verified** | First complete hosted-to-staging deployment | P04–P06 | Todo run `run_a7ef155bd9f04884` succeeded with version 0.6.0 and four passed release probes. Remaining: staging login/workspace acceptance, retained-release rollback, applicable Watch checks, P07a product setup and laptop-disconnected execution after P03. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
 | **P07a · in progress** | Button-only GitHub setup | P07 first release | Connect GitHub through the App Manifest flow (Create → Install on GitHub), then only PSM buttons: PSM authenticates as its App, creates and pins the release controller from its reviewed bundle, updates and re-pins it, creates the Environment, and gives each release a one-hour `actions: read` source token instead of a stored artifact-reader App key. Acceptance: a fresh organisation deploys Todo staging with no hand-copied key, variable, push or hash. P07 closes only after this, since its acceptance requires the product flows. [Plan](github-button-setup.md). |
-| **P08 · in progress; Node-service recipe built and tested locally, not yet run on a host** | General application deployment and operations | P07, P07a | Static project setup is implemented; handymanservices is the concrete frontend + Express/Node case, currently blocked because only the static recipe exists. Implement immutable server releases, process/proxy configuration, health checks and rollback first (`node-service-ssh-nginx@1`: systemd unit per service, secrets from PSM's store, decided 2026-10-01); **zero-downtime releases are required, not optional**: v1 accepts a restart gap of a few seconds, and P08 is not complete until a health-checked switch (start the new release on a second port, switch nginx, stop the old one) replaces it. Host prerequisite: free memory on `werewolf-alpha` before the first service release (51 MB free on 2026-10-01, mostly a leaking AI-social-media-autopilot; plan in the recipe design). Packaging decided: release tarball with bundled Node now, `oci-image@1` with Podman and Quadlet after the OS upgrade in M1. Then extend to workers, databases, migrations, restart/scale and backup/recovery with their own acceptance. [Node-service recipe design](../deploy/NODE-SERVICE-RECIPE.md) (decided 2026-10-01), [Project setup and next recipe](../deploy/PROJECT-SETUP.md), [application operations scope](agent-access-and-operations.md#delivery-sequence), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
+| **P08 · in progress; first Node-service release verified on a host** | General application deployment and operations | P07, P07a | Handymanservices staging has a managed immutable frontend-plus-Express release, scoped systemd service, brokered secrets, nginx/TLS and successful public probes (`run_29d57729336843e6`). Next: newer-release and retained rollback acceptance, then a health-checked switch without a restart gap; P08 is not complete until zero-downtime releases work. Workers, databases, migrations, scale and backup/recovery remain separate acceptance. [Node-service recipe](../deploy/NODE-SERVICE-RECIPE.md), [project setup](../deploy/PROJECT-SETUP.md), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
 | **P09 · pending** | Unattended maintenance and SaaS operations | P08 | Scheduled/monitor-triggered tasks honor standing grants, recover from interruption, avoid duplicate external mutations, and expose usage/retention limits. Prove restore and credential rotation; optional local/user-hosted runners share the protocol. [Runner requirements](agent-access-and-operations.md#runners-and-saas-operation), [machine lifecycle](machine-onboarding.md#ongoing-machine-management). |
 | **P10 · pending** | Complete project governance and agent usage visibility | P05, P09 | Audit the older governance plan against current rules/profile/skills features, then complete only missing applicability/readiness UI, rule provenance and actually observable usage reporting. No duplicate rules system or incompatible metadata migration. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
 | **M1 · pending** | Keep machines and apps current | P04 (machine inventory), P08 | PSM tracks what everything runs and when it stops being supported, and turns each gap into a To do item with a reviewed plan. **Inventory:** per machine the OS release and its end-of-support date, kernel, reboot-required, runtimes (system and nvm Node), PM2, nginx, certbot, Redis; per project the runtime major, outdated and vulnerable dependencies (`npm outdated`, `npm audit`) and its Node `engines`. End-of-life dates come from a pinned data source such as endoflife.date. **Plans:** dependency and runtime updates as reviewed commits with tests, released through the normal recipe; tool updates on hosts through the host helper; OS upgrades as a plan of their own (snapshot first; for a two-step jump such as 20.04→24.04, prefer building a fresh 24.04 machine, moving apps with managed releases and retiring the old one over an in-place upgrade). **First case:** `werewolf-alpha` on Ubuntu 20.04 (standard support ended May 2025) with system Node v14, which also unlocks the container path. Acceptance: one machine and one project brought current through PSM alone, with rollback evidence. |

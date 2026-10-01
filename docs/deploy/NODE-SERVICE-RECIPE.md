@@ -1,6 +1,6 @@
 # `node-service-ssh-nginx@1` — design for review
 
-Status: **built; host side proven on a throwaway server; not yet on werewolf-alpha** · 2026-10-01 · first case: handymanservices staging
+Status: **first managed Handymanservices staging release verified on werewolf-alpha** · 2026-10-01 · rollback and zero-downtime switching remain open
 
 This is the P08 recipe for an app that needs a running Node server: build it once on
 GitHub Actions, release the exact bytes to a host, run it as a supervised service behind
@@ -11,6 +11,13 @@ only what a process needs.
 
 ## What to do next
 
+The live target now has version 1.0.1 active. PSM run `run_29d57729336843e6`
+finished `succeeded` after checking the exact target release and public `/`,
+`/healthz` and `/version.json` responses. The setup steps below are retained as
+the sequence used for this first deployment; the next acceptance is a newer
+release followed by retained-release rollback, then a health-checked switch
+without a restart gap.
+
 1. ~~Prove the helper on a throwaway machine.~~ **Done 2026-10-01 on homelab** (Ubuntu 24.04,
    systemd 255): enrollment, unit and secrets, two healthy releases, automatic rollback of a broken
    one, manual rollback, secret rotation, crash restart, sandbox and loopback checks, nginx proxy
@@ -18,13 +25,13 @@ only what a process needs.
    paths; `install.sh` missed directories on a fresh host; `User=root` with `NoNewPrivileges=yes`
    cost the helper `CAP_SETUID` on systemd 255; a host without PM2 failed the PM2 invariant.
    Report: `/srv/homelab/reports/2026-10-01/psm-node-service-test.md`. Everything was removed after.
-2. **Install the new helper on `werewolf-alpha`** through Machines (it replaces the running
-   helper; the static Todo target keeps working, its contract digest is unchanged).
-3. **Review controller setup / update** on the Deploy page: the controller now releases service
-   bundles too, so its files change and need your review and a new pin.
-4. **Set up handymanservices** from its Deploy page (staging suggests
-   `handymanservices-staging.werewolf.solutions`), enroll its target in Machines, enter
-   `API_KEY` and `BUSINESS_ID` under Runtime secrets, and follow the To do list.
+2. ~~Install the new helper on `werewolf-alpha` through Machines.~~ Done for the
+   Handymanservices staging target; the Todo target remains enrolled.
+3. ~~Review controller setup / update on the Deploy page.~~ The Handymanservices
+   GitHub App controller is pinned and completed the first release.
+4. ~~Set up Handymanservices, enroll the target and enter runtime secrets.~~
+   Done for `handymanservices-staging.werewolf.solutions`; `API_KEY` and
+   `BUSINESS_ID` are in PSM's broker and match the host.
 
 ## Built (2026-10-01)
 

@@ -349,15 +349,13 @@ strict identity and provenance checks (mixed formats are rejected).
   preparation stops before another prompt or build. Supply the missing evidence
   or access and resume explicitly; existing build and typecheck gates stay in place.
 
-  **The supported recipe is still static-only.** Todo staging has completed build,
-  infrastructure reconciliation, activation and release verification on the real target.
-  P07a's GitHub App connection and reviewed controller setup are implemented and
-  locally tested. GitHub Create/Install and Todo's App binding have succeeded;
-  live controller migration and a second verified Todo release remain to be
-  exercised. [P07a status](docs/roadmaps/github-button-setup.md).
-  A project such as handymanservices also needs its Express server: PSM detects this,
-  blocks the static generator and offers **Plan deployment support with AI**. That
-  button drafts a planning prompt; it does not add a Node-server executor or deploy.
+  The supported recipes are `static-ssh-nginx@1` and `node-service-ssh-nginx@1`.
+  Todo staging has completed a managed static release. Handymanservices staging
+  completed its first managed Node service release and PSM verification on
+  2026-10-01 (`run_29d57729336843e6`, version 1.0.1). Its GitHub App controller,
+  scoped host access, runtime secrets, DNS, TLS and public release probes were
+  exercised on the real target. The Node recipe still needs retained-release
+  rollback and zero-downtime switching acceptance. [P07a status](docs/roadmaps/github-button-setup.md).
   See [project setup and limits](docs/deploy/PROJECT-SETUP.md),
   [connections](docs/deploy/CONNECTIONS.md) and
   [remaining acceptance](docs/deploy/DEPLOYMENT-SYSTEM.md#what-is-not-proven-yet).

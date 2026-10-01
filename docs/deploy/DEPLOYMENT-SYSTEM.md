@@ -52,9 +52,12 @@ This does not prove a retained-release rollback, browser login/workspace accepta
 external Watch, fresh-organisation button-only setup, or hosted execution with the
 laptop disconnected. The exact run and remaining acceptance work are tracked in
 [`TODO-STAGING.md`](TODO-STAGING.md). The first-time
-[project setup flow](PROJECT-SETUP.md) is implemented and tested locally; it has
-not yet demonstrated a second project's complete managed deployment. Node servers,
-workers and databases still have no managed recipe.
+[project setup flow](PROJECT-SETUP.md) has now demonstrated a second project's
+complete managed staging deployment: Handymanservices Node service version 1.0.1,
+PSM run `run_29d57729336843e6`, succeeded on 2026-10-01. The release was
+verified through the host and public health, home and metadata probes. Node
+rollback and zero-downtime switching remain open; workers and databases still
+have no managed recipe.
 Section 20's rule still holds:
 command execution is not called Release, a local timer is not called Watch, direct
 live-directory rsync is not called immutable and a branch check is not called dependency
