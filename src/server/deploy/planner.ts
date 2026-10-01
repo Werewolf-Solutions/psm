@@ -207,6 +207,7 @@ function actionOperation(
   node: DeploymentActionNode,
   observations: EnvironmentObservations,
   planOperation: DeploymentOperation,
+  activeReleaseVerification: boolean,
 ): PlannedActionDocument["operation"] {
   if (node.phase === "dependencies") {
     return dependencyObservation(node, observations)?.state === "ready" ? "assert" : "blocked";
@@ -224,6 +225,7 @@ function actionOperation(
   }
   // The protected controller performs staging, activation, target probes and conditional rollback
   // as one remote transaction. This graph node is the independent local postcondition.
+  if (activeReleaseVerification && (node.kind === "stage-static-release@1" || node.kind === "stage-service-release@1")) return "verify";
   if (node.kind === "activate-static-release@1" || node.kind === "activate-service-release@1") return "verify";
   if (node.kind === "snapshot-pm2@1") return "assert";
   if (node.phase === "verify" || node.phase === "watch") return "verify";
@@ -243,8 +245,9 @@ function actionFromNode(
   ordinal: number,
   observations: EnvironmentObservations,
   planOperation: DeploymentOperation,
+  activeReleaseVerification: boolean,
 ): PlannedActionDocument {
-  const operation = actionOperation(node, observations, planOperation);
+  const operation = actionOperation(node, observations, planOperation, activeReleaseVerification);
   const observation = node.phase === "dependencies"
     ? dependencyObservation(node, observations)
     : node.phase === "reconcile" ? resourceObservation(node, observations) : undefined;
@@ -367,6 +370,22 @@ function hasRegressionRationale(subject: string): boolean {
   return /(?:version[- ]regression[- ]reason|version decrease|lower version)\s*:/i.test(subject);
 }
 
+function exactActiveArtifact(input: BuildDeploymentPlanInput, release: DeploymentRelease, unitId: string): boolean {
+  const artifact = input.artifact;
+  const unit = input.environment.units.find((item) => item.id === unitId);
+  const receipt = release.receipt as { commit?: unknown; payloadDigest?: unknown };
+  return !!artifact && !!unit
+    && release.provenance === "managed"
+    && release.projectId === input.manifest.projectId
+    && release.environmentId === input.environment.id
+    && release.unitId === unitId
+    && release.targetId === unit.target.targetId
+    && release.releaseId === `release_${artifact.artifactId}`
+    && release.artifactId === artifact.artifactId
+    && receipt.commit === artifact.commitSha
+    && receipt.payloadDigest === artifact.payloadDigest;
+}
+
 /**
  * The plan's content, with "when we looked" left out.
  *
@@ -486,14 +505,7 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
         // this exact artifact (for example, while local DNS still caches NXDOMAIN).
         // Repeating the same reviewed release can finish verification in place;
         // another artifact at the same version remains refused.
-        const verifyingActiveArtifact = compared === 0
-          && release.provenance === "managed"
-          && release.projectId === input.manifest.projectId
-          && release.environmentId === input.environment.id
-          && input.environment.units.some((unit) => unit.id === release.unitId && unit.target.targetId === release.targetId)
-          && release.artifactId === input.artifact.artifactId
-          && receipt.commit === input.artifact.commitSha
-          && receipt.payloadDigest === input.artifact.payloadDigest;
+        const verifyingActiveArtifact = compared === 0 && exactActiveArtifact(input, release, release.unitId);
         if (verifyingActiveArtifact) continue;
         if (compared < 0 && hasRegressionRationale(input.source.subject)) {
           acknowledgements.push({ id: "version-decrease", label: `Deploy lower version ${input.artifact.version} over ${receipt.version}` });
@@ -522,7 +534,12 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
 
   const actions = input.operation === "rollback"
     ? rollbackActions(input.environment, input.rollbackRelease ?? null)
-    : selectedNodes(input.operation, input.graph, input.adoptionResourceId).map((node, ordinal) => actionFromNode(node, ordinal, input.observations, input.operation));
+    : selectedNodes(input.operation, input.graph, input.adoptionResourceId).map((node, ordinal) => {
+      const unitId = /^unit:([^/]+)$/.exec(node.ownerRef)?.[1];
+      const activeReleaseVerification = !!unitId && (input.operation === "deploy" || input.operation === "release")
+        && (input.activeReleases ?? []).some((release) => exactActiveArtifact(input, release, unitId));
+      return actionFromNode(node, ordinal, input.observations, input.operation, activeReleaseVerification);
+    });
   for (const action of actions) {
     if (action.operation === "blocked") blockers.push(blocker("action-blocked", action.detail, action.ownerRef));
   }

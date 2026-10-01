@@ -156,13 +156,18 @@ test("the exact active artifact may be redeployed for PSM verification", () => {
     activatedAt: 1, deactivatedAt: null, tombstonedAt: null,
   };
   candidate.activeReleases = [active];
+  const stage = { id: "unit:web#staged", kind: "stage-static-release@1", phase: "release", ownerRef: "unit:web", dependsOn: [] } as BuildDeploymentPlanInput["graph"]["nodes"][number];
+  candidate.graph = { ...candidate.graph, nodes: [...candidate.graph.nodes, stage], order: [...candidate.graph.order, stage.id] };
   const hasVersionBlocker = () => buildDeploymentPlan(candidate).document.blockers.some((item) => item.code === "version-not-increased");
   assert.equal(hasVersionBlocker(), false);
+  assert.equal(buildDeploymentPlan(candidate).actions.find((item) => item.id === stage.id)?.sideEffecting, false,
+    "verifying the active artifact must not upload it again");
   active.receipt.verified = true;
   assert.equal(hasVersionBlocker(), false, "the exact active release can be reverified after a later PSM probe failed");
   active.receipt.verified = false;
   active.artifactId = "art_other";
   assert.equal(hasVersionBlocker(), true, "another artifact with the same version stays blocked");
+  assert.equal(buildDeploymentPlan(candidate).actions.find((item) => item.id === stage.id)?.sideEffecting, true);
   active.artifactId = artifact.artifactId;
   active.receipt.payloadDigest = "sha256:other";
   assert.equal(hasVersionBlocker(), true, "changed content cannot use the verification exception");

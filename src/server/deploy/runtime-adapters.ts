@@ -966,6 +966,24 @@ export class DeploymentRuntimeAdapters {
     };
   }
 
+  async #checkActiveReleaseOnTarget(context: DeploymentAdapterContext): Promise<AdapterObservation> {
+    const dispatch = this.#releaseDispatch(context);
+    const active = this.#connections.store.getActiveRelease(dispatch.targetId);
+    if (active?.releaseId !== dispatch.releaseId || active.artifactId !== dispatch.artifact.psmArtifactId) {
+      return { outcome: "failed", data: { reason: "active-release-changed" } };
+    }
+    const document = planDocument(context);
+    const unit = unitForAction(context);
+    const host = this.#connections.profile({ checkoutId: document.checkoutId, environmentId: document.environmentId,
+      slot: unit.target.observerConnection, kind: "ssh-host-helper@1", plan: document });
+    const observed = helperData(await this.#host.invoke({ connection: host,
+      request: hostHelperRequest({ targetId: dispatch.targetId, operation: "observe-target", desired: {} }), signal: context.signal }));
+    const receipt = approvedReleaseActiveOnTarget(observed, dispatch);
+    return receipt
+      ? { outcome: "succeeded", data: { releaseId: dispatch.releaseId, artifactId: dispatch.artifact.psmArtifactId, targetObserved: true } }
+      : { outcome: "failed", data: { reason: "active-release-target-mismatch", releaseId: dispatch.releaseId } };
+  }
+
   async #dnsContext(
     resource: DigitalOceanDnsResource,
     context: { checkoutId: string; environment: EnvironmentManifest },
@@ -1283,6 +1301,7 @@ export class DeploymentRuntimeAdapters {
     const stage: DeploymentActionAdapter = {
       kind: "stage-static-release@1",
       execution: "remote",
+      check: (context) => this.#checkActiveReleaseOnTarget(context),
       submit: (context) => this.#submitRelease(context),
       observe: (context) => this.#observeRelease(context),
     };
