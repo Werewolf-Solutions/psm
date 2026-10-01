@@ -74,6 +74,9 @@ requirements; do not add them to the handymanservices recipe without evidence
 that it needs them. The [delivery index](../roadmaps/README.md) keeps the phase
 order and the remaining P07/P07a gates.
 
+The recipe's design is in [NODE-SERVICE-RECIPE.md](NODE-SERVICE-RECIPE.md) (draft,
+awaiting decisions).
+
 ## Evidence and implementation
 
 The 2026-09-29 verification passed typecheck, JavaScript syntax checks and the
