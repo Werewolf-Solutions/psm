@@ -10,15 +10,35 @@ function ensurePrivateDirectory(directory: string): void {
   try { fs.chmodSync(directory, 0o700); } catch { /* filesystem does not expose POSIX modes */ }
 }
 
+/** Owners of a managed service's runtime secrets; see serviceSecretOwner. */
+export const SERVICE_SECRET_OWNER_PREFIX = "service-secrets:";
+
+/**
+ * Where a unit's runtime secrets live in PSM's secret store: one owner per
+ * project, environment and unit, one slot per variable name.
+ */
+export function serviceSecretOwner(projectId: string, environmentId: string, unitId: string): string {
+  return `${SERVICE_SECRET_OWNER_PREFIX}${projectId}:${environmentId}:${unitId}`;
+}
+
+export function serviceSecretSlot(name: string): string {
+  return `env.${name}`;
+}
+
 /** Persist secret generations in SQLite so a restart cannot revive an approved old plan. */
 export class DeploymentSecretGenerationStore implements SecretGenerationStore {
   constructor(private readonly store: DeploymentStore) {}
 
   async readGeneration(connectionId: string): Promise<number> {
+    if (connectionId.startsWith(SERVICE_SECRET_OWNER_PREFIX)) return this.store.getServiceSecretGeneration(connectionId);
     return this.store.getConnection(connectionId).secretGeneration;
   }
 
   async writeGeneration(connectionId: string, generation: number): Promise<void> {
+    if (connectionId.startsWith(SERVICE_SECRET_OWNER_PREFIX)) {
+      this.store.setServiceSecretGeneration(connectionId, generation, Date.now());
+      return;
+    }
     const current = this.store.getConnection(connectionId);
     this.store.updateConnectionSecretStatus({
       connectionId,

@@ -36,6 +36,10 @@ REQUEST_SCHEMA = "psm.werewolf.solutions/host-helper-request/v1"
 RESPONSE_SCHEMA = "psm.werewolf.solutions/host-helper-response/v1"
 TARGET_SCHEMA = "psm.werewolf.solutions/control-target/v1"
 PAYLOAD_ALGORITHM = "psm-static-tree-sha256@1"
+# A Node service bundle: the same tree digest plus executable bits, released by
+# the helper's service operation. The artifact's algorithm decides which.
+SERVICE_ALGORITHM = "psm-service-tree-sha256@1"
+HELPER_OPERATIONS = {PAYLOAD_ALGORITHM: "deploy-static-release", SERVICE_ALGORITHM: "deploy-service-release"}
 
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$")
@@ -173,8 +177,8 @@ def load_contract() -> dict:
 
     if contract.get("operation") not in ("deploy", "release", "rollback"):
         fail("operation must be deploy, release or rollback")
-    if artifact.get("payloadAlgorithm") != PAYLOAD_ALGORITHM:
-        fail(f"payload algorithm must be {PAYLOAD_ALGORITHM}")
+    if artifact.get("payloadAlgorithm") not in HELPER_OPERATIONS:
+        fail(f"payload algorithm must be {PAYLOAD_ALGORITHM} or {SERVICE_ALGORITHM}")
     match(DIGEST_RE, str(target.get("fingerprint", "")), "target.fingerprint")
     match(ID_RE, str(target.get("contractRevision", "")), "target.contractRevision")
     match(COMMIT_RE, env("commit_sha"), "commit_sha")
@@ -446,7 +450,7 @@ def command_release() -> None:
             "artifactId": artifact["psmArtifactId"],
             "commitSha": artifact["commitSha"],
             "version": artifact["version"],
-            "payloadAlgorithm": PAYLOAD_ALGORITHM,
+            "payloadAlgorithm": artifact["payloadAlgorithm"],
             "payloadDigest": contract["intendedRelease"]["payloadDigest"],
             "archiveDigest": artifact["archiveDigest"],
             "maximumFiles": limits.get("maxFiles"),
@@ -467,7 +471,7 @@ def command_release() -> None:
         "schema": REQUEST_SCHEMA,
         "requestId": env("psm_run_id"),
         "targetId": env("target_id"),
-        "operation": "deploy-static-release",
+        "operation": HELPER_OPERATIONS[artifact["payloadAlgorithm"]],
         "idempotencyKey": contract["intendedRelease"]["releaseId"],
         "planDigest": env("plan_digest"),
         "expiresAt": env("plan_expires_at"),
@@ -534,7 +538,7 @@ def write_result(work: Path, contract: dict, state: str, verification: list, act
         "psm_artifact_id": artifact["psmArtifactId"],
         "github_artifact_id": artifact["githubArtifactId"],
         "producer_run_id": artifact["producerRunId"],
-        "payload_algorithm": PAYLOAD_ALGORITHM,
+        "payload_algorithm": artifact["payloadAlgorithm"],
         "payload_digest": artifact["payloadDigest"],
         "archive_digest": artifact["archiveDigest"],
         "state": state,

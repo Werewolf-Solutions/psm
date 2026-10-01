@@ -224,7 +224,7 @@ function actionOperation(
   }
   // The protected controller performs staging, activation, target probes and conditional rollback
   // as one remote transaction. This graph node is the independent local postcondition.
-  if (node.kind === "activate-static-release@1") return "verify";
+  if (node.kind === "activate-static-release@1" || node.kind === "activate-service-release@1") return "verify";
   if (node.kind === "snapshot-pm2@1") return "assert";
   if (node.phase === "verify" || node.phase === "watch") return "verify";
   return "apply";
@@ -299,7 +299,7 @@ function rollbackActions(
     const base = {
       ordinal: index * 4 + 1,
       id: `unit:${unit.id}#rollback`,
-      kind: "activate-static-release@1",
+      kind: unit.recipe === "node-service-ssh-nginx@1" ? "activate-service-release@1" : "activate-static-release@1",
       phase: "activate",
       ownerRef: `unit:${unit.id}`,
       operation: release ? "rollback" as const : "blocked" as const,

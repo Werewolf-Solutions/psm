@@ -179,7 +179,7 @@ export function commandAccountName(machineId: string, projectId: string, project
 }
 
 /** `psm-<role letter>-<slug>-<hash>`: x = command, i = infrastructure, r = release, a = administrator. */
-export function roleAccountName(letter: "x" | "i" | "r" | "a", machineId: string, projectId: string, projectName: string, environmentId: string): string {
+export function roleAccountName(letter: "x" | "i" | "r" | "a" | "s", machineId: string, projectId: string, projectName: string, environmentId: string): string {
   const suffix = createHash("sha256").update(`${machineId}\0${projectId}\0${environmentId}`).digest("hex").slice(0, 6);
   const readable = slug(`${projectName}-${environmentId}`, 32 - `psm-${letter}--`.length - suffix.length) || "app";
   const name = `psm-${letter}-${readable}-${suffix}`;

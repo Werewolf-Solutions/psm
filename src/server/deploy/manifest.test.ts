@@ -155,7 +155,7 @@ test("validates and normalizes a static-ssh-nginx manifest", () => {
   assert.equal(ingress?.kind === "nginx-static-site@1" && ingress.desired.hostname, "todo.example.com");
   assert.equal(ingress?.kind === "nginx-static-site@1" && ingress.desired.documentRoot, "/var/www/todo.example.com/current");
   assert.equal(environment.units[0].target.root, "/var/www/todo.example.com");
-  assert.equal(environment.units[0].artifact.output, "client/dist");
+  assert.equal((environment.units[0].artifact as { output: string }).output, "client/dist");
   assert.equal(environment.watch[0].hostname, "todo.example.com");
 });
 

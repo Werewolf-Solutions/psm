@@ -12,6 +12,12 @@ import (
 	"syscall"
 )
 
+// Ownership changes go through these so unprivileged tests can observe the rest.
+var (
+	chownFile = func(file *os.File, uid, gid int) error { return file.Chown(uid, gid) }
+	chownPath = os.Chown
+)
+
 func writeAtomic(filename string, content []byte, mode fs.FileMode, uid, gid int) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
 		return err
@@ -41,7 +47,7 @@ func writeAtomic(filename string, content []byte, mode fs.FileMode, uid, gid int
 	if err := file.Chmod(mode); err != nil {
 		return err
 	}
-	if err := file.Chown(uid, gid); err != nil {
+	if err := chownFile(file, uid, gid); err != nil {
 		return err
 	}
 	if err := file.Close(); err != nil {

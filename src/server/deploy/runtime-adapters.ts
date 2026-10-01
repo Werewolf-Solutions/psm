@@ -1,6 +1,8 @@
+import { createHmac, randomBytes } from "node:crypto";
 import net from "node:net";
 
 import { canonicalDigest } from "./canonical.ts";
+import { serviceSecretOwner, serviceSecretSlot } from "./secrets.ts";
 import {
   SecretBroker,
   validateConnectionProfile,
@@ -13,6 +15,7 @@ import { deploymentGitHubToken, githubAppIdentity, githubAppTokens } from "./git
 import {
   ExecutorContractError,
   RELEASE_EXECUTION_CONTRACT_SCHEMA,
+  SERVICE_PAYLOAD_ALGORITHM,
   STATIC_PAYLOAD_ALGORITHM,
   releaseDispatchInputs,
   releaseExecutionContractDigest,
@@ -41,6 +44,7 @@ import {
 } from "./store.ts";
 import type {
   DigitalOceanDnsResource,
+  ServiceSecretsResource,
   EnvironmentManifest,
   ExternalHttpWatch,
   ResourceManifest,
@@ -178,6 +182,51 @@ export function helperData(response: HostHelperResponse): Record<string, unknown
   const data = object(response.data);
   if (!Object.keys(data).length) throw new Error("host helper returned no observation data");
   return data;
+}
+
+export { serviceSecretOwner, serviceSecretSlot } from "./secrets.ts";
+
+export type ServiceSecretState = "in-sync" | "differs" | "missing-on-host" | "missing-in-psm";
+
+/**
+ * Compare PSM's values with the host's keyed fingerprints for one fresh salt.
+ * Only the verdict per name is returned: neither fingerprints nor salt are
+ * kept, so a weak secret cannot be guessed offline from a stored plan or log.
+ */
+export function compareServiceSecrets(
+  names: readonly string[],
+  local: ReadonlyMap<string, string>,
+  hostFingerprints: Record<string, unknown>,
+  salt: Buffer,
+): Record<string, ServiceSecretState> {
+  const states: Record<string, ServiceSecretState> = {};
+  for (const name of names) {
+    const value = local.get(name);
+    const host = hostFingerprints[name];
+    if (value === undefined) states[name] = "missing-in-psm";
+    else if (typeof host !== "string") states[name] = "missing-on-host";
+    else states[name] = host === `hmac-sha256:${createHmac("sha256", salt).update(value).digest("hex")}` ? "in-sync" : "differs";
+  }
+  return states;
+}
+
+export function serviceSecretsSummary(states: Record<string, ServiceSecretState>, undeclared: readonly string[] = []): ResourceDiscoveryResult {
+  const names = Object.keys(states).sort();
+  const missingLocal = names.filter((name) => states[name] === "missing-in-psm");
+  if (missingLocal.length) {
+    return { state: "blocked", detail: `Set ${missingLocal.join(", ")} in PSM before deploying; the values are never committed.`, observed: { states, undeclared: [...undeclared] } };
+  }
+  const changed = names.filter((name) => states[name] !== "in-sync");
+  if (!changed.length && !undeclared.length) return { state: "in-sync", detail: "Every declared secret on the host matches PSM's value.", observed: { states, undeclared: [...undeclared] } };
+  const missing = names.filter((name) => states[name] === "missing-on-host");
+  return {
+    state: missing.length === names.length ? "create" : "update",
+    detail: [
+      changed.length ? `${changed.join(", ")} will be written to the host and the service restarted.` : "",
+      undeclared.length ? `${undeclared.join(", ")} on the host ${undeclared.length === 1 ? "is" : "are"} no longer declared and will be removed.` : "",
+    ].filter(Boolean).join(" "),
+    observed: { states, undeclared: [...undeclared] },
+  };
 }
 
 function helperDesired(resource: Exclude<ResourceManifest, DigitalOceanDnsResource>, tls?: boolean): JsonValue {
@@ -555,11 +604,15 @@ export class DeploymentRuntimeAdapters {
     return result.digest;
   }
 
-  #artifactIdentity(artifact: DeploymentArtifact): PreparedArtifactIdentity {
+  #artifactIdentity(artifact: DeploymentArtifact, unit: UnitManifest): PreparedArtifactIdentity {
     const limits = object(artifact.providerLocator).payloadLimits as StaticPayloadLimits | undefined;
+    // A static site and a service bundle are not interchangeable: each unit takes only its own kind.
+    const expected = unit.recipe === "node-service-ssh-nginx@1" ? SERVICE_PAYLOAD_ALGORITHM : STATIC_PAYLOAD_ALGORITHM;
+    if (artifact.payloadAlgorithm !== expected) {
+      throw new Error(`prepared artifact is ${artifact.payloadAlgorithm}, but ${unit.recipe} releases ${expected}`);
+    }
     if (
-      artifact.payloadAlgorithm !== STATIC_PAYLOAD_ALGORITHM
-      || !limits
+      !limits
       || !Number.isInteger(limits.maxFiles)
       || !Number.isInteger(limits.maxPathBytes)
       || !Number.isInteger(limits.maxFileBytes)
@@ -574,7 +627,7 @@ export class DeploymentRuntimeAdapters {
       sourceRepository: artifact.sourceRepository,
       commitSha: artifact.commitSha,
       version: artifact.version,
-      payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
+      payloadAlgorithm: expected,
       payloadLimits: limits,
       payloadDigest: artifact.payloadDigest,
       archiveDigest: artifact.archiveDigest,
@@ -606,7 +659,7 @@ export class DeploymentRuntimeAdapters {
       ? this.#connections.store.getArtifact(selectedRelease?.artifactId ?? "")
       : document.artifact;
     if (!artifact) throw new Error("release action has no prepared artifact");
-    const identity = this.#artifactIdentity(artifact);
+    const identity = this.#artifactIdentity(artifact, unit);
     const active = document.activeReleases.find((item) => item.targetId === unit.target.targetId) ?? null;
     const activeReceipt = object(active?.receipt);
     const intendedReleaseId = rollback ? selectedRelease!.releaseId : `release_${artifact.artifactId}`;
@@ -963,6 +1016,38 @@ export class DeploymentRuntimeAdapters {
     });
   }
 
+  /** PSM's stored values for the names it has; a name without a value is simply absent. */
+  async #localServiceSecrets(projectId: string, environmentId: string, unitId: string, names: readonly string[]): Promise<Map<string, string>> {
+    const owner = serviceSecretOwner(projectId, environmentId, unitId);
+    const status = await this.#connections.broker.status(owner, []);
+    const present = names.filter((name) => status.availableSlots.includes(serviceSecretSlot(name)));
+    if (!present.length) return new Map();
+    return this.#connections.broker.withLease(owner, present.map(serviceSecretSlot), (lease) =>
+      new Map(present.map((name) => [name, lease.useUtf8(serviceSecretSlot(name), (value) => value)])));
+  }
+
+  async #observeServiceSecrets(
+    resource: ServiceSecretsResource,
+    unit: UnitManifest,
+    projectId: string,
+    environmentId: string,
+    profile: ConnectionProfile,
+    signal?: AbortSignal,
+  ): Promise<ResourceDiscoveryResult> {
+    const salt = randomBytes(16);
+    const response = await this.#host.invoke({
+      connection: profile,
+      request: hostHelperRequest({ targetId: unit.target.targetId, operation: "observe-resource",
+        desired: { kind: "service-secrets@1", names: resource.desired.names, salt: salt.toString("hex") } }),
+      signal,
+    });
+    const data = helperData(response);
+    const local = await this.#localServiceSecrets(projectId, environmentId, unit.id, resource.desired.names);
+    const states = compareServiceSecrets(resource.desired.names, local, object(data.fingerprints), salt);
+    salt.fill(0);
+    return serviceSecretsSummary(states, Array.isArray(data.undeclared) ? data.undeclared.map(String) : []);
+  }
+
   async discoverResource(
     resource: ResourceManifest,
     context: { projectId: string; checkoutId: string; environment: EnvironmentManifest },
@@ -972,6 +1057,9 @@ export class DeploymentRuntimeAdapters {
     }
     const unit = targetForResource(resource, context.environment);
     const profile = this.#profileForEnvironment({ checkoutId: context.checkoutId, environment: context.environment, slot: resource.connection, kind: "ssh-host-helper@1" });
+    if (resource.kind === "service-secrets@1") {
+      return this.#observeServiceSecrets(resource, unit, context.projectId, context.environment.id, profile);
+    }
     const response = await this.#host.invoke({
       connection: profile,
       request: hostHelperRequest({ targetId: unit.target.targetId, operation: "observe-resource", desired: helperDesired(resource) }),
@@ -1018,6 +1106,10 @@ export class DeploymentRuntimeAdapters {
     const resource = resourceForAction(context);
     if (resource.kind === "digitalocean-dns-record@1") throw new Error("DNS does not use the host helper");
     const unit = targetForResource(resource, environmentValue);
+    if (resource.kind === "service-secrets@1") {
+      const result = await this.#observeServiceSecrets(resource, unit, document.projectId, document.environmentId, profile, context.signal);
+      return { outcome: result.state === "in-sync" ? "succeeded" : "failed", data: json({ state: result.state, detail: result.detail, ...object(result.observed) }) };
+    }
     let operation = "observe-resource";
     let desired = helperDesired(resource, ingressObservationTls(context.action.kind, action.operation));
     if (context.action.kind === "validate-nginx@1" || context.action.kind === "reload-nginx@1") {
@@ -1043,9 +1135,17 @@ export class DeploymentRuntimeAdapters {
     const unit = targetForResource(resource, environment(document));
     const profile = this.#profileForAction(context, "ssh-host-helper@1");
     const operation = context.action.kind.replace(/@1$/, "");
-    const desired = context.action.kind === "reload-nginx@1" || context.action.kind === "validate-nginx@1"
+    let desired: JsonValue = context.action.kind === "reload-nginx@1" || context.action.kind === "validate-nginx@1"
       ? {}
       : json(resource.desired);
+    if (resource.kind === "service-secrets@1") {
+      // Values leave the secret store only inside this one typed request; they are
+      // never part of the plan, the step data or an event.
+      const local = await this.#localServiceSecrets(document.projectId, document.environmentId, unit.id, resource.desired.names);
+      const missing = resource.desired.names.filter((name) => !local.has(name));
+      if (missing.length) throw new Error(`Set ${missing.join(", ")} in PSM before deploying`);
+      desired = { values: Object.fromEntries(local) };
+    }
     const response = await this.#host.invoke({
       connection: profile,
       request: hostHelperRequest({
@@ -1120,6 +1220,8 @@ export class DeploymentRuntimeAdapters {
   actionAdapters(): DeploymentActionAdapter[] {
     const hostKinds = [
       "reconcile-release-directory@1",
+      "reconcile-service@1",
+      "reconcile-service-secrets@1",
       "reconcile-ingress-http@1",
       "reconcile-certificate@1",
       "reconcile-ingress-tls@1",
@@ -1186,6 +1288,9 @@ export class DeploymentRuntimeAdapters {
       submit: (context) => this.#submitRelease(context),
       observe: (context) => this.#observeRelease(context),
     };
-    return [dns, ...hostKinds.map((kind) => this.#hostAdapter(kind)), stage, activate, watch];
+    // A service release travels the same controller path; only the helper operation differs.
+    const serviceStage: DeploymentActionAdapter = { ...stage, kind: "stage-service-release@1" };
+    const serviceActivate: DeploymentActionAdapter = { ...activate, kind: "activate-service-release@1" };
+    return [dns, ...hostKinds.map((kind) => this.#hostAdapter(kind)), stage, activate, serviceStage, serviceActivate, watch];
   }
 }

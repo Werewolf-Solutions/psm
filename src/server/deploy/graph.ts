@@ -43,10 +43,11 @@ function refParts(reference: string): { resourceId: string; substate?: string } 
 }
 
 function resourceReadyAction(resource: ResourceManifest, substate?: string): string {
-  if (substate === "http-ready" && resource.kind === "nginx-static-site@1") {
+  const ingress = resource.kind === "nginx-static-site@1" || resource.kind === "nginx-node-proxy@1";
+  if (substate === "http-ready" && ingress) {
     return actionId(`resource:${resource.id}`, "http-ready");
   }
-  if (substate === "tls-ready" && resource.kind === "nginx-static-site@1") {
+  if (substate === "tls-ready" && ingress) {
     return actionId(`resource:${resource.id}`, "tls-ready");
   }
   if (substate === "certificate-ready" && resource.kind === "letsencrypt-certificate@1") {
@@ -57,7 +58,10 @@ function resourceReadyAction(resource: ResourceManifest, substate?: string): str
     case "digitalocean-dns-record@1": return actionId(`resource:${resource.id}`, "reconciled");
     case "host-release-directory@1": return actionId(`resource:${resource.id}`, "reconciled");
     case "nginx-static-site@1": return actionId(`resource:${resource.id}`, "tls-ready");
+    case "nginx-node-proxy@1": return actionId(`resource:${resource.id}`, "tls-ready");
     case "letsencrypt-certificate@1": return actionId(`resource:${resource.id}`, "certificate-ready");
+    case "systemd-node-service@1": return actionId(`resource:${resource.id}`, "reconciled");
+    case "service-secrets@1": return actionId(`resource:${resource.id}`, "reconciled");
   }
 }
 
@@ -195,7 +199,30 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
           metadata: { root: resource.desired.root },
         });
         break;
+      case "systemd-node-service@1":
+        addNode(nodes, {
+          id: actionId(ownerRef, "reconciled"),
+          kind: "reconcile-service@1",
+          phase: "reconcile",
+          ownerRef,
+          dependsOn: dependencies,
+          connection: resource.connection,
+          metadata: { entry: resource.desired.entry },
+        });
+        break;
+      case "service-secrets@1":
+        addNode(nodes, {
+          id: actionId(ownerRef, "reconciled"),
+          kind: "reconcile-service-secrets@1",
+          phase: "reconcile",
+          ownerRef,
+          dependsOn: dependencies,
+          connection: resource.connection,
+          metadata: { names: resource.desired.names.length },
+        });
+        break;
       case "nginx-static-site@1":
+      case "nginx-node-proxy@1":
         addNode(nodes, {
           id: actionId(ownerRef, "http-ready"),
           kind: "reconcile-ingress-http@1",
@@ -222,11 +249,16 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
   }
 
   for (const unit of [...environment.units].sort((a, b) => a.id.localeCompare(b.id))) {
-    if (unit.recipe !== "static-ssh-nginx@1") throw new DeploymentGraphError(`Unsupported recipe ${unit.recipe}`);
+    if (unit.recipe !== "static-ssh-nginx@1" && unit.recipe !== "node-service-ssh-nginx@1") {
+      throw new DeploymentGraphError(`Unsupported recipe ${(unit as { recipe: string }).recipe}`);
+    }
+    const service = unit.recipe === "node-service-ssh-nginx@1";
     const recipeResources = referencedResources(unit, resources);
     const dns = onlyResource(unit, recipeResources, "digitalocean-dns-record@1");
     const directory = onlyResource(unit, recipeResources, "host-release-directory@1");
-    const ingress = onlyResource(unit, recipeResources, "nginx-static-site@1");
+    const ingress = service
+      ? onlyResource(unit, recipeResources, "nginx-node-proxy@1")
+      : onlyResource(unit, recipeResources, "nginx-static-site@1");
     const certificate = onlyResource(unit, recipeResources, "letsencrypt-certificate@1");
     const ingressRef = `resource:${ingress.id}`;
     const dnsReadyId = actionId(`resource:${dns.id}`, "reconciled");
@@ -234,7 +266,17 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
     // The recipe fixes first-certificate ordering even if a hand-built typed manifest omitted
     // the recommended explicit resource edges.
     addDependencies(nodes, directoryReadyId, [dnsReadyId]);
-    addDependencies(nodes, actionId(ingressRef, "http-ready"), [dnsReadyId, directoryReadyId]);
+    const ingressPrerequisites = [dnsReadyId, directoryReadyId];
+    if (service) {
+      // The process exists, with its configuration and secrets, before nginx routes to it.
+      const serviceResource = onlyResource(unit, recipeResources, "systemd-node-service@1");
+      const serviceReadyId = actionId(`resource:${serviceResource.id}`, "reconciled");
+      addDependencies(nodes, serviceReadyId, [directoryReadyId]);
+      ingressPrerequisites.push(serviceReadyId);
+      const secrets = recipeResources.find((resource) => resource.kind === "service-secrets@1");
+      if (secrets) addDependencies(nodes, actionId(`resource:${secrets.id}`, "reconciled"), [serviceReadyId]);
+    }
+    addDependencies(nodes, actionId(ingressRef, "http-ready"), ingressPrerequisites);
     // Certbot's webroot challenge must be served by the active nginx process,
     // not merely written to sites-available on disk.
     const httpReloadId = actionId(ingressRef, "http-reloaded");
@@ -281,7 +323,7 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
 
     const resourceVerifyIds = recipeResources.map((resource) => {
       const id = actionId(`unit:${unit.id}/resource:${resource.id}`, "verified");
-      const dependency = resource.kind === "nginx-static-site@1" || resource.kind === "letsencrypt-certificate@1"
+      const dependency = resource.kind === "nginx-static-site@1" || resource.kind === "nginx-node-proxy@1" || resource.kind === "letsencrypt-certificate@1"
         ? reloadId
         : resourceReadyAction(resource);
       addNode(nodes, {
@@ -309,7 +351,7 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
     const stageId = actionId(unitRef, "staged");
     addNode(nodes, {
       id: stageId,
-      kind: "stage-static-release@1",
+      kind: service ? "stage-service-release@1" : "stage-static-release@1",
       phase: "release",
       ownerRef: unitRef,
       dependsOn: [pm2BeforeId],
@@ -319,7 +361,7 @@ function expandEnvironment(manifest: DeploymentManifestV1, environment: Environm
     const activateId = actionId(unitRef, "activated");
     addNode(nodes, {
       id: activateId,
-      kind: "activate-static-release@1",
+      kind: service ? "activate-service-release@1" : "activate-static-release@1",
       phase: "activate",
       ownerRef: unitRef,
       dependsOn: [stageId],

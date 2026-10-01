@@ -44,7 +44,7 @@ func infrastructureOperation(operation string) bool {
 	switch operation {
 	case "observe-resource", "observe-target", "reconcile-release-directory", "reconcile-ingress-http",
 		"reconcile-certificate", "reconcile-ingress-tls", "validate-nginx", "reload-nginx",
-		"snapshot-pm2", "compare-pm2":
+		"snapshot-pm2", "compare-pm2", "reconcile-service", "reconcile-service-secrets", "observe-service":
 		return true
 	default:
 		return false
@@ -53,7 +53,8 @@ func infrastructureOperation(operation string) bool {
 
 func releaseOperation(operation string) bool {
 	switch operation {
-	case "observe-target", "list-releases", "stage-static-release", "deploy-static-release", "activate-static-release", "rollback-static-release":
+	case "observe-target", "list-releases", "stage-static-release", "deploy-static-release", "activate-static-release", "rollback-static-release",
+		"observe-service", "deploy-service-release", "activate-service-release", "rollback-service-release":
 		return true
 	default:
 		return false
@@ -72,7 +73,7 @@ func validateRequest(request Request, target TargetConfig) error {
 	if len(request.Desired) == 0 || len(request.Desired) > maxHeaderBytes {
 		return errors.New("desired payload is missing or too large")
 	}
-	mutating := request.Operation != "observe-resource" && request.Operation != "observe-target" && request.Operation != "list-releases" && request.Operation != "snapshot-pm2" && request.Operation != "compare-pm2" && request.Operation != "validate-nginx"
+	mutating := !slices.Contains([]string{"observe-resource", "observe-target", "list-releases", "snapshot-pm2", "compare-pm2", "validate-nginx", "observe-service"}, request.Operation)
 	if mutating {
 		if !correlationPattern.MatchString(request.IdempotencyKey) || !digestPattern.MatchString(request.PlanDigest) {
 			return errors.New("mutation correlation is invalid")
@@ -82,7 +83,7 @@ func validateRequest(request Request, target TargetConfig) error {
 			return errors.New("mutation approval is expired or outside the maximum window")
 		}
 	}
-	if request.Operation != "stage-static-release" && request.Operation != "deploy-static-release" && request.ArchiveBytes != 0 {
+	if !slices.Contains([]string{"stage-static-release", "deploy-static-release", "deploy-service-release"}, request.Operation) && request.ArchiveBytes != 0 {
 		return errors.New("only staging accepts archive bytes")
 	}
 	return nil

@@ -887,6 +887,22 @@ export class DeploymentStore {
     return this.getConnection(input.connectionId);
   }
 
+  /** The generation of a service's runtime secrets; 0 until one is first stored. */
+  getServiceSecretGeneration(owner: string): number {
+    const row = this.database
+      .prepare("SELECT generation FROM deployment_service_secret_generations WHERE owner = ?")
+      .get(text(owner, "secret owner")) as { generation: number } | undefined;
+    return row?.generation ?? 0;
+  }
+
+  setServiceSecretGeneration(owner: string, generation: number, at: number): void {
+    if (!Number.isSafeInteger(generation) || generation < 0) throw new Error("secret generation is invalid");
+    this.database
+      .prepare(`INSERT INTO deployment_service_secret_generations (owner, generation, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(owner) DO UPDATE SET generation = excluded.generation, updated_at = excluded.updated_at`)
+      .run(text(owner, "secret owner"), generation, at);
+  }
+
   getConnection(connectionId: string): DeploymentConnection {
     const row = this.database
       .prepare(

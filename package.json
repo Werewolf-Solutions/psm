@@ -1,6 +1,6 @@
 {
   "name": "psm",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "description": "Workspace cockpit and project glue — scans every project, runs work sessions, and helps reuse capabilities before creating new projects. Runs locally, or as an agent driven by the hosted cockpit at psm.werewolf.solutions.",
   "type": "module",
   "engines": {

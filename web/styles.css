@@ -2029,3 +2029,7 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 }
 /* A connection action that failed: the next thing to act on, so it reads as one. */
 .dep-github-setup [role="status"][data-state="error"] { color: #f85149; font-size: 12px; padding: 8px 10px; border: 1px solid currentColor; border-radius: 8px; }
+/* A runtime secret: typed once, never shown again. */
+.dep-secret-form { display: flex; gap: 6px; margin-top: 6px; max-width: 420px; }
+.dep-secret-form .dep-connection-input { flex: 1; min-width: 0; }
+.dep-secret-row [role="status"][data-state="error"] { color: #f85149; }

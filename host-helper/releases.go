@@ -47,7 +47,8 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	if !idPattern.MatchString(desired.ReleaseID) || !idPattern.MatchString(desired.ArtifactID) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(desired.CommitSHA) || !idPattern.MatchString(desired.Version) {
 		return nil, errors.New("release or artifact identity is invalid")
 	}
-	if desired.PayloadAlgorithm != payloadAlgorithm || !digestPattern.MatchString(desired.PayloadDigest) || !digestPattern.MatchString(desired.ArchiveDigest) {
+	root := payloadRoot(target)
+	if desired.PayloadAlgorithm != targetAlgorithm(target) || !digestPattern.MatchString(desired.PayloadDigest) || !digestPattern.MatchString(desired.ArchiveDigest) {
 		return nil, errors.New("artifact digest contract is invalid")
 	}
 	if desired.MaximumFiles < 1 || desired.MaximumFiles > 100_000 || desired.MaximumBytes < 1 || desired.MaximumBytes > 1024*1024*1024 {
@@ -57,7 +58,7 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 		if existing.PayloadDigest == desired.PayloadDigest && existing.ArchiveDigest == desired.ArchiveDigest && existing.ArtifactID == desired.ArtifactID {
 			// A release staged by an older helper kept the service umask's private
 			// modes; restaging the same release repairs them for nginx.
-			if err := publishRelease(filepath.Join(target.CanonicalRoot, "releases", desired.ReleaseID)); err != nil {
+			if err := publishRelease(filepath.Join(target.CanonicalRoot, "releases", desired.ReleaseID), target.Service != nil); err != nil {
 				return nil, err
 			}
 			return existing, nil
@@ -74,7 +75,7 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	if err := os.RemoveAll(incoming); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(incoming, "site"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(incoming, root), 0755); err != nil {
 		return nil, err
 	}
 	cleanup := true
@@ -105,8 +106,8 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 			archiveName = strings.TrimSuffix(archiveName, "/")
 		}
 		name, err := canonicalRelativePath(archiveName)
-		if err != nil || (name != "site" && !strings.HasPrefix(name, "site/")) {
-			return nil, errors.New("archive path is outside site/")
+		if err != nil || (name != root && !strings.HasPrefix(name, root+"/")) {
+			return nil, fmt.Errorf("archive path is outside %s/", root)
 		}
 		if seen[name] {
 			return nil, errors.New("archive contains a duplicate path")
@@ -122,7 +123,7 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 				return nil, err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if name == "site" || header.Size < 0 {
+			if name == root || header.Size < 0 {
 				return nil, errors.New("archive file is invalid")
 			}
 			extractedFiles++
@@ -133,7 +134,12 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 			if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
 				return nil, err
 			}
-			file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+			mode := os.FileMode(0644)
+			// A service release carries its runtime: keep executables executable.
+			if target.Service != nil && header.Mode&0o111 != 0 {
+				mode = 0755
+			}
+			file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 			if err != nil {
 				return nil, err
 			}
@@ -156,17 +162,26 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	if observedArchive != desired.ArchiveDigest {
 		return nil, errors.New("transport archive digest mismatch")
 	}
-	if _, err := os.Stat(filepath.Join(incoming, "site", "version.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(incoming, root, "version.json")); err != nil {
 		return nil, errors.New("payload has no generated version.json")
 	}
-	observedPayload, fileCount, payloadBytes, err := payloadDigest(filepath.Join(incoming, "site"), desired.MaximumFiles, desired.MaximumBytes)
+	if target.Service != nil {
+		node, err := os.Stat(filepath.Join(incoming, root, "runtime", "bin", "node"))
+		if err != nil || !node.Mode().IsRegular() || node.Mode().Perm()&0o100 == 0 {
+			return nil, errors.New("service payload has no executable runtime/bin/node")
+		}
+		if _, err := os.Stat(filepath.Join(incoming, root, "app", filepath.FromSlash(target.Service.Entry))); err != nil {
+			return nil, errors.New("service payload has no app entry point")
+		}
+	}
+	observedPayload, fileCount, payloadBytes, err := treeDigest(targetAlgorithm(target), filepath.Join(incoming, root), desired.MaximumFiles, desired.MaximumBytes)
 	if err != nil {
 		return nil, err
 	}
 	if observedPayload != desired.PayloadDigest {
 		return nil, errors.New("extracted payload digest mismatch")
 	}
-	if err := publishRelease(incoming); err != nil {
+	if err := publishRelease(incoming, target.Service != nil); err != nil {
 		return nil, err
 	}
 	receipt := releaseReceipt{
@@ -193,10 +208,11 @@ func stageRelease(target TargetConfig, targetDigest string, request Request, arc
 	return receipt, nil
 }
 
-// publishRelease makes a staged release readable by nginx whatever the helper's
-// UMask (0027 in the shipped unit): directories 0755, files 0644. Modes are not
-// part of the payload digest, and a link or special file is refused outright.
-func publishRelease(root string) error {
+// publishRelease makes a staged release readable by nginx (static) or by the
+// service user (service) whatever the helper's UMask (0027 in the shipped unit):
+// directories 0755, files 0644, and for a service, executables 0755. A link or
+// special file is refused outright.
+func publishRelease(root string, keepExecutable bool) error {
 	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -205,6 +221,15 @@ func publishRelease(root string) error {
 		case entry.IsDir():
 			return os.Chmod(path, 0755)
 		case entry.Type().IsRegular():
+			if keepExecutable {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				if info.Mode().Perm()&0o111 != 0 {
+					return os.Chmod(path, 0755)
+				}
+			}
 			return os.Chmod(path, 0644)
 		default:
 			return errors.New("release contains a link or special file")
@@ -232,7 +257,7 @@ func activeRelease(target TargetConfig) (*releaseReceipt, error) {
 		return nil, err
 	}
 	parts := strings.Split(filepath.ToSlash(link), "/")
-	if len(parts) != 3 || parts[0] != "releases" || parts[2] != "site" || !idPattern.MatchString(parts[1]) {
+	if len(parts) != 3 || parts[0] != "releases" || parts[2] != payloadRoot(target) || !idPattern.MatchString(parts[1]) {
 		return nil, errors.New("current link is outside the release layout")
 	}
 	receipt, err := readReceipt(target, parts[1])
@@ -270,7 +295,7 @@ func activateRelease(stateDir string, target TargetConfig, targetDigest string, 
 	}
 	temporary := filepath.Join(target.CanonicalRoot, ".current-"+desired.ReleaseID)
 	_ = os.Remove(temporary)
-	if err := os.Symlink(filepath.ToSlash(filepath.Join("releases", desired.ReleaseID, "site")), temporary); err != nil {
+	if err := os.Symlink(filepath.ToSlash(filepath.Join("releases", desired.ReleaseID, payloadRoot(target))), temporary); err != nil {
 		return nil, err
 	}
 	if err := os.Rename(temporary, filepath.Join(target.CanonicalRoot, "current")); err != nil {

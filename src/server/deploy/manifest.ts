@@ -35,7 +35,9 @@ const SECRET_VALUE_PATTERNS = [
   /\bAKIA[A-Z0-9]{16}\b/,
   /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/i,
   /\bBasic\s+[A-Za-z0-9+/=]{12,}\b/i,
-  /\b[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
+  // A JWT: its header always encodes `{"`, so it starts with eyJ. Without that
+  // anchor a hostname such as handyman-staging.werewolf.solutions matched.
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
   /:\/\/[^/?#\s:@]+:[^/?#\s@]+@/,
 ];
 
@@ -52,7 +54,25 @@ const RESOURCE_KINDS = new Set([
   "host-release-directory@1",
   "nginx-static-site@1",
   "letsencrypt-certificate@1",
+  "systemd-node-service@1",
+  "service-secrets@1",
+  "nginx-node-proxy@1",
 ]);
+const ENV_NAME_RE = /^[A-Z_][A-Z0-9_]{0,99}$/;
+const SCRIPT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$/;
+const URL_PATH_RE = /^\/[A-Za-z0-9._~/-]{0,200}$/;
+
+/** Names the service unit owns, or that change how Node or the loader behave (mirrors the host helper). */
+function reservedEnvironmentName(name: string): boolean {
+  if (["HOST", "PORT", "PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "NODE_ENV_FILE"].includes(name)) return true;
+  if (name.startsWith("NODE_") && name !== "NODE_ENV") return true;
+  return ["LD_", "PSM_", "SYSTEMD_", "INVOCATION_", "NOTIFY_", "LISTEN_", "CREDENTIALS_"].some((prefix) => name.startsWith(prefix));
+}
+
+function validateEnvironmentName(v: Validator, name: string, at: string): void {
+  if (!ENV_NAME_RE.test(name)) v.issue("invalid-env-name", at, "must be an upper-case environment variable name");
+  else if (reservedEnvironmentName(name)) v.issue("reserved-env-name", at, `${name} is set by the service unit or changes how Node runs`);
+}
 
 const DEPENDENCY_KINDS = new Set([
   "http-status@1",
@@ -496,7 +516,79 @@ function validateResource(
     };
   }
 
+  if (kind === "systemd-node-service@1") {
+    const desired = v.object(base?.desired, `${at}.desired`, ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config"],
+      ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config"]);
+    const rawConfig = v.object(desired?.config, `${at}.desired.config`, Object.keys((desired?.config as object | undefined) ?? {}));
+    const config: Record<string, string> = {};
+    if (rawConfig) {
+      if (Object.keys(rawConfig).length > 64) v.issue("range", `${at}.desired.config`, "must contain no more than 64 entries");
+      for (const [name, rawValue] of Object.entries(rawConfig).sort(([a], [b]) => a.localeCompare(b))) {
+        const valueAt = `${at}.desired.config.${name}`;
+        validateEnvironmentName(v, name, valueAt);
+        // Config is committed and shown in plans: anything secret-shaped belongs in service-secrets@1.
+        if (SECRET_KEY_RE.test(name)) v.issue("secret-shaped", valueAt, `${name} looks like a secret; declare it in a service-secrets@1 resource instead`);
+        const value = v.string(rawValue, valueAt, 0, 4096);
+        if (hasSecretShape(value)) v.issue("secret-shaped", valueAt, "value resembles credential material; declare it as a secret instead");
+        config[name] = value;
+      }
+    }
+    const healthPath = v.string(desired?.healthPath, `${at}.desired.healthPath`, 1, 200);
+    if (!URL_PATH_RE.test(healthPath)) v.issue("invalid-url-path", `${at}.desired.healthPath`, "must be an absolute URL path");
+    return {
+      id,
+      kind,
+      connection: validateConnectionReference(v, base?.connection, `${at}.connection`, connections, "ssh-host-helper@1"),
+      ...(dependsOn ? { dependsOn } : {}),
+      desired: {
+        entry: validateRelativeFile(v, desired?.entry, `${at}.desired.entry`),
+        healthPath,
+        startupTimeoutSeconds: v.integer(desired?.startupTimeoutSeconds, `${at}.desired.startupTimeoutSeconds`, 5, 300),
+        memoryMaxMb: v.integer(desired?.memoryMaxMb, `${at}.desired.memoryMaxMb`, 64, 4096),
+        config,
+      },
+    };
+  }
+
+  if (kind === "service-secrets@1") {
+    const desired = v.object(base?.desired, `${at}.desired`, ["names"], ["names"]);
+    const names = validateStringArray(v, desired?.names, `${at}.desired.names`, 1, 64);
+    names.forEach((name, index) => validateEnvironmentName(v, name, `${at}.desired.names[${index}]`));
+    if (new Set(names).size !== names.length) v.issue("duplicate-id", `${at}.desired.names`, "names must be unique");
+    return {
+      id,
+      kind,
+      connection: validateConnectionReference(v, base?.connection, `${at}.connection`, connections, "ssh-host-helper@1"),
+      ...(dependsOn ? { dependsOn } : {}),
+      desired: { names: [...names].sort() },
+    };
+  }
+
+  if (kind === "nginx-node-proxy@1") {
+    const desired = v.object(base?.desired, `${at}.desired`, ["hostname", "securityHeaders", "maxBodyMb"], ["hostname", "securityHeaders", "maxBodyMb"]);
+    return {
+      id,
+      kind,
+      connection: validateConnectionReference(v, base?.connection, `${at}.connection`, connections, "ssh-host-helper@1"),
+      ...(dependsOn ? { dependsOn } : {}),
+      desired: {
+        hostname: validateHostname(v, desired?.hostname, `${at}.desired.hostname`),
+        securityHeaders: v.oneOf(desired?.securityHeaders, `${at}.desired.securityHeaders`, ["app-managed@1"] as const),
+        maxBodyMb: v.integer(desired?.maxBodyMb, `${at}.desired.maxBodyMb`, 1, 100),
+      },
+    };
+  }
+
   return { id, kind, connection: "", desired: {} } as unknown as ResourceManifest;
+}
+
+/** A canonical relative file path such as bin/www: no traversal, spaces or shell characters. */
+function validateRelativeFile(v: Validator, value: unknown, at: string): string {
+  const raw = v.string(value, at, 1, 200);
+  if (!/^[A-Za-z0-9._/-]+$/.test(raw) || raw.startsWith("/") || path.posix.normalize(raw) !== raw || raw.split("/").some((part) => !part || part === "." || part === "..")) {
+    v.issue("invalid-path", at, "must be a canonical relative path without traversal");
+  }
+  return raw;
 }
 
 function validateVerification(
@@ -541,10 +633,15 @@ function validateUnit(
     ["id", "recipe", "resourceRefs", "artifact", "executor", "target", "verification"],
     ["id", "recipe", "resourceRefs", "artifact", "executor", "target", "verification"]);
   const id = validateId(v, object?.id, `${at}.id`);
-  const recipe = v.oneOf(object?.recipe, `${at}.recipe`, ["static-ssh-nginx@1"] as const);
+  const recipe = v.oneOf(object?.recipe, `${at}.recipe`, ["static-ssh-nginx@1", "node-service-ssh-nginx@1"] as const);
   const resourceRefs = validateStringArray(v, object?.resourceRefs, `${at}.resourceRefs`, 1, 50);
+  const service = recipe === "node-service-ssh-nginx@1";
 
-  const artifact = v.object(object?.artifact, `${at}.artifact`, ["kind", "output", "buildProfile"], ["kind", "output", "buildProfile"]);
+  const artifact = service
+    ? v.object(object?.artifact, `${at}.artifact`,
+      ["kind", "runtime", "install", "buildScript", "serviceRoot", "entry", "publicDir", "buildProfile"],
+      ["kind", "runtime", "install", "buildScript", "serviceRoot", "entry", "publicDir", "buildProfile"])
+    : v.object(object?.artifact, `${at}.artifact`, ["kind", "output", "buildProfile"], ["kind", "output", "buildProfile"]);
   const buildProfile = v.object(artifact?.buildProfile, `${at}.artifact.buildProfile`, ["id", "publicInputs"], ["id", "publicInputs"]);
   const publicInputsObject = v.object(buildProfile?.publicInputs, `${at}.artifact.buildProfile.publicInputs`, Object.keys((buildProfile?.publicInputs as object | undefined) ?? {}));
   const publicInputs: Record<string, string> = {};
@@ -572,18 +669,35 @@ function validateUnit(
   const targetId = v.string(target?.targetId, `${at}.target.targetId`, 1, 200);
   if (!TARGET_ID_RE.test(targetId)) v.issue("invalid-target-id", `${at}.target.targetId`, "contains unsupported characters");
 
+  const profile = { id: validateId(v, buildProfile?.id, `${at}.artifact.buildProfile.id`), publicInputs };
+  let unitArtifact: UnitManifest["artifact"];
+  if (service) {
+    const buildScript = v.string(artifact?.buildScript, `${at}.artifact.buildScript`, 1, 64);
+    if (!SCRIPT_NAME_RE.test(buildScript)) v.issue("invalid-script", `${at}.artifact.buildScript`, "must be the name of a package.json script");
+    unitArtifact = {
+      kind: v.oneOf(artifact?.kind, `${at}.artifact.kind`, ["node-service@1"] as const),
+      runtime: v.oneOf(artifact?.runtime, `${at}.artifact.runtime`, ["node@20", "node@22", "node@24"] as const),
+      install: v.array(artifact?.install, `${at}.artifact.install`, 1, 10)
+        .map((dir, index) => dir === "." ? "." : normalizeArtifactPath(v, dir, `${at}.artifact.install[${index}]`, projectRoot)),
+      buildScript,
+      serviceRoot: normalizeArtifactPath(v, artifact?.serviceRoot, `${at}.artifact.serviceRoot`, projectRoot),
+      entry: validateRelativeFile(v, artifact?.entry, `${at}.artifact.entry`),
+      publicDir: validateRelativeFile(v, artifact?.publicDir, `${at}.artifact.publicDir`),
+      buildProfile: profile,
+    };
+  } else {
+    unitArtifact = {
+      kind: v.oneOf(artifact?.kind, `${at}.artifact.kind`, ["static-files@1"] as const),
+      output: normalizeArtifactPath(v, artifact?.output, `${at}.artifact.output`, projectRoot),
+      buildProfile: profile,
+    };
+  }
+
   return {
     id,
     recipe,
     resourceRefs,
-    artifact: {
-      kind: v.oneOf(artifact?.kind, `${at}.artifact.kind`, ["static-files@1"] as const),
-      output: normalizeArtifactPath(v, artifact?.output, `${at}.artifact.output`, projectRoot),
-      buildProfile: {
-        id: validateId(v, buildProfile?.id, `${at}.artifact.buildProfile.id`),
-        publicInputs,
-      },
-    },
+    artifact: unitArtifact,
     executor: {
       kind: v.oneOf(executor?.kind, `${at}.executor.kind`, ["github-actions@1"] as const),
       connection: validateConnectionReference(v, executor?.connection, `${at}.executor.connection`, connections, "github-actions@1"),
@@ -599,7 +713,7 @@ function validateUnit(
     },
     verification: v.array(object?.verification, `${at}.verification`, 1, 50)
       .map((probe, index) => validateVerification(v, probe, `${at}.verification[${index}]`, risk, connections)),
-  };
+  } as UnitManifest;
 }
 
 function validateBranch(v: Validator, value: unknown, at: string): string {
@@ -708,6 +822,7 @@ function validateEnvironment(v: Validator, value: unknown, at: string, projectRo
   const resourceById = new Map(resources.map((resource) => [resource.id, resource]));
   const allowedSubstates: Record<string, Set<string>> = {
     "nginx-static-site@1": new Set(["http-ready", "tls-ready"]),
+    "nginx-node-proxy@1": new Set(["http-ready", "tls-ready"]),
     "letsencrypt-certificate@1": new Set(["certificate-ready"]),
   };
   resources.forEach((resource, resourceIndex) => {
@@ -757,16 +872,42 @@ function validateEnvironment(v: Validator, value: unknown, at: string, projectRo
       if (refs.has(parsed.id)) v.issue("duplicate-reference", refAt, `resource ${parsed.id} is referenced more than once`);
       refs.add(parsed.id);
     });
-    const requiredKinds = [
-      "digitalocean-dns-record@1",
-      "host-release-directory@1",
-      "nginx-static-site@1",
-      "letsencrypt-certificate@1",
-    ];
+    const requiredKinds = unit.recipe === "node-service-ssh-nginx@1"
+      ? ["digitalocean-dns-record@1", "host-release-directory@1", "systemd-node-service@1", "nginx-node-proxy@1", "letsencrypt-certificate@1"]
+      : ["digitalocean-dns-record@1", "host-release-directory@1", "nginx-static-site@1", "letsencrypt-certificate@1"];
     const referenced = [...refs].map((ref) => resourceById.get(ref)).filter(Boolean) as ResourceManifest[];
     for (const kind of requiredKinds) {
       const count = referenced.filter((resource) => resource.kind === kind).length;
-      if (count !== 1) v.issue("recipe-resource-set", `${at}.units[${unitIndex}].resourceRefs`, `static-ssh-nginx@1 requires exactly one ${kind}; found ${count}`);
+      if (count !== 1) v.issue("recipe-resource-set", `${at}.units[${unitIndex}].resourceRefs`, `${unit.recipe} requires exactly one ${kind}; found ${count}`);
+    }
+    const allowedKinds = new Set([...requiredKinds, ...(unit.recipe === "node-service-ssh-nginx@1" ? ["service-secrets@1"] : [])]);
+    for (const resource of referenced) {
+      if (!allowedKinds.has(resource.kind)) v.issue("recipe-resource-set", `${at}.units[${unitIndex}].resourceRefs`, `${unit.recipe} cannot assemble ${resource.kind}`);
+    }
+    if (referenced.filter((resource) => resource.kind === "service-secrets@1").length > 1) {
+      v.issue("recipe-resource-set", `${at}.units[${unitIndex}].resourceRefs`, `${unit.recipe} takes at most one service-secrets@1`);
+    }
+    if (unit.recipe === "node-service-ssh-nginx@1") {
+      const serviceResource = referenced.find((resource) => resource.kind === "systemd-node-service@1");
+      const secrets = referenced.find((resource) => resource.kind === "service-secrets@1");
+      const proxy = referenced.find((resource) => resource.kind === "nginx-node-proxy@1");
+      const certificate = referenced.find((resource) => resource.kind === "letsencrypt-certificate@1");
+      const directoryResource = referenced.find((resource) => resource.kind === "host-release-directory@1");
+      if (directoryResource?.kind === "host-release-directory@1" && directoryResource.desired.root !== unit.target.root) {
+        v.issue("target-root-mismatch", `${at}.units[${unitIndex}].target.root`, "must equal the referenced release-directory root");
+      }
+      if (serviceResource?.kind === "systemd-node-service@1" && unit.artifact.kind === "node-service@1" && serviceResource.desired.entry !== unit.artifact.entry) {
+        v.issue("entry-mismatch", `${at}.units[${unitIndex}].artifact.entry`, "must equal the service resource's entry");
+      }
+      if (serviceResource?.kind === "systemd-node-service@1" && secrets?.kind === "service-secrets@1") {
+        for (const name of secrets.desired.names) {
+          if (Object.hasOwn(serviceResource.desired.config, name)) v.issue("config-secret-overlap", `${at}.units[${unitIndex}]`, `${name} is both config and a secret`);
+        }
+      }
+      if (proxy?.kind === "nginx-node-proxy@1" && certificate?.kind === "letsencrypt-certificate@1" && proxy.desired.hostname !== certificate.desired.hostname) {
+        v.issue("hostname-mismatch", `${at}.units[${unitIndex}]`, "ingress and TLS hostnames must match");
+      }
+      return;
     }
     const directory = referenced.find((resource) => resource.kind === "host-release-directory@1");
     const ingress = referenced.find((resource) => resource.kind === "nginx-static-site@1");

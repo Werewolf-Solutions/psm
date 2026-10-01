@@ -7,6 +7,16 @@ export const RELEASE_EXECUTION_CONTRACT_SCHEMA =
 export const STATIC_RELEASE_RESULT_SCHEMA =
   "psm.werewolf.solutions/static-release-result/v1" as const;
 export const STATIC_PAYLOAD_ALGORITHM = "psm-static-tree-sha256@1" as const;
+/** A service bundle also records each file's executable bit: it carries its Node runtime. */
+export const SERVICE_PAYLOAD_ALGORITHM = "psm-service-tree-sha256@1" as const;
+export type PayloadAlgorithm = typeof STATIC_PAYLOAD_ALGORITHM | typeof SERVICE_PAYLOAD_ALGORITHM;
+
+function payloadAlgorithm(value: unknown, field: string): PayloadAlgorithm {
+  if (value !== STATIC_PAYLOAD_ALGORITHM && value !== SERVICE_PAYLOAD_ALGORITHM) {
+    fail(field, `must be ${STATIC_PAYLOAD_ALGORITHM} or ${SERVICE_PAYLOAD_ALGORITHM}`);
+  }
+  return value;
+}
 
 export interface StaticPayloadLimits {
   maxFiles: number;
@@ -38,7 +48,7 @@ export interface PreparedArtifactIdentity {
   commitSha: string;
   /** The host helper refuses a release without one, so it is approved, not looked up later. */
   version: string;
-  payloadAlgorithm: typeof STATIC_PAYLOAD_ALGORITHM;
+  payloadAlgorithm: PayloadAlgorithm;
   payloadLimits: StaticPayloadLimits;
   payloadDigest: string;
   archiveDigest: string;
@@ -133,7 +143,7 @@ export interface PrepareArtifactResult {
   version: string;
   manifestDigest: string;
   buildProfileDigest: string;
-  payloadAlgorithm: typeof STATIC_PAYLOAD_ALGORITHM;
+  payloadAlgorithm: PayloadAlgorithm;
   payloadLimits: StaticPayloadLimits;
   payloadDigest: string;
   archiveDigest: string;
@@ -167,7 +177,7 @@ export interface StaticReleaseResult {
   psmArtifactId: string;
   githubArtifactId: string;
   producerRunId: string;
-  payloadAlgorithm: typeof STATIC_PAYLOAD_ALGORITHM;
+  payloadAlgorithm: PayloadAlgorithm;
   payloadDigest: string;
   archiveDigest: string;
   state: "activated" | "rolled-back" | "failed";
@@ -333,9 +343,7 @@ function parseArtifactIdentity(value: unknown, field: string): PreparedArtifactI
     "payloadDigest",
     "archiveDigest",
   ]);
-  if (input.payloadAlgorithm !== STATIC_PAYLOAD_ALGORITHM) {
-    fail(`${field}.payloadAlgorithm`, `must be ${STATIC_PAYLOAD_ALGORITHM}`);
-  }
+  const algorithm = payloadAlgorithm(input.payloadAlgorithm, `${field}.payloadAlgorithm`);
   return {
     psmArtifactId: id(input.psmArtifactId, `${field}.psmArtifactId`),
     githubArtifactId: validateProviderId(input.githubArtifactId, `${field}.githubArtifactId`),
@@ -343,7 +351,7 @@ function parseArtifactIdentity(value: unknown, field: string): PreparedArtifactI
     sourceRepository: validateRepository(input.sourceRepository, `${field}.sourceRepository`),
     commitSha: validateCommitSha(input.commitSha, `${field}.commitSha`),
     version: releaseVersion(input.version, `${field}.version`),
-    payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
+    payloadAlgorithm: algorithm,
     payloadLimits: parsePayloadLimits(input.payloadLimits, `${field}.payloadLimits`),
     payloadDigest: validateDigest(input.payloadDigest, `${field}.payloadDigest`),
     archiveDigest: validateDigest(input.archiveDigest, `${field}.archiveDigest`),
@@ -619,9 +627,7 @@ export function parsePrepareArtifactResult(value: unknown): PrepareArtifactResul
   if (input.schema !== PREPARE_ARTIFACT_RESULT_SCHEMA) {
     fail("result.schema", `must be ${PREPARE_ARTIFACT_RESULT_SCHEMA}`);
   }
-  if (input.payload_algorithm !== STATIC_PAYLOAD_ALGORITHM) {
-    fail("result.payload_algorithm", `must be ${STATIC_PAYLOAD_ALGORITHM}`);
-  }
+  const algorithm = payloadAlgorithm(input.payload_algorithm, "result.payload_algorithm");
   const version = releaseVersion(input.version, "result.version");
   return {
     schema: PREPARE_ARTIFACT_RESULT_SCHEMA,
@@ -637,7 +643,7 @@ export function parsePrepareArtifactResult(value: unknown): PrepareArtifactResul
     version,
     manifestDigest: validateDigest(input.manifest_digest, "result.manifest_digest"),
     buildProfileDigest: validateDigest(input.build_profile_digest, "result.build_profile_digest"),
-    payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
+    payloadAlgorithm: algorithm,
     payloadLimits: parsePayloadLimits(input.payload_limits, "result.payload_limits"),
     payloadDigest: validateDigest(input.payload_digest, "result.payload_digest"),
     archiveDigest: validateDigest(input.archive_digest, "result.archive_digest"),
@@ -658,9 +664,7 @@ export function parseStaticReleaseResult(value: unknown): StaticReleaseResult {
   if (input.schema !== STATIC_RELEASE_RESULT_SCHEMA) {
     fail("result.schema", `must be ${STATIC_RELEASE_RESULT_SCHEMA}`);
   }
-  if (input.payload_algorithm !== STATIC_PAYLOAD_ALGORITHM) {
-    fail("result.payload_algorithm", `must be ${STATIC_PAYLOAD_ALGORITHM}`);
-  }
+  const algorithm = payloadAlgorithm(input.payload_algorithm, "result.payload_algorithm");
   if (input.state !== "activated" && input.state !== "rolled-back" && input.state !== "failed") {
     fail("result.state", "must be activated, rolled-back or failed");
   }
@@ -714,7 +718,7 @@ export function parseStaticReleaseResult(value: unknown): StaticReleaseResult {
     psmArtifactId: id(input.psm_artifact_id, "result.psm_artifact_id"),
     githubArtifactId: validateProviderId(input.github_artifact_id, "result.github_artifact_id"),
     producerRunId: validateProviderId(input.producer_run_id, "result.producer_run_id"),
-    payloadAlgorithm: STATIC_PAYLOAD_ALGORITHM,
+    payloadAlgorithm: algorithm,
     payloadDigest: validateDigest(input.payload_digest, "result.payload_digest"),
     archiveDigest: validateDigest(input.archive_digest, "result.archive_digest"),
     state: input.state,

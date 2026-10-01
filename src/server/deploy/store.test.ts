@@ -175,6 +175,7 @@ test("migration creates every managed deployment relation with foreign keys enab
       "deployment_resource_bindings",
       "deployment_run_steps",
       "deployment_runs",
+      "deployment_service_secret_generations",
       "deployment_target_locks",
       "deployment_watch_snapshots",
     ],

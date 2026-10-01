@@ -49,15 +49,16 @@ func digestCommand(args []string) {
 	root := flags.String("root", "", "payload tree")
 	maximumFiles := flags.Int("max-files", 100000, "maximum files")
 	maximumBytes := flags.Int64("max-bytes", 1024*1024*1024, "maximum unpacked bytes")
+	algorithm := flags.String("algorithm", payloadAlgorithm, "payload algorithm: "+payloadAlgorithm+" or "+serviceAlgorithm)
 	_ = flags.Parse(args)
 	if *root == "" || flags.NArg() != 0 {
 		fatalf("digest requires --root and accepts no positional arguments")
 	}
-	digest, files, bytes, err := payloadDigest(*root, *maximumFiles, *maximumBytes)
+	digest, files, bytes, err := treeDigest(*algorithm, *root, *maximumFiles, *maximumBytes)
 	if err != nil {
 		fatalf("digest payload: %v", err)
 	}
-	result, _ := json.Marshal(map[string]any{"algorithm": payloadAlgorithm, "digest": digest, "files": files, "bytes": bytes})
+	result, _ := json.Marshal(map[string]any{"algorithm": *algorithm, "digest": digest, "files": files, "bytes": bytes})
 	fmt.Printf("%s\n", result)
 }
 

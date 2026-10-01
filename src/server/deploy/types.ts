@@ -143,15 +143,83 @@ export interface LetsEncryptCertificateResource {
   };
 }
 
+/**
+ * A supervised Node process: the host helper renders its systemd unit from the
+ * root-owned target contract, and these fields must equal what was enrolled.
+ */
+export interface SystemdNodeServiceResource {
+  id: string;
+  kind: "systemd-node-service@1";
+  connection: string;
+  dependsOn?: string[];
+  desired: {
+    entry: string;
+    healthPath: string;
+    startupTimeoutSeconds: number;
+    memoryMaxMb: number;
+    /** Non-secret runtime configuration, shown in plans. */
+    config: Record<string, string>;
+  };
+}
+
+/** Names of the runtime secrets; values live only in PSM's secret store and on the host. */
+export interface ServiceSecretsResource {
+  id: string;
+  kind: "service-secrets@1";
+  connection: string;
+  dependsOn?: string[];
+  desired: {
+    names: string[];
+  };
+}
+
+export interface NginxNodeProxyResource {
+  id: string;
+  kind: "nginx-node-proxy@1";
+  connection: string;
+  dependsOn?: string[];
+  desired: {
+    hostname: string;
+    securityHeaders: "app-managed@1";
+    maxBodyMb: number;
+  };
+}
+
 export type ResourceManifest =
   | DigitalOceanDnsResource
   | HostReleaseDirectoryResource
   | NginxStaticSiteResource
-  | LetsEncryptCertificateResource;
+  | LetsEncryptCertificateResource
+  | SystemdNodeServiceResource
+  | ServiceSecretsResource
+  | NginxNodeProxyResource;
 
 export interface StaticFilesArtifact {
   kind: "static-files@1";
   output: string;
+  buildProfile: {
+    id: string;
+    publicInputs: Record<string, string>;
+  };
+}
+
+/**
+ * A Node server plus its built client and the Node runtime, built once on
+ * GitHub Actions. The generated workflow bakes in the same values.
+ */
+export interface NodeServiceArtifact {
+  kind: "node-service@1";
+  runtime: "node@20" | "node@22" | "node@24";
+  /** Directories (repository-relative) whose lockfiles are installed before the build. */
+  install: string[];
+  /** A script in the root package.json that builds the client into the service. */
+  buildScript: string;
+  /** The directory that becomes the release's app/. */
+  serviceRoot: string;
+  /** The entry point, relative to serviceRoot; also the systemd service's entry. */
+  entry: string;
+  /** The served static directory, relative to serviceRoot; version.json is written there. */
+  publicDir: string;
   buildProfile: {
     id: string;
     publicInputs: Record<string, string>;
@@ -183,7 +251,17 @@ export interface StaticSshNginxUnit {
   verification: VerificationManifest[];
 }
 
-export type UnitManifest = StaticSshNginxUnit;
+export interface NodeServiceSshNginxUnit {
+  id: string;
+  recipe: "node-service-ssh-nginx@1";
+  resourceRefs: string[];
+  artifact: NodeServiceArtifact;
+  executor: GitHubActionsExecutor;
+  target: SshReleaseTarget;
+  verification: VerificationManifest[];
+}
+
+export type UnitManifest = StaticSshNginxUnit | NodeServiceSshNginxUnit;
 
 export interface ExternalHttpWatch {
   id: string;
@@ -262,6 +340,8 @@ export type DeploymentActionKind =
   | "assert-dependency@1"
   | "reconcile-dns@1"
   | "reconcile-release-directory@1"
+  | "reconcile-service@1"
+  | "reconcile-service-secrets@1"
   | "reconcile-ingress-http@1"
   | "reconcile-certificate@1"
   | "reconcile-ingress-tls@1"
@@ -271,6 +351,8 @@ export type DeploymentActionKind =
   | "snapshot-pm2@1"
   | "stage-static-release@1"
   | "activate-static-release@1"
+  | "stage-service-release@1"
+  | "activate-service-release@1"
   | "verify-release@1"
   | "compare-pm2@1"
   | "observe-watch@1";

@@ -1,6 +1,6 @@
 # `node-service-ssh-nginx@1` — design for review
 
-Status: **decided, ready to build** · 2026-10-01 · first case: handymanservices staging
+Status: **built; host side proven on a throwaway server; not yet on werewolf-alpha** · 2026-10-01 · first case: handymanservices staging
 
 This is the P08 recipe for an app that needs a running Node server: build it once on
 GitHub Actions, release the exact bytes to a host, run it as a supervised service behind
@@ -8,6 +8,44 @@ nginx, verify it, and roll back to retained bytes when verification fails. It re
 everything [`static-ssh-nginx@1`](DEPLOYMENT-SYSTEM.md#12-static-ssh-nginx1) proved (manifest,
 plans, approvals, locks, GitHub prepare/release, host helper, DNS, TLS, To do list) and adds
 only what a process needs.
+
+## What to do next
+
+1. ~~Prove the helper on a throwaway machine.~~ **Done 2026-10-01 on homelab** (Ubuntu 24.04,
+   systemd 255): enrollment, unit and secrets, two healthy releases, automatic rollback of a broken
+   one, manual rollback, secret rotation, crash restart, sandbox and loopback checks, nginx proxy
+   (HTTP stage). It found and fixed four host defects: the helper's sandbox lacked the service
+   paths; `install.sh` missed directories on a fresh host; `User=root` with `NoNewPrivileges=yes`
+   cost the helper `CAP_SETUID` on systemd 255; a host without PM2 failed the PM2 invariant.
+   Report: `/srv/homelab/reports/2026-10-01/psm-node-service-test.md`. Everything was removed after.
+2. **Install the new helper on `werewolf-alpha`** through Machines (it replaces the running
+   helper; the static Todo target keeps working, its contract digest is unchanged).
+3. **Review controller setup / update** on the Deploy page: the controller now releases service
+   bundles too, so its files change and need your review and a new pin.
+4. **Set up handymanservices** from its Deploy page (staging suggests
+   `handymanservices-staging.werewolf.solutions`), enroll its target in Machines, enter
+   `API_KEY` and `BUSINESS_ID` under Runtime secrets, and follow the To do list.
+
+## Built (2026-10-01)
+
+| Part | Where | Tested by |
+|---|---|---|
+| Host helper: `service` contract block, systemd unit and env files, secrets with keyed fingerprints, health gate (HTTP 200 + unit active + loopback-only listener), deploy/activate/rollback of service releases, nginx proxy template | `host-helper/service.go`, `releases.go`, `nginx.go` | `service_test.go` (healthy release, rollback of an unhealthy one, first release stopped, contract cannot be widened, foreign unit never replaced, secrets never in responses), race detector |
+| Manifest kinds, validation, JSON Schema, graph expansion | `types.ts`, `manifest.ts`, `graph.ts`, `schemas/` | `node-service-recipe.test.ts` |
+| Executor contract and controller accept `psm-service-tree-sha256@1`; the helper operation follows the artifact | `executor-contract.ts`, `controller/scripts/psm_controller.py` | controller `unittest`, contract tests |
+| Runtime secrets in PSM's store, compared by verdict only; generation per service | `runtime-adapters.ts`, `secrets.ts`, `store.ts` | `node-service-recipe.test.ts` |
+| Build template and generated workflow; bundle digest pinned against the helper's golden vector | `templates/prepare-node-service.mjs`, `setup.ts` | `setup.test.ts`, golden vector in Go and TS |
+| Setup detection for client + Express, config/secret split from `.env.example` (never `.env`) | `setup.ts` | `setup.test.ts` |
+| Enrollment: no-login service account outside `psm-deploy`, port picked on the server | `machines/roles.ts` | `roles.test.ts` (script syntax, port picker in bash) |
+| Deploy page: Runtime secrets section and To do items; setup page lists required project changes | `web/app.js` | manual |
+
+**Differences from the draft below.** The release goes through the existing pinned controller
+(`werewolf-static@1`), which picks the helper operation from the artifact's payload algorithm, so
+the GitHub App setup and pin you already have keep working; there is no separate `release-node.yml`.
+Node is the exact binary `actions/setup-node` installs, recorded in `version.json`; the bundle
+carries `bin/node` only, about 110 MB per release (about 550 MB for five retained). Native modules
+are refused in v1. Readiness does not yet show the service's live state (active, restarts,
+memory); the helper's `observe-service` provides it for a follow-up.
 
 ## Decisions
 

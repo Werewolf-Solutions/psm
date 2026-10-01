@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { parseKnownHost, type MachineIdentity } from "./plan.ts";
@@ -97,4 +100,44 @@ test("a CI release key extends exactly the release account the deploy plan creat
   assert.ok(plan.script.includes(`readonly PSM_RELEASE_AUTHORIZED='${releaseAuthorizedLine(base)}'`));
   assert.match(plan.script, new RegExp(`readonly PSM_CI_AUTHORIZED='command="/usr/local/libexec/psm-host-helper-client",restrict ssh-ed25519 ${blob(9).replace(/[+/]/g, "\\$&")} psm-ci-Todo-staging'`));
   assert.equal(plan.target.targetId, base.target.targetId);
+});
+
+test("a Node service target gets its own no-login account, a /srv root and a contract service block", () => {
+  const service = { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256 };
+  const plan = deploy({ hostname: "handyman-staging.example.com", projectName: "handymanservices", service });
+  assert.equal(syntax(plan.script).status, 0);
+  assert.equal(plan.target.canonicalRoot, "/srv/handyman-staging.example.com");
+  assert.equal(plan.target.allowedRootPrefix, "/srv");
+  // A Linux account name, so at most 32 characters: the readable part is shortened.
+  assert.match(plan.target.service!.account, /^psm-s-handymanservices-[a-z0-9-]*[0-9a-f]{6}$/);
+  assert.ok(plan.target.service!.account.length <= 32);
+  assert.equal(plan.target.service!.unitName, plan.target.service!.account.replace("psm-s-", "psm-svc-"));
+  assert.deepEqual({ ...plan.target.service, account: undefined, unitName: undefined }, { ...service, account: undefined, unitName: undefined });
+  const contract = JSON.parse(Buffer.from(/readonly PSM_CONTRACT_B64='([A-Za-z0-9+/=]+)'/.exec(plan.script)![1], "base64").toString());
+  assert.deepEqual(contract.service, {
+    unitName: plan.target.service!.unitName, user: plan.target.service!.account, uid: "__SERVICE_UID__", gid: "__SERVICE_GID__", port: "__SERVICE_PORT__",
+    memoryMaxMb: 256, entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, systemdDir: "/etc/systemd/system", configDir: "/etc/psm-deploy/services",
+  });
+  assert.match(plan.script, /--shell \/usr\/sbin\/nologin/);
+  assert.ok(plan.operations.some((line) => line.includes("outside psm-deploy")));
+  // A static target is unchanged.
+  const staticPlan = deploy();
+  assert.equal(staticPlan.target.service, undefined);
+  assert.equal(staticPlan.target.canonicalRoot, "/var/www/todo.example.com");
+  assert.ok(!Buffer.from(/readonly PSM_CONTRACT_B64='([A-Za-z0-9+/=]+)'/.exec(staticPlan.script)![1], "base64").toString().includes("service"));
+  assert.throws(() => deploy({ service: { ...service, entry: "../bin/sh" } }), /entry point/);
+  assert.throws(() => deploy({ service: { ...service, memoryMaxMb: 8192 } }), /memory limit/);
+});
+
+test("the enrollment script keeps a target's port and otherwise picks the first free one", () => {
+  const plan = deploy({ service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256 } });
+  const fn = /service_port\(\) \{[\s\S]*?\n\}\n/.exec(plan.script)![0];
+  const run = (targetFile: string) => spawnSync("bash", ["-c", `set -euo pipefail\nPSM_TARGET_FILE=${targetFile}\n${fn}\nservice_port`], { encoding: "utf8" });
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-port-"));
+  const enrolled = path.join(directory, "target.json");
+  fs.writeFileSync(enrolled, `{\n  "service": {\n    "port": 41007,\n    "user": "x"\n  }\n}\n`);
+  assert.equal(run(enrolled).stdout, "41007", "a re-enrolled target keeps its port");
+  const fresh = run(path.join(directory, "absent.json"));
+  assert.equal(fresh.status, 0);
+  assert.match(fresh.stdout, /^41\d{3}$/);
 });

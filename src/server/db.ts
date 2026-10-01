@@ -428,6 +428,12 @@ const MIGRATIONS: readonly string[] = [
   `ALTER TABLE agent_permissions ADD COLUMN rules TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(rules));
    ALTER TABLE agent_permissions ADD COLUMN restricted_revision INTEGER NOT NULL DEFAULT 0;
    UPDATE agent_permissions SET restricted_revision = revision;`,
+  // Runtime secrets of a managed service live in the secret store under an owner
+  // that is not a connection; their generation (never a value) is kept here so
+  // changing one invalidates approved plans like a credential change does.
+  `CREATE TABLE deployment_service_secret_generations (
+     owner TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation >= 0), updated_at INTEGER NOT NULL
+   );`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

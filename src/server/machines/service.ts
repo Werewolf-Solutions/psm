@@ -81,7 +81,7 @@ export interface MachineServiceOptions {
   buildHelper?: (arch: string) => HelperBuild;
   helperSourceDigest?: () => string;
   /** The host target a project environment's deployment manifest names, if any. */
-  hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null } | null;
+  hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number } } | null;
   now?: () => number;
 }
 
@@ -388,6 +388,7 @@ export class MachineService {
           machine: identity(machine), projectId: input.project.id, projectName: input.project.name, environmentId, risk: input.risk,
           unitId: declared?.unitId ?? input.unitId, targetId: declared?.targetId ?? input.targetId, hostname: declared?.hostname ?? input.hostname, certbotEmail: input.certbotEmail,
           canonicalRoot: declared?.root ?? input.canonicalRoot, allowedRootPrefix: declared?.allowedRootPrefix ?? input.allowedRootPrefix,
+          ...(declared?.service ? { service: declared.service } : {}),
           infraPublicKey: infraKeys.publicKey, releasePublicKey: releaseKeys.publicKey, now,
         });
         const create = async (connectionId: string, role: "infrastructure" | "release", user: string, fingerprint: string, key: Buffer) => {
@@ -620,6 +621,7 @@ export class MachineService {
           machine: identity(machine), projectId: access.projectId, projectName: access.projectName, environmentId: access.environmentId, risk: current.risk,
           unitId: current.target.unitId, targetId: current.target.targetId, hostname: current.target.hostname, certbotEmail: current.target.certbotEmail,
           canonicalRoot: current.target.canonicalRoot, allowedRootPrefix: current.target.allowedRootPrefix,
+          ...(current.target.service ? { service: current.target.service } : {}),
           infraPublicKey, releasePublicKey, ...(replaces?.target ? { replacesTarget: replaces.target } : {}), now,
         });
       }

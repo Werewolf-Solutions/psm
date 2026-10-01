@@ -129,11 +129,30 @@ func executeOperation(stateDir string, target TargetConfig, targetDigest string,
 	case "compare-pm2":
 		return comparePM2(target, request.Desired)
 	case "stage-static-release":
+		if err := requireStatic(target); err != nil {
+			return nil, err
+		}
 		return stageRelease(target, targetDigest, request, archive)
 	case "deploy-static-release":
+		if err := requireStatic(target); err != nil {
+			return nil, err
+		}
 		return deployStaticRelease(stateDir, target, targetDigest, request, archive)
 	case "activate-static-release", "rollback-static-release":
+		if err := requireStatic(target); err != nil {
+			return nil, err
+		}
 		return activateRelease(stateDir, target, targetDigest, request.Desired)
+	case "reconcile-service":
+		return reconcileService(target, request.Desired)
+	case "reconcile-service-secrets":
+		return reconcileServiceSecrets(target, request.Desired)
+	case "observe-service":
+		return observeService(target, targetDigest)
+	case "deploy-service-release":
+		return deployServiceRelease(stateDir, target, targetDigest, request, archive)
+	case "activate-service-release", "rollback-service-release":
+		return activateServiceRelease(stateDir, target, targetDigest, request.Desired)
 	default:
 		return nil, errors.New("operation is unsupported")
 	}
@@ -304,11 +323,7 @@ func nginxPath(target TargetConfig) string {
 }
 
 func reconcileIngress(target TargetConfig, raw json.RawMessage, tls bool) (any, error) {
-	var desired ingressDesired
-	if err := decodeDesired(raw, &desired); err != nil {
-		return nil, err
-	}
-	content, err := renderNginx(target, desired, tls)
+	content, err := renderIngress(target, raw, tls)
 	if err != nil {
 		return nil, err
 	}
@@ -421,6 +436,18 @@ func observeCertificate(target TargetConfig) (any, error) {
 }
 
 func observeResource(target TargetConfig, raw json.RawMessage) (any, error) {
+	// Service kinds carry different fields; route them before the strict static decode.
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if err := json.Unmarshal(raw, &kind); err == nil {
+		switch kind.Kind {
+		case "systemd-node-service@1", "service-secrets@1":
+			return observeServiceResource(target, raw)
+		case "nginx-node-proxy@1":
+			return observeProxy(target, raw)
+		}
+	}
 	var desired observeDesired
 	if err := decodeDesired(raw, &desired); err != nil {
 		return nil, err
@@ -448,6 +475,9 @@ func observeResource(target TargetConfig, raw json.RawMessage) (any, error) {
 		}
 		return map[string]any{"state": "in-sync", "root": target.CanonicalRoot, "retainReleases": desired.RetainReleases}, nil
 	case "nginx-static-site@1":
+		if err := requireStatic(target); err != nil {
+			return nil, err
+		}
 		ingress := ingressDesired{Hostname: desired.Hostname, DocumentRoot: desired.DocumentRoot, SPAFallback: desired.SPAFallback, DenyPrefixes: desired.DenyPrefixes, CachePolicy: desired.CachePolicy, SecurityHeaders: desired.SecurityHeaders}
 		tls := true
 		if desired.TLS != nil {
@@ -483,10 +513,23 @@ func observeResource(target TargetConfig, raw json.RawMessage) (any, error) {
 	}
 }
 
-func pm2Snapshot(target TargetConfig) (any, error) {
+// pm2List runs `pm2 jlist` as the target's PM2 user; tests replace it.
+var pm2List = func(target TargetConfig) ([]byte, error) {
 	command := exec.Command("runuser", "-u", target.PM2User, "--", "env", "PM2_HOME="+target.PM2Home, "pm2", "jlist")
 	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8"}
-	raw, err := command.Output()
+	return command.Output()
+}
+
+func pm2Snapshot(target TargetConfig) (any, error) {
+	raw, err := pm2List(target)
+	if err != nil {
+		var exit *exec.ExitError
+		// A host without PM2 runs no PM2 processes: that empty set is the invariant
+		// (env exits 127 when the command does not exist).
+		if errors.As(err, &exit) && exit.ExitCode() == 127 {
+			raw, err = []byte("[]"), nil
+		}
+	}
 	if err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
@@ -541,4 +584,46 @@ func comparePM2(target TargetConfig, raw json.RawMessage) (any, error) {
 		return nil, errors.New("PM2 process set changed during static deployment")
 	}
 	return result, nil
+}
+
+type proxyObserveDesired struct {
+	Kind            string `json:"kind"`
+	Hostname        string `json:"hostname"`
+	SecurityHeaders string `json:"securityHeaders"`
+	MaxBodyMB       int    `json:"maxBodyMb"`
+	TLS             *bool  `json:"tls,omitempty"`
+}
+
+func observeProxy(target TargetConfig, raw json.RawMessage) (any, error) {
+	if err := requireService(target); err != nil {
+		return nil, err
+	}
+	var desired proxyObserveDesired
+	if err := decodeDesired(raw, &desired); err != nil {
+		return nil, err
+	}
+	tls := true
+	if desired.TLS != nil {
+		tls = *desired.TLS
+	}
+	expected, err := renderProxy(target, proxyIngressDesired{Hostname: desired.Hostname, SecurityHeaders: desired.SecurityHeaders, MaxBodyMB: desired.MaxBodyMB}, tls)
+	if err != nil {
+		return nil, err
+	}
+	actual, err := os.ReadFile(nginxPath(target))
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{"state": "create", "hostname": target.Hostname}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(actual, []byte(managedHeader)) {
+		return map[string]any{"state": "conflict", "hostname": target.Hostname, "owned": false}, nil
+	}
+	state := "in-sync"
+	if !bytes.Equal(actual, expected) {
+		state = "update"
+	}
+	digest := sha256.Sum256(actual)
+	return map[string]any{"state": state, "hostname": target.Hostname, "owned": true, "configDigest": "sha256:" + hex.EncodeToString(digest[:])}, nil
 }

@@ -42,5 +42,27 @@ class ReleaseResponseTests(unittest.TestCase):
             controller.release_response(response, self.contract)
 
 
+
+class ServiceReleaseTests(unittest.TestCase):
+    def test_the_artifact_algorithm_chooses_the_helper_operation(self):
+        self.assertEqual(controller.HELPER_OPERATIONS["psm-static-tree-sha256@1"], "deploy-static-release")
+        self.assertEqual(controller.HELPER_OPERATIONS["psm-service-tree-sha256@1"], "deploy-service-release")
+        self.assertNotIn("psm-unknown@1", controller.HELPER_OPERATIONS)
+
+    def test_a_rolled_back_service_release_reports_its_failed_health_check(self):
+        contract = {"target": {"fingerprint": "sha256:" + "a" * 64}}
+        response = {
+            "outcome": "succeeded", "code": "ok", "detail": "operation completed and was observed",
+            "observedAt": "2026-10-01T15:00:00Z",
+            "data": {
+                "state": "rolled-back",
+                "staged": {"targetDigest": contract["target"]["fingerprint"]},
+                "verification": [{"id": "health", "state": "failed", "code": "unhealthy", "detail": "HTTP 500"}],
+            },
+        }
+        state, checks, _, _ = controller.release_response(response, contract)
+        self.assertEqual(state, "rolled-back")
+        self.assertEqual(checks[0]["code"], "unhealthy")
+
 if __name__ == "__main__":
     unittest.main()

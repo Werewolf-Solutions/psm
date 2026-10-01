@@ -131,7 +131,30 @@ export interface DeployAccessPlan extends BasePlan {
     revision: string;
     file: string;
     replaces?: string;
+    /** A Node service target: the process settings and the account it runs as. */
+    service?: ServiceSettings & { account: string; unitName: string };
   };
+}
+
+export interface ServiceSettings {
+  entry: string;
+  healthPath: string;
+  startupTimeoutSeconds: number;
+  memoryMaxMb: number;
+}
+
+function serviceSettings(value: unknown): ServiceSettings | null {
+  if (value === undefined || value === null) return null;
+  const input = value as Record<string, unknown>;
+  const entry = String(input.entry ?? "");
+  const healthPath = String(input.healthPath ?? "");
+  const startupTimeoutSeconds = Number(input.startupTimeoutSeconds);
+  const memoryMaxMb = Number(input.memoryMaxMb);
+  if (!/^[A-Za-z0-9._/-]{1,200}$/.test(entry) || path.posix.normalize(entry) !== entry || entry.startsWith("/") || entry.split("/").includes("..")) throw new MachinePlanError("The service entry point must be a relative file such as bin/www.", "service");
+  if (!/^\/[A-Za-z0-9._~/-]{0,200}$/.test(healthPath)) throw new MachinePlanError("The service health path must be a URL path such as /healthz.", "service");
+  if (!Number.isInteger(startupTimeoutSeconds) || startupTimeoutSeconds < 5 || startupTimeoutSeconds > 300) throw new MachinePlanError("The service startup timeout must be 5-300 seconds.", "service");
+  if (!Number.isInteger(memoryMaxMb) || memoryMaxMb < 64 || memoryMaxMb > 4096) throw new MachinePlanError("The service memory limit must be 64-4096 MB.", "service");
+  return { entry, healthPath, startupTimeoutSeconds, memoryMaxMb };
 }
 
 function finish<T extends Omit<BasePlan, "scriptDigest" | "digest">>(body: T): T & { scriptDigest: string; digest: string } {
@@ -248,6 +271,9 @@ groupadd --system --force psm-deploy
 install -d -o root -g root -m 0755 /usr/local/libexec
 install -d -o root -g root -m 0755 /etc/psm-deploy
 install -d -o root -g psm-deploy -m 0750 /etc/psm-deploy/targets /var/lib/psm-deploy
+# Node service units' env files; must exist before the helper starts, or its
+# sandbox leaves the directory read-only until the next restart.
+install -d -o root -g root -m 0700 /etc/psm-deploy/services
 replaced=0
 place() {
   local name=$1 source=$2 file=$3 mode=$4
@@ -330,7 +356,7 @@ export function buildHelperInstallPlan(input: { machine: MachineIdentity; build:
       "Install nginx and certbot with apt, if either is missing.",
       `Install the PSM host helper (${input.build.arch}, sha256 ${input.build.sha256.slice(0, 16)}…) at ${HELPER_BINARY}, after checking its digest on the server.`,
       `Install its forced-command client ${HELPER_CLIENT} and systemd unit, and create the psm-deploy group.`,
-      "Create root-owned /etc/psm-deploy/targets and /var/lib/psm-deploy, then enable and start psm-host-helper.service.",
+      "Create root-owned /etc/psm-deploy/targets, /etc/psm-deploy/services and /var/lib/psm-deploy, then enable and start psm-host-helper.service.",
     ],
     authority: [
       "The helper runs as root and accepts only the closed host-helper protocol on a local socket.",
@@ -393,6 +419,7 @@ inspect() {
   fi
   account_state "$PSM_INFRA" "$PSM_INFRA_AUTHORIZED" infra
   account_state "$PSM_RELEASE" "$PSM_RELEASE_AUTHORIZED" release
+  service_state
   if [[ -L "$PSM_TARGET_FILE" ]]; then report target conflict; conflict "symlink:$PSM_TARGET_FILE"
   elif [[ ! -e "$PSM_TARGET_FILE" ]]; then report target absent
   else
@@ -413,6 +440,44 @@ inspect() {
     fi
   fi
   for item in "\${conflicts[@]}"; do report conflict "$item"; done
+}
+
+# A Node service's own account: a system user with no login, no home and no
+# psm-deploy membership, so the process it runs can never reach the helper.
+service_state() {
+  [[ -n "$PSM_SERVICE" ]] || return 0
+  local row _ uid gid comment home shell
+  if row=$(getent passwd "$PSM_SERVICE"); then
+    IFS=: read -r _ _ uid gid comment home shell <<< "$row"
+    report service_uid "$uid"
+    report service_gid "$gid"
+    if [[ "$uid" == 0 || "$shell" != /usr/sbin/nologin || "$comment" != "$PSM_COMMENT" ]]; then
+      report service conflict; conflict "account-differs:$PSM_SERVICE"
+    elif id -Gn "$PSM_SERVICE" | tr ' ' '\n' | grep -qx psm-deploy; then
+      report service conflict; conflict "service-can-reach-helper:$PSM_SERVICE"
+    else
+      report service present
+    fi
+  else
+    report service absent
+    getent group "$PSM_SERVICE" >/dev/null && conflict "group-exists:$PSM_SERVICE"
+  fi
+  return 0
+}
+
+# Keep this target's port; otherwise the lowest one in 41000-41999 that no other
+# enrolled contract claims and nothing listens on.
+service_port() {
+  local port
+  if [[ -f "$PSM_TARGET_FILE" ]] && port=$(grep -oE '"port": [0-9]+' "$PSM_TARGET_FILE" | grep -oE '[0-9]+$'); then
+    printf '%s' "$port"; return 0
+  fi
+  for port in $(seq 41000 41999); do
+    grep -qsE "\"port\": $port[,}]?\$" /etc/psm-deploy/targets/*.json && continue
+    ss -Htln "sport = :$port" | grep -q . && continue
+    printf '%s' "$port"; return 0
+  done
+  return 1
 }
 
 create_account() {
@@ -447,9 +512,18 @@ create_account "$PSM_INFRA" "$PSM_INFRA_AUTHORIZED"
 create_account "$PSM_RELEASE" "$PSM_RELEASE_AUTHORIZED"
 infra_uid=$(id -u "$PSM_INFRA"); infra_gid=$(id -g "$PSM_INFRA"); release_uid=$(id -u "$PSM_RELEASE")
 [[ "$infra_uid" =~ ^[1-9][0-9]*$ && "$infra_gid" =~ ^[1-9][0-9]*$ && "$release_uid" =~ ^[1-9][0-9]*$ ]] || { report result bad-ids; exit 70; }
+service_values=()
+if [[ -n "$PSM_SERVICE" ]]; then
+  getent passwd "$PSM_SERVICE" >/dev/null || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "$PSM_COMMENT" "$PSM_SERVICE"
+  service_uid=$(id -u "$PSM_SERVICE"); service_gid=$(id -g "$PSM_SERVICE")
+  port=$(service_port) || { report result no-free-port; exit 70; }
+  [[ "$service_uid" =~ ^[1-9][0-9]*$ && "$service_gid" =~ ^[1-9][0-9]*$ && "$port" =~ ^41[0-9]{3}$ ]] || { report result bad-ids; exit 70; }
+  report service_port "$port"
+  service_values=(-e "s/\\"__SERVICE_UID__\\"/$service_uid/g" -e "s/\\"__SERVICE_GID__\\"/$service_gid/g" -e "s/\\"__SERVICE_PORT__\\"/$port/g")
+fi
 contract=$(mktemp)
 trap 'rm -f -- "$contract"' EXIT
-printf '%s' "$PSM_CONTRACT_B64" | base64 -d | sed -e "s/\\"__INFRA_UID__\\"/$infra_uid/g" -e "s/\\"__INFRA_GID__\\"/$infra_gid/g" -e "s/\\"__RELEASE_UID__\\"/$release_uid/g" > "$contract"
+printf '%s' "$PSM_CONTRACT_B64" | base64 -d | sed -e "s/\\"__INFRA_UID__\\"/$infra_uid/g" -e "s/\\"__INFRA_GID__\\"/$infra_gid/g" -e "s/\\"__RELEASE_UID__\\"/$release_uid/g" "\${service_values[@]}" > "$contract"
 if [[ "$target_state" == replace ]]; then
   install -d -o root -g root -m 0700 ${REPLACED_DIR}
   cp -p -- "$PSM_TARGET_FILE" "${REPLACED_DIR}/target.$(file_sha "$PSM_TARGET_FILE").json"
@@ -477,6 +551,8 @@ export interface DeployAccessRequest {
   releasePublicKey: string;
   /** The exact SHA-256 of a contract enrolled for other accounts, which this plan may replace. */
   replacesTarget?: unknown;
+  /** Present for a Node service target: enrolled into the contract's service block. */
+  service?: unknown;
   now?: number;
 }
 
@@ -501,7 +577,8 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
   // Never invented: Let's Encrypt sends expiry and account notices here.
   const certbotEmail = String(request.certbotEmail ?? "").trim();
   if (!EMAIL_RE.test(certbotEmail)) throw new MachinePlanError("Enter the email address that should receive certificate notices.", "certbotEmail");
-  const allowedRootPrefix = canonicalPath(request.allowedRootPrefix ?? "/var/www", "allowedRootPrefix");
+  const settings = serviceSettings(request.service);
+  const allowedRootPrefix = canonicalPath(request.allowedRootPrefix ?? (settings ? "/srv" : "/var/www"), "allowedRootPrefix");
   const canonicalRoot = canonicalPath(request.canonicalRoot ?? `${allowedRootPrefix}/${hostname}`, "canonicalRoot");
   if (!canonicalRoot.startsWith(`${allowedRootPrefix}/`)) throw new MachinePlanError("The site root must be inside the allowed root.", "canonicalRoot");
   const targetId = validateId(request.targetId ?? `psm:${projectId}:${environmentId}:${unitId}`, "targetId");
@@ -509,6 +586,9 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
   const releaseKey = parsePublicKey(request.releasePublicKey);
   const infra = roleAccountName("i", machine.id, projectId, request.projectName, environmentId);
   const release = roleAccountName("r", machine.id, projectId, request.projectName, environmentId);
+  // The process runs as its own account, outside psm-deploy, so it can never reach the helper.
+  const serviceAccount = settings ? roleAccountName("s", machine.id, projectId, request.projectName, environmentId) : null;
+  const unitName = serviceAccount ? serviceAccount.replace(/^psm-s-/, "psm-svc-") : null;
   const comment = `PSM deployment ${projectId}/${environmentId}`.slice(0, 120);
   // Placeholder ids become numbers on the server, once the accounts exist.
   const template = {
@@ -516,6 +596,12 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     deployUid: "__INFRA_UID__", deployGid: "__INFRA_GID__", infrastructureUids: ["__INFRA_UID__"], releaseUids: ["__RELEASE_UID__"],
     certbotEmail, pm2User: infra, pm2Home: `/home/${infra}/.pm2`, retainReleases: 5,
     nginxAvailableDir: "/etc/nginx/sites-available", nginxEnabledDir: "/etc/nginx/sites-enabled", acmeWebroot: "/var/www/certbot",
+    // The server fills in the account's IDs and the first free loopback port in 41000-41999.
+    ...(settings && serviceAccount && unitName ? { service: {
+      unitName, user: serviceAccount, uid: "__SERVICE_UID__", gid: "__SERVICE_GID__", port: "__SERVICE_PORT__",
+      memoryMaxMb: settings.memoryMaxMb, entry: settings.entry, healthPath: settings.healthPath,
+      startupTimeoutSeconds: settings.startupTimeoutSeconds, systemdDir: "/etc/systemd/system", configDir: "/etc/psm-deploy/services",
+    } } : {}),
   };
   const revision = `psm-${digest(JSON.stringify(template)).slice(7, 19)}`;
   template.revision = revision;
@@ -534,6 +620,7 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     PSM_REVISION: revision,
     PSM_CONTRACT_B64: Buffer.from(JSON.stringify(template)).toString("base64"),
     PSM_REPLACE_TARGET: replacesTarget,
+    PSM_SERVICE: serviceAccount ?? "",
   });
   return finish({
     schema: MACHINE_PLAN_SCHEMA,
@@ -552,17 +639,22 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     publicKeyFingerprint: infraKey.fingerprint,
     publicKey: infraKey.line,
     release: { account: release, publicKeyFingerprint: releaseKey.fingerprint, publicKey: releaseKey.line },
-    target: { targetId, unitId, hostname, canonicalRoot, allowedRootPrefix, certbotEmail, revision, file, ...(replacesTarget ? { replaces: replacesTarget } : {}) },
+    target: {
+      targetId, unitId, hostname, canonicalRoot, allowedRootPrefix, certbotEmail, revision, file, ...(replacesTarget ? { replaces: replacesTarget } : {}),
+      ...(settings && serviceAccount && unitName ? { service: { ...settings, account: serviceAccount, unitName } } : {}),
+    },
     operations: [
       ...(replacesTarget ? [`Replace the contract already enrolled for ${targetId} (sha256 ${replacesTarget.slice(0, 16)}…), which names other accounts; those accounts lose access to it. The previous contract is kept in ${REPLACED_DIR}.`] : []),
       `Create ${infra} (infrastructure) and ${release} (release), each with its own group, no password and no sudo, in psm-deploy.`,
       `Authorize one PSM-generated key per account, forced to the host-helper client (${infraKey.fingerprint}, ${releaseKey.fingerprint}).`,
       `Enroll helper target ${targetId} for ${hostname} at ${canonicalRoot}, revision ${revision}, certificate notices to ${certbotEmail}.`,
+      ...(settings && serviceAccount ? [`Create ${serviceAccount}, a system account with no login and outside psm-deploy, for the service ${unitName}, and reserve it the first free loopback port in 41000-41999.`] : []),
     ],
     authority: [
       `${infra} can ask the helper to observe and reconcile ${canonicalRoot}, its nginx site and certificate for ${hostname}.`,
       `${release} can stage, activate and roll back releases in ${canonicalRoot}.`,
       "Neither key opens a shell or runs other commands; both can act only on this target.",
+      ...(settings && serviceAccount ? [`${serviceAccount} runs node ${settings.entry} under systemd (${settings.memoryMaxMb} MB limit), listens only on 127.0.0.1, and can write nothing but ${canonicalRoot}/state.`] : []),
     ],
     script,
     createdAt: request.now ?? Date.now(),

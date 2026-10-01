@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"text/template"
@@ -106,4 +107,93 @@ func renderNginx(target TargetConfig, desired ingressDesired, tls bool) ([]byte,
 		return nil, err
 	}
 	return output.Bytes(), nil
+}
+
+// proxyIngressDesired is the service counterpart of ingressDesired: nginx
+// terminates TLS and forwards to the contract's loopback port; the app owns its
+// own security headers (handymanservices sets them with helmet).
+type proxyIngressDesired struct {
+	Hostname        string `json:"hostname"`
+	SecurityHeaders string `json:"securityHeaders"`
+	MaxBodyMB       int    `json:"maxBodyMb"`
+}
+
+const proxyTemplate = `# managed-by: psm-host-helper/v1
+# target: {{.TargetID}}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{.Hostname}};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root {{.AcmeWebroot}};
+        try_files $uri =404;
+    }
+{{if .TLS}}
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{.Hostname}};
+    ssl_certificate /etc/letsencrypt/live/{{.Hostname}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{.Hostname}}/privkey.pem;
+    client_max_body_size {{.MaxBodyMB}}m;
+
+    location / {
+        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+    }
+{{else}}
+    location / { return 404; }
+{{end}}
+}
+`
+
+func renderProxy(target TargetConfig, desired proxyIngressDesired, tls bool) ([]byte, error) {
+	if desired.Hostname != target.Hostname {
+		return nil, fmt.Errorf("ingress hostname differs from the enrolled target")
+	}
+	if desired.SecurityHeaders != "app-managed@1" {
+		return nil, fmt.Errorf("security header profile is unsupported")
+	}
+	if desired.MaxBodyMB < 1 || desired.MaxBodyMB > 100 {
+		return nil, fmt.Errorf("maxBodyMb must be between 1 and 100")
+	}
+	view := map[string]any{"TargetID": target.TargetID, "Hostname": target.Hostname, "AcmeWebroot": target.AcmeWebroot,
+		"Port": target.Service.Port, "MaxBodyMB": desired.MaxBodyMB, "TLS": tls}
+	parsed, err := template.New("proxy").Parse(proxyTemplate)
+	if err != nil {
+		return nil, err
+	}
+	var output bytes.Buffer
+	if err := parsed.Execute(&output, view); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+// renderIngress picks the template the target was enrolled for.
+func renderIngress(target TargetConfig, raw json.RawMessage, tls bool) ([]byte, error) {
+	if target.Service != nil {
+		var desired proxyIngressDesired
+		if err := decodeDesired(raw, &desired); err != nil {
+			return nil, err
+		}
+		return renderProxy(target, desired, tls)
+	}
+	var desired ingressDesired
+	if err := decodeDesired(raw, &desired); err != nil {
+		return nil, err
+	}
+	return renderNginx(target, desired, tls)
 }

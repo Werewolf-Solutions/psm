@@ -269,12 +269,83 @@
         }
       }
     },
+    "serviceResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "systemd-node-service@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config"],
+          "properties": {
+            "entry": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$", "maxLength": 200 },
+            "healthPath": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]{0,200}$" },
+            "startupTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 300 },
+            "memoryMaxMb": { "type": "integer", "minimum": 64, "maximum": 4096 },
+            "config": {
+              "type": "object",
+              "maxProperties": 64,
+              "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]{0,99}$" },
+              "additionalProperties": { "type": "string", "maxLength": 4096 }
+            }
+          }
+        }
+      }
+    },
+    "serviceSecretsResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "service-secrets@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["names"],
+          "properties": {
+            "names": { "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,99}$" } }
+          }
+        }
+      }
+    },
+    "nodeProxyResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "connection", "desired"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "const": "nginx-node-proxy@1" },
+        "connection": { "$ref": "#/$defs/id" },
+        "dependsOn": { "type": "array", "minItems": 1, "maxItems": 100, "items": { "$ref": "#/$defs/resourceRef" } },
+        "desired": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["hostname", "securityHeaders", "maxBodyMb"],
+          "properties": {
+            "hostname": { "type": "string", "minLength": 3, "maxLength": 253 },
+            "securityHeaders": { "const": "app-managed@1" },
+            "maxBodyMb": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        }
+      }
+    },
     "resource": {
       "oneOf": [
         { "$ref": "#/$defs/dnsResource" },
         { "$ref": "#/$defs/directoryResource" },
         { "$ref": "#/$defs/nginxResource" },
-        { "$ref": "#/$defs/tlsResource" }
+        { "$ref": "#/$defs/tlsResource" },
+        { "$ref": "#/$defs/serviceResource" },
+        { "$ref": "#/$defs/serviceSecretsResource" },
+        { "$ref": "#/$defs/nodeProxyResource" }
       ]
     },
     "releaseMetadataProbe": {
@@ -297,13 +368,27 @@
         }
       }
     },
+    "buildProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "publicInputs"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "publicInputs": {
+          "type": "object",
+          "maxProperties": 100,
+          "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
+          "additionalProperties": { "type": "string", "maxLength": 2048 }
+        }
+      }
+    },
     "unit": {
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "recipe", "resourceRefs", "artifact", "executor", "target", "verification"],
       "properties": {
         "id": { "$ref": "#/$defs/id" },
-        "recipe": { "const": "static-ssh-nginx@1" },
+        "recipe": { "enum": ["static-ssh-nginx@1", "node-service-ssh-nginx@1"] },
         "resourceRefs": {
           "type": "array",
           "minItems": 1,
@@ -311,27 +396,33 @@
           "items": { "$ref": "#/$defs/resourceRef" }
         },
         "artifact": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "output", "buildProfile"],
-          "properties": {
-            "kind": { "const": "static-files@1" },
-            "output": { "type": "string", "minLength": 1, "maxLength": 500 },
-            "buildProfile": {
+          "oneOf": [
+            {
               "type": "object",
               "additionalProperties": false,
-              "required": ["id", "publicInputs"],
+              "required": ["kind", "output", "buildProfile"],
               "properties": {
-                "id": { "$ref": "#/$defs/id" },
-                "publicInputs": {
-                  "type": "object",
-                  "maxProperties": 100,
-                  "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]{0,127}$" },
-                  "additionalProperties": { "type": "string", "maxLength": 2048 }
-                }
+                "kind": { "const": "static-files@1" },
+                "output": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "buildProfile": { "$ref": "#/$defs/buildProfile" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "runtime", "install", "buildScript", "serviceRoot", "entry", "publicDir", "buildProfile"],
+              "properties": {
+                "kind": { "const": "node-service@1" },
+                "runtime": { "enum": ["node@20", "node@22", "node@24"] },
+                "install": { "type": "array", "minItems": 1, "maxItems": 10, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
+                "buildScript": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$" },
+                "serviceRoot": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "entry": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$", "maxLength": 200 },
+                "publicDir": { "type": "string", "pattern": "^[A-Za-z0-9._/-]+$", "maxLength": 200 },
+                "buildProfile": { "$ref": "#/$defs/buildProfile" }
               }
             }
-          }
+          ]
         },
         "executor": {
           "type": "object",

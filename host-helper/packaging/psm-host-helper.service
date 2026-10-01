@@ -6,8 +6,9 @@ ConditionPathIsDirectory=/etc/psm-deploy/targets
 [Service]
 Type=simple
 ExecStart=/usr/local/libexec/psm-host-helper serve --socket-group psm-deploy
-User=root
-Group=root
+# Runs as root by default. Do not add User=root/Group=root: on Ubuntu 24.04's
+# systemd, User= together with NoNewPrivileges=yes starts the helper without
+# CAP_SETUID, and runuser (the PM2 snapshot) then fails with EPERM.
 UMask=0027
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -21,6 +22,10 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProtectSystem=strict
 ReadWritePaths=/etc/nginx/sites-available /etc/nginx/sites-enabled /etc/letsencrypt /var/lib/letsencrypt /var/log/letsencrypt /var/www /var/lib/psm-deploy /run/psm-deploy /var/log/nginx /run/nginx.pid
+# Node service targets: their release roots, unit files and env files. The helper
+# writes only psm-svc-* units and the files of enrolled targets; "-" tolerates a
+# directory that does not exist yet on a static-only host.
+ReadWritePaths=-/srv /etc/systemd/system -/etc/psm-deploy/services
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictRealtime=yes
 RestrictSUIDSGID=yes

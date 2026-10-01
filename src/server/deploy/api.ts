@@ -14,7 +14,7 @@ import {
 import { DeploymentManifestValidationError } from "./manifest.ts";
 import type { EnvironmentManifest, UnitManifest } from "./types.ts";
 import { ManagedDeploymentError, DeploymentService } from "./service.ts";
-import { DeploymentSetupError, detectDeploymentSetup, writeStaticDeploymentSetup } from "./setup.ts";
+import { DeploymentSetupError, detectDeploymentSetup, writeDeploymentSetup } from "./setup.ts";
 import { GitHubSetup } from "./github-setup.ts";
 import { GitHubControllerSetup } from "./github-controller-setup.ts";
 import {
@@ -219,7 +219,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     try {
       const project = service.resolveProject(req.params.id);
       const environment = req.body?.environment === "production" ? "production" : "staging";
-      const written = writeStaticDeploymentSetup(project, { hostname: String(req.body?.hostname || ""), zone: String(req.body?.zone || ""), environment });
+      const written = writeDeploymentSetup(project, { hostname: String(req.body?.hostname || ""), zone: String(req.body?.zone || ""), environment });
       res.status(201).json({ ok: true, ...written });
     } catch (error) {
       if (error instanceof DeploymentSetupError) return apiError(res, new ManagedDeploymentError(error.message, error.code, error.code === "setup-exists" ? 409 : 400));
@@ -457,6 +457,23 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       });
       if (result.created) await options.runner?.enqueue(result.run.runId);
       res.status(result.created ? 202 : 200).json({ ok: true, run: service.runView(result.run.runId) });
+    } catch (error) { apiError(res, error); }
+  });
+
+  // A runtime secret is entered here and nowhere else: from the local cockpit, into
+  // PSM's secret store. Responses say whether it is set, never what it is.
+  router.put("/api/projects/:id/deployments/:environment/service-secrets/:unit/:name", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Set runtime secrets from the local cockpit" });
+    try {
+      res.json(await service.setServiceSecret(req.params.id, req.params.environment, req.params.unit, req.params.name, String(req.body?.value ?? "")));
+    } catch (error) { apiError(res, error); }
+  });
+  router.delete("/api/projects/:id/deployments/:environment/service-secrets/:unit/:name", async (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    if (!exactLocalCockpitOrigin(req)) return res.status(403).json({ error: "Remove runtime secrets from the local cockpit" });
+    try {
+      res.json(await service.setServiceSecret(req.params.id, req.params.environment, req.params.unit, req.params.name, null));
     } catch (error) { apiError(res, error); }
   });
 

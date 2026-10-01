@@ -4,7 +4,7 @@ import { deploymentGitHubToken } from "./github-app.ts";
 
 import { canonicalDigest } from "./canonical.ts";
 import { GitHubActionsAdapter, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
-import type { PrepareArtifactDispatch } from "./adapters/executor-contract.ts";
+import { SERVICE_PAYLOAD_ALGORITHM, type PrepareArtifactDispatch } from "./adapters/executor-contract.ts";
 import type { ArtifactPreparationController } from "./api.ts";
 import { DeploymentService } from "./service.ts";
 import { DeploymentStore, type DeploymentRun, type DeploymentRunState, type JsonValue } from "./store.ts";
@@ -147,7 +147,7 @@ export class GitHubArtifactPreparer implements ArtifactPreparationController {
         producingRunId: runId,
         provenance: "managed",
         projectId: imported.projectId,
-        kind: "static-files@1",
+        kind: imported.payloadAlgorithm === SERVICE_PAYLOAD_ALGORITHM ? "node-service@1" : "static-files@1",
         sourceRepository: imported.sourceRepository,
         githubArtifactId: imported.githubArtifactId,
         producerRunId: imported.producerRunId,

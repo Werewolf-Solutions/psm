@@ -16,10 +16,15 @@ import (
 
 const payloadAlgorithm = "psm-static-tree-sha256@1"
 
+// serviceAlgorithm is the static tree algorithm plus each file's executable bit:
+// a service release carries its runtime, whose binaries must stay executable.
+const serviceAlgorithm = "psm-service-tree-sha256@1"
+
 type payloadFile struct {
-	path   string
-	size   int64
-	digest [32]byte
+	path       string
+	size       int64
+	digest     [32]byte
+	executable bool
 }
 
 func canonicalRelativePath(value string) (string, error) {
@@ -39,6 +44,13 @@ func canonicalRelativePath(value string) (string, error) {
 }
 
 func payloadDigest(root string, maximumFiles int, maximumBytes int64) (string, int, int64, error) {
+	return treeDigest(payloadAlgorithm, root, maximumFiles, maximumBytes)
+}
+
+func treeDigest(algorithm, root string, maximumFiles int, maximumBytes int64) (string, int, int64, error) {
+	if algorithm != payloadAlgorithm && algorithm != serviceAlgorithm {
+		return "", 0, 0, fmt.Errorf("payload algorithm is unsupported")
+	}
 	files := []payloadFile{}
 	var total int64
 	err := filepath.WalkDir(root, func(pathname string, entry os.DirEntry, walkErr error) error {
@@ -82,7 +94,7 @@ func payloadDigest(root string, maximumFiles int, maximumBytes int64) (string, i
 		var digest [32]byte
 		copy(digest[:], hash.Sum(nil))
 		total += info.Size()
-		files = append(files, payloadFile{path: relative, size: info.Size(), digest: digest})
+		files = append(files, payloadFile{path: relative, size: info.Size(), digest: digest, executable: info.Mode().Perm()&0o111 != 0})
 		if len(files) > maximumFiles || total > maximumBytes {
 			return fmt.Errorf("payload exceeds its approved limits")
 		}
@@ -93,7 +105,7 @@ func payloadDigest(root string, maximumFiles int, maximumBytes int64) (string, i
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 	hash := sha256.New()
-	hash.Write([]byte(payloadAlgorithm))
+	hash.Write([]byte(algorithm))
 	hash.Write([]byte{0})
 	for _, file := range files {
 		pathBytes := []byte(file.path)
@@ -102,6 +114,13 @@ func payloadDigest(root string, maximumFiles int, maximumBytes int64) (string, i
 		hash.Write(pathBytes)
 		_ = binary.Write(hash, binary.BigEndian, uint64(file.size))
 		hash.Write(file.digest[:])
+		if algorithm == serviceAlgorithm {
+			mode := byte(0)
+			if file.executable {
+				mode = 1
+			}
+			hash.Write([]byte{mode})
+		}
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), len(files), total, nil
 }

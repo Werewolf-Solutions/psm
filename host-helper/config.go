@@ -23,27 +23,30 @@ var (
 )
 
 type TargetConfig struct {
-	Schema             string         `json:"schema"`
-	Revision           string         `json:"revision"`
-	TargetID           string         `json:"targetId"`
-	ProjectID          string         `json:"projectId"`
-	EnvironmentID      string         `json:"environmentId"`
-	UnitID             string         `json:"unitId"`
-	CanonicalRoot      string         `json:"canonicalRoot"`
-	AllowedRootPrefix  string         `json:"allowedRootPrefix"`
-	Hostname           string         `json:"hostname"`
-	DeployUID          uint32         `json:"deployUid"`
-	DeployGID          uint32         `json:"deployGid"`
-	InfrastructureUIDs []uint32       `json:"infrastructureUids"`
-	ReleaseUIDs        []uint32       `json:"releaseUids"`
-	CertbotEmail       string         `json:"certbotEmail"`
-	PM2User            string         `json:"pm2User"`
-	PM2Home            string         `json:"pm2Home"`
-	RetainReleases     int            `json:"retainReleases"`
-	NginxAvailableDir  string         `json:"nginxAvailableDir"`
-	NginxEnabledDir    string         `json:"nginxEnabledDir"`
-	AcmeWebroot        string         `json:"acmeWebroot"`
-	Extra              map[string]any `json:"-"`
+	Schema             string   `json:"schema"`
+	Revision           string   `json:"revision"`
+	TargetID           string   `json:"targetId"`
+	ProjectID          string   `json:"projectId"`
+	EnvironmentID      string   `json:"environmentId"`
+	UnitID             string   `json:"unitId"`
+	CanonicalRoot      string   `json:"canonicalRoot"`
+	AllowedRootPrefix  string   `json:"allowedRootPrefix"`
+	Hostname           string   `json:"hostname"`
+	DeployUID          uint32   `json:"deployUid"`
+	DeployGID          uint32   `json:"deployGid"`
+	InfrastructureUIDs []uint32 `json:"infrastructureUids"`
+	ReleaseUIDs        []uint32 `json:"releaseUids"`
+	CertbotEmail       string   `json:"certbotEmail"`
+	PM2User            string   `json:"pm2User"`
+	PM2Home            string   `json:"pm2Home"`
+	RetainReleases     int      `json:"retainReleases"`
+	NginxAvailableDir  string   `json:"nginxAvailableDir"`
+	NginxEnabledDir    string   `json:"nginxEnabledDir"`
+	AcmeWebroot        string   `json:"acmeWebroot"`
+	// Service makes this a supervised process target instead of a static site.
+	// Static contracts omit it, so their canonical bytes and digest do not change.
+	Service *ServiceConfig `json:"service,omitempty"`
+	Extra   map[string]any `json:"-"`
 }
 
 func cleanAbsolute(value string) (string, error) {
@@ -136,6 +139,11 @@ func (target *TargetConfig) validate() error {
 	}
 	if _, err := mail.ParseAddress(target.CertbotEmail); err != nil {
 		return errors.New("certbotEmail is invalid")
+	}
+	if target.Service != nil {
+		if err := target.Service.validate(*target); err != nil {
+			return fmt.Errorf("service: %w", err)
+		}
 	}
 	return nil
 }

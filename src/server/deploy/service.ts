@@ -38,6 +38,24 @@ import {
   type JsonValue,
 } from "./store.ts";
 import type { DeploymentManifestV1, EnvironmentManifest, UnitManifest } from "./types.ts";
+import { serviceSecretOwner, serviceSecretSlot } from "./secrets.ts";
+
+/** The secret names a unit's service-secrets@1 resource declares, if it has one. */
+function declaredSecretNames(environment: EnvironmentManifest, unit: UnitManifest): string[] {
+  for (const reference of unit.resourceRefs) {
+    const resource = environment.resources.find((item) => `resource:${item.id}` === reference);
+    if (resource?.kind === "service-secrets@1") return resource.desired.names;
+  }
+  return [];
+}
+
+/** The public hostname an environment's ingress serves, static site or Node proxy. */
+function ingressHostname(environment: EnvironmentManifest): string | null {
+  for (const resource of environment.resources) {
+    if (resource.kind === "nginx-static-site@1" || resource.kind === "nginx-node-proxy@1") return resource.desired.hostname;
+  }
+  return null;
+}
 
 export class ManagedDeploymentError extends Error {
   constructor(
@@ -229,6 +247,37 @@ export class DeploymentService {
     return { id: project.id, name: project.name, path: project.path, gitBranch: project.gitBranch, gitLastSubject: project.gitLastSubject };
   }
 
+  /** The runtime secrets each Node service unit declares, and which have a value in PSM. Never values. */
+  async serviceSecrets(idOrName: string, environmentId: string): Promise<Array<{ unitId: string; names: Array<{ name: string; set: boolean }> }>> {
+    const context = this.loadCurrent(idOrName);
+    const environment = context.manifest.environments.find((item) => item.id === environmentId);
+    if (!environment) throw new ManagedDeploymentError("deployment environment not found", "environment-not-found", 404);
+    const result = [];
+    for (const unit of environment.units) {
+      const names = declaredSecretNames(environment, unit);
+      if (!names.length) continue;
+      const status = await this.secretBroker.status(serviceSecretOwner(context.project.id, environment.id, unit.id), []);
+      result.push({ unitId: unit.id, names: names.map((name) => ({ name, set: status.availableSlots.includes(serviceSecretSlot(name)) })) });
+    }
+    return result;
+  }
+
+  /** Store (value) or remove (null) one declared runtime secret of a service unit. */
+  async setServiceSecret(idOrName: string, environmentId: string, unitId: string, name: string, value: string | null): Promise<{ set: boolean; generation: number }> {
+    const context = this.loadCurrent(idOrName);
+    const environment = context.manifest.environments.find((item) => item.id === environmentId);
+    const unit = environment?.units.find((item) => item.id === unitId);
+    if (!environment || !unit) throw new ManagedDeploymentError("deployment unit not found", "unit-not-found", 404);
+    if (!declaredSecretNames(environment, unit).includes(name)) throw new ManagedDeploymentError(`${name} is not a runtime secret this unit declares`, "secret-undeclared", 400);
+    const owner = serviceSecretOwner(context.project.id, environment.id, unit.id);
+    if (value === null) return { set: false, generation: await this.secretBroker.delete(owner, serviceSecretSlot(name)) };
+    // The host helper writes these into a systemd EnvironmentFile; refuse what it would refuse.
+    if (!value.length || value.length > 4096 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new ManagedDeploymentError(`${name} must be 1-4096 characters on one line`, "secret-invalid", 400);
+    }
+    return { set: true, generation: await this.secretBroker.put(owner, serviceSecretSlot(name), value) };
+  }
+
   private loadCurrent(idOrName: string): LoadedContext {
     const project = this.resolveProject(idOrName);
     try { return exactManifest(project, "HEAD"); } catch (exactError) {
@@ -250,7 +299,8 @@ export class DeploymentService {
     for (const resource of environment.resources.filter((item) => item.connection === slot)) {
       if (resource.kind === "digitalocean-dns-record@1") requests.push({ ...base, zone: resource.desired.zone });
       if (resource.kind === "host-release-directory@1") requests.push({ ...base, targetRoot: resource.desired.root });
-      if (resource.kind === "nginx-static-site@1" || resource.kind === "letsencrypt-certificate@1") {
+      if (resource.kind === "nginx-static-site@1" || resource.kind === "nginx-node-proxy@1" || resource.kind === "letsencrypt-certificate@1"
+        || resource.kind === "systemd-node-service@1" || resource.kind === "service-secrets@1") {
         requests.push({ ...base });
       }
     }
@@ -404,16 +454,22 @@ export class DeploymentService {
    * The host target a project environment's manifest names — what a machine's
    * deploy identities must be enrolled for. Null when the manifest has none.
    */
-  hostTarget(idOrName: string, environmentId: string): { slot: string; unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null } | null {
+  hostTarget(idOrName: string, environmentId: string): { slot: string; unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number } } | null {
     let context: LoadedContext;
     try { context = this.loadCurrent(idOrName); } catch { return null; }
     const environment = context.manifest.environments.find((entry) => entry.id === environmentId);
     const unit = environment?.units.find((entry) => entry.target.kind === "ssh-release-directory@1");
     if (!environment || !unit) return null;
-    const hostname = environment.resources.find((item) => item.kind === "nginx-static-site@1")?.desired.hostname ?? null;
+    const hostname = ingressHostname(environment) ?? null;
+    // A Node service's process settings go into the root-owned contract at enrollment.
+    const serviceResource = environment.resources.find((resource) => resource.kind === "systemd-node-service@1" && unit.resourceRefs.includes(`resource:${resource.id}`));
     return {
       slot: unit.target.observerConnection, unitId: unit.id, targetId: unit.target.targetId, root: unit.target.root,
       allowedRootPrefix: unit.target.root.slice(0, unit.target.root.lastIndexOf("/")) || "/", hostname: typeof hostname === "string" ? hostname : null,
+      ...(serviceResource?.kind === "systemd-node-service@1" ? { service: {
+        entry: serviceResource.desired.entry, healthPath: serviceResource.desired.healthPath,
+        startupTimeoutSeconds: serviceResource.desired.startupTimeoutSeconds, memoryMaxMb: serviceResource.desired.memoryMaxMb,
+      } } : {}),
     };
   }
 
@@ -441,7 +497,7 @@ export class DeploymentService {
     const dependencies = planDocument?.observations?.dependencies ?? environment.dependencies.map((item) => ({ id: item.id, kind: item.kind, state: "unknown", title: item.id, detail: "Choose Discover changes" }));
     const resources = planDocument?.observations?.resources ?? environment.resources.map((item) => ({ id: item.id, kind: item.kind, state: "unknown", title: item.id, detail: "Choose Discover changes" }));
     const firstUnit = environment.units[0];
-    const hostname = environment.resources.find((item) => item.kind === "nginx-static-site@1")?.desired.hostname ?? environment.watch[0]?.hostname ?? null;
+    const hostname = ingressHostname(environment) ?? environment.watch[0]?.hostname ?? null;
     const watchDefinition = environment.watch[0];
     const watch = watchDefinition
       ? this.store.getWatchSnapshot(watchDefinition.id, environment.id, watchDefinition.unit)
@@ -486,6 +542,7 @@ export class DeploymentService {
       dependencies,
       resources,
       blockers,
+      serviceSecrets: await this.serviceSecrets(idOrName, environmentId).catch(() => []),
       connections: connections.map((item) => ({
         slot: item.slot, kind: item.kind, connectionId: item.connectionId,
         bindingRevision: item.bindingRevision, metadataRevision: item.metadataRevision,

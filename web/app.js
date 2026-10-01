@@ -5129,6 +5129,18 @@ function deploymentTodoItems() {
     }
   }
 
+  // A runtime secret only the operator can type.
+  for (const unit of environment.serviceSecrets || []) {
+    for (const item of unit.names.filter((entry) => !entry.set)) {
+      items.push({
+        title: `Enter ${item.name} under “Runtime secrets” and press “Save”`,
+        detail: "The service needs it at run time. It is stored on this machine and written only to the server, never to the repository.",
+        target: () => document.querySelector(`#dep-secrets [data-secret="${CSS.escape(item.name)}"] input`),
+        fallback: () => $("#dep-secrets-section"),
+      });
+    }
+  }
+
   // Preparation repairs what it can; a blocker the server already named comes first.
   const job = preparationSuperseded(state) ? null : state.preparation;
   if (job) {
@@ -5350,6 +5362,68 @@ function renderManagedConnections(environment) {
     })),
     "This environment declares no connections.",
   );
+}
+
+/**
+ * The runtime secrets a Node service declares. A value is typed here once, goes
+ * to PSM's secret store on this machine, and is never shown again; the server
+ * receives it only while a reviewed plan writes it.
+ */
+function renderServiceSecrets(environment) {
+  const units = environment.serviceSecrets || [];
+  const section = $("#dep-secrets-section");
+  section.hidden = !units.length;
+  const list = $("#dep-secrets");
+  list.replaceChildren();
+  if (!units.length) return;
+  const missing = units.flatMap((unit) => unit.names.filter((item) => !item.set));
+  $("#dep-secrets-count").textContent = missing.length ? `${missing.length} not set` : "all set · stored on this machine";
+  for (const unit of units) {
+    for (const item of unit.names) {
+      const row = depText("div", "dep-row dep-secret-row", "");
+      row.dataset.state = item.set ? "ready" : "blocked";
+      row.dataset.secret = item.name;
+      row.append(depText("span", "dep-row-icon", item.set ? "✓" : "×"));
+      const copy = depText("div", "", "");
+      copy.append(depText("div", "dep-row-title", item.name));
+      copy.append(depText("div", "dep-row-detail", item.set ? "Set in PSM. Saving a new value replaces it on the next deploy and restarts the service." : "Not set. Deploying is blocked until it is."));
+      const form = el("form", "dep-secret-form");
+      const input = el("input", "dep-connection-input");
+      input.type = "password";
+      input.autocomplete = "new-password";
+      input.required = true;
+      input.placeholder = item.set ? "New value" : "Value";
+      input.setAttribute("aria-label", `Value for ${item.name}`);
+      const save = depText("button", "dep-mini-btn primary", item.set ? "Replace" : "Save");
+      save.type = "submit";
+      const status = depText("div", "dep-row-detail", "");
+      status.setAttribute("role", "status");
+      form.append(input, save);
+      form.onsubmit = async (event) => {
+        event.preventDefault();
+        save.disabled = true;
+        status.textContent = "Saving…";
+        try {
+          const scope = deploymentRequestScope({ environment: true });
+          const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployments/${encodeURIComponent(environment.id)}/service-secrets/${encodeURIComponent(unit.unitId)}/${encodeURIComponent(item.name)}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value: input.value }),
+          });
+          input.value = "";
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+          invalidateDeploymentReadiness();
+          await loadManagedDeploy({ quiet: true });
+        } catch (error) {
+          save.disabled = false;
+          status.textContent = `Not saved: ${error.message}`;
+          status.dataset.state = "error";
+        }
+      };
+      copy.append(form, status);
+      row.append(copy, depText("span", "dep-row-kind", item.set ? "set" : "missing"));
+      list.append(row);
+    }
+  }
 }
 
 function renderManagedReleases(environment) {
@@ -5706,9 +5780,13 @@ function renderManagedDeploy() {
   $("#ws-deploy-legacy").hidden = true;
   $("#dep-managed-title").textContent = `${data.project?.name || WS.name} · ${environment.id}`;
   $("#dep-managed-subtitle").textContent = environment.hostname || environment.target?.hostname || "Managed desired state";
-  $("#dep-destination").textContent = environment.units?.[0]?.recipe === "static-ssh-nginx@1"
-    ? `Publish static files with GitHub Actions to ${environment.hostname || "the configured server"}. ${environment.id === "staging" ? "This is the staging environment." : "This is the production environment."}`
-    : `Deploy using the connections configured for ${environment.id}.`;
+  const recipe = environment.units?.[0]?.recipe;
+  const where = `${environment.hostname || "the configured server"}. ${environment.id === "staging" ? "This is the staging environment." : "This is the production environment."}`;
+  $("#dep-destination").textContent = recipe === "static-ssh-nginx@1"
+    ? `Publish static files with GitHub Actions to ${where}`
+    : recipe === "node-service-ssh-nginx@1"
+      ? `Build a Node service with GitHub Actions and run it on ${where}`
+      : `Deploy using the connections configured for ${environment.id}.`;
   $("#dep-risk").textContent = `${environment.risk || "unknown"} risk`;
   $("#dep-risk").dataset.risk = environment.risk || "unknown";
   const envs = $("#dep-envs");
@@ -5743,6 +5821,7 @@ function renderManagedDeploy() {
   renderDeploymentArtifacts(environment);
   renderManagedSummary(environment);
   renderManagedConnections(environment);
+  renderServiceSecrets(environment);
   renderManagedReleases(environment);
   renderDeploymentPlan(WS.managedDeploy.plan);
   renderDeploymentRun(WS.managedDeploy.run || environment.latestRun || null);
@@ -5870,9 +5949,11 @@ async function renderDeploymentSetup(scope) {
     return;
   }
   if (!deploymentRequestIsCurrent(scope)) return;
-  subtitle.textContent = setup.recipe
-    ? "PSM can build this project on GitHub Actions and serve it through nginx on your server, with plans, readiness checks, verification and rollback."
-    : "This project cannot use managed deployment yet. The command deploy below still works.";
+  subtitle.textContent = setup.recipe === "node-service-ssh-nginx@1"
+    ? "PSM can build this client and its Express server on GitHub Actions, run the server as a supervised service behind nginx, and verify and roll back every release."
+    : setup.recipe
+      ? "PSM can build this project on GitHub Actions and serve it through nginx on your server, with plans, readiness checks, verification and rollback."
+      : "This project needs a few changes before managed deployment. The command deploy below still works.";
   const facts = depText("dl", "dep-setup-facts", "");
   for (const [label, value] of [
     ["Repository", setup.repository || "no GitHub origin"],
@@ -5883,20 +5964,36 @@ async function renderDeploymentSetup(scope) {
   ]) facts.append(depText("dt", "", label), depText("dd", "", value));
   body.append(facts);
   if (!setup.recipe) {
-    const list = depText("ul", "dep-setup-blockers", "");
-    for (const blocker of setup.blockers) list.append(depText("li", "", blocker));
-    body.append(list);
-    const plan = depText("button", "btn btn-primary", "Plan deployment support with AI");
+    // What the project needs is known exactly: say it as steps, first.
+    const panel = depText("section", "todo-panel", "");
+    const head = depText("div", "todo-head", "");
+    const count = depText("span", "", "");
+    head.append(depText("h3", "", "To do in this project"), count);
+    const list = el("ol", "todo-list");
+    panel.append(head, list);
+    renderTodoList(list, count, setup.blockers.map((blocker) => ({ title: blocker })), "Nothing to change.");
+    body.prepend(panel);
+    const plan = depText("button", "btn btn-primary", "Ask AI to make these changes");
     plan.type = "button";
     plan.onclick = () => {
       switchPane("ai");
-      $("#ws-msg").value = `Review managed deployment support for ${WS.name}. PSM detected ${setup.server ? `${setup.server.framework} in ${setup.server.dir}` : "an unsupported project structure"}, and its current static recipe cannot deploy this project safely. Inspect the project, its API and current deployment, then propose a concrete managed build, release, health-check and rollback plan. Do not deploy or change the live target. Explain which PSM recipe work is required before this project can use the managed Deploy page.`;
+      $("#ws-msg").value = `Prepare ${WS.name} for PSM's managed deployment. Make exactly these changes, as small reviewed commits, and nothing else:\n${setup.blockers.map((blocker, index) => `${index + 1}. ${blocker}`).join("\n")}\nDo not deploy or change any live server.`;
       stashDraft();
       $("#ws-msg").focus();
-      toast("Loaded a managed deployment planning prompt — review and Send");
+      toast("Loaded the changes as a prompt — review and Send");
     };
     body.append(plan);
     return;
+  }
+  if (setup.service) {
+    const facts2 = depText("dl", "dep-setup-facts", "");
+    for (const [label, value] of [
+      ["Runs", `node ${setup.service.entry} in ${setup.service.root}/, as its own service behind nginx`],
+      ["Builds", `npm run ${setup.service.buildScript}, then production dependencies of ${setup.service.root}/`],
+      ["Config", Object.keys(setup.service.config).join(", ") || "none"],
+      ["Secrets", setup.service.secrets.length ? `${setup.service.secrets.join(", ")}: you enter them on the Deploy page; never committed` : "none"],
+    ]) facts2.append(depText("dt", "", label), depText("dd", "", value));
+    body.append(facts2);
   }
   const form = document.createElement("form");
   form.className = "dep-setup-form";
