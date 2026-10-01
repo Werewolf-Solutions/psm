@@ -3,7 +3,16 @@ import dns from "node:dns/promises";
 import http from "node:http";
 import test from "node:test";
 
-import { httpProbe, isPublicAddress, jsonPath } from "./probes.ts";
+import { addressesFor, httpProbe, isPublicAddress, jsonPath } from "./probes.ts";
+
+test("a public probe can recover from a stale local NXDOMAIN without accepting a private address", async () => {
+  const missing = async () => { throw Object.assign(new Error("cached NXDOMAIN"), { code: "ENOTFOUND" }); };
+  const publicAnswer = async () => [{ address: "8.8.8.8", family: 4 as const }];
+  const url = new URL("https://example.com/health");
+  assert.deepEqual(await addressesFor(url, false, missing, publicAnswer), [{ address: "8.8.8.8", family: 4 }]);
+  await assert.rejects(() => addressesFor(url, false, missing, async () => [{ address: "127.0.0.1", family: 4 }]), /non-public/);
+  await assert.rejects(() => addressesFor(url, true, missing, publicAnswer), /cached NXDOMAIN/);
+});
 
 test("private, loopback, reserved and documentation addresses are not public", () => {
   for (const address of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.2", "169.254.1.1", "192.0.2.1", "::1", "fc00::1", "2001:db8::1"]) {

@@ -71,12 +71,38 @@ function normalizedOrigin(url: URL): string {
   return `${url.protocol}//${url.host}`;
 }
 
-async function addressesFor(url: URL, allowPrivate: boolean): Promise<Array<{ address: string; family: 4 | 6 }>> {
+type ProbeAddress = { address: string; family: 4 | 6 };
+
+async function publicDnsAddresses(hostname: string): Promise<ProbeAddress[]> {
+  const resolver = new dns.Resolver({ timeout: 2_000, tries: 1 });
+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+  const [v4, v6] = await Promise.allSettled([resolver.resolve4(hostname), resolver.resolve6(hostname)]);
+  return [
+    ...(v4.status === "fulfilled" ? v4.value.map((address) => ({ address, family: 4 as const })) : []),
+    ...(v6.status === "fulfilled" ? v6.value.map((address) => ({ address, family: 6 as const })) : []),
+  ];
+}
+
+/** Public probes may outlive a local router's cached NXDOMAIN after DNS was created. */
+export async function addressesFor(
+  url: URL,
+  allowPrivate: boolean,
+  lookup: (hostname: string) => Promise<Array<{ address: string; family: number }>> = (hostname) => dns.lookup(hostname, { all: true, verbatim: true }),
+  publicLookup: (hostname: string) => Promise<ProbeAddress[]> = publicDnsAddresses,
+): Promise<ProbeAddress[]> {
   let resolved: Array<{ address: string; family: number }>;
   try {
-    resolved = await dns.lookup(url.hostname, { all: true, verbatim: true });
+    resolved = await lookup(url.hostname);
   } catch (error) {
-    throw new ProbeError(`DNS lookup failed for ${url.hostname}: ${(error as Error).message}`);
+    const code = (error as NodeJS.ErrnoException).code;
+    if (allowPrivate || (code !== "ENOTFOUND" && code !== "EAI_AGAIN")) {
+      throw new ProbeError(`DNS lookup failed for ${url.hostname}: ${(error as Error).message}`);
+    }
+    // This is an independent public answer, not a manifest-supplied address.
+    // The ordinary public-address check below and TLS hostname verification
+    // still apply, and the connection is pinned to the validated answer.
+    resolved = await publicLookup(url.hostname).catch(() => []);
+    if (!resolved.length) throw new ProbeError(`DNS lookup failed for ${url.hostname}: ${(error as Error).message}; public DNS also returned no address`);
   }
   if (!resolved.length) throw new ProbeError(`DNS returned no address for ${url.hostname}`);
   const answers = resolved
