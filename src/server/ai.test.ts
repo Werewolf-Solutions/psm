@@ -6,6 +6,7 @@
  * into it, and how the transcript it produces is stored.
  */
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,8 +27,32 @@ const {
   limitWindowLabel,
   writableRootArgs,
   WORKSPACE_NAME,
+  aiState,
+  selectAi,
+  subscribeAi,
 } = await import("./ai.ts");
 type TurnSpec = Parameters<typeof buildCommand>[0];
+
+test("reconnecting with stale picker values does not switch the active provider", () => {
+  const name = `stream-selection-${Date.now()}`;
+  const cwd = repo("stream-selection");
+  const subscribe = (engine: "claude" | "codex") => {
+    const response = Object.assign(new EventEmitter(), {
+      chunks: [] as string[],
+      setHeader() {}, flushHeaders() {},
+      write(chunk: string) { this.chunks.push(chunk); },
+    });
+    subscribeAi(response as unknown as Parameters<typeof subscribeAi>[0], name, cwd, engine, null, null);
+    response.emit("close");
+  };
+  subscribe("claude");
+  subscribe("codex");
+  assert.equal(aiState(name).engine, "claude", "a passive stale stream cannot reset a session");
+  selectAi(name, cwd, "codex", null, null);
+  assert.equal(aiState(name).engine, "codex", "an explicit picker action can change it");
+  subscribe("claude");
+  assert.equal(aiState(name).engine, "codex", "reopening the old tab still cannot switch it back");
+});
 
 /** A turn as psm would describe it, with only what a case cares about spelled out. */
 function spec(over: Partial<TurnSpec> = {}): TurnSpec {

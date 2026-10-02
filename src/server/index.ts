@@ -58,6 +58,7 @@ import {
   startPlanningLoop,
   stopSession as stopAiSession,
   subscribeAi,
+  selectAi,
   WORKSPACE_NAME,
   type AiEngine,
 } from "./ai.ts";
@@ -1902,6 +1903,21 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
     const model = parseModel(req.query.model, t.model);
     const effort = parseEffort(req.query.effort, t.effort);
     subscribeAi(res, t.name, t.path, engine, model, effort, t.extraDirs);
+  });
+
+  // A transcript connection is read-only. Provider/model changes need an
+  // explicit picker action so a stale tab cannot interrupt another turn.
+  local.post(`${base}/ai/selection`, (req, res) => {
+    let t: AiConversation;
+    try {
+      t = resolve(req);
+      const engine = parseEngine(req.body?.engine, t.engine);
+      const model = parseModel(req.body?.model, t.model);
+      const effort = parseEffort(req.body?.effort, t.effort);
+      res.json(selectAi(t.name, t.path, engine, model, effort, t.extraDirs));
+    } catch (err) {
+      guard(res, err);
+    }
   });
 
   // send one message

@@ -1260,6 +1260,9 @@ function openWorkspace(p, pane = null, opts = {}) {
     return;
   }
   const chat = !!opts.chatOnly; // the workspace-wide chat: AI pane only
+  // Drop the previous project's stream before WS points at another project.
+  // Its queued status events must never rewrite this project's picker.
+  disconnectAi();
   stashDraft(); // remember the outgoing chat's unsent text before we switch
   if (PLAN.saved?.project !== p.name) {
     PLAN = { saved: null, draft: null, dirty: false, loading: false, drag: null };
@@ -3597,10 +3600,13 @@ function renderSessionPane(data) {
 
 async function fetchSessionState() {
   if (!WS.name) return;
+  const key = conversationKey();
+  const base = aiBase();
   try {
-    const r = await agentApi(`${aiBase()}/ai/state`);
+    const r = await agentApi(`${base}/ai/state`);
     if (!r.ok) return;
-    renderSessionPane(await r.json());
+    const state = await r.json();
+    if (conversationKey() === key) renderSessionPane(state);
   } catch {}
 }
 
@@ -4130,6 +4136,31 @@ function rememberAiChoice({ engine, model, effort, fullAccess } = {}) {
   return patchProject(WS.name, body);
 }
 
+let aiSelectionQueue = Promise.resolve();
+function changeAiSelection() {
+  const key = conversationKey();
+  const base = aiBase();
+  const selection = { engine: WS.engine, model: WS.model, effort: WS.effort };
+  // Stop receiving the old selection's status while the explicit change is in flight.
+  disconnectAi();
+  aiSelectionQueue = aiSelectionQueue.catch(() => {}).then(async () => {
+    try {
+      const response = await agentApi(`${base}/ai/selection`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(selection),
+      });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not change AI selection");
+      if (conversationKey() === key && WS.engine === selection.engine && WS.model === selection.model && WS.effort === selection.effort && aiPaneOpen()) connectAi(WS.name);
+    } catch (error) {
+      if (conversationKey() === key) {
+        toast(error.message || "Could not change AI selection");
+        if (aiPaneOpen()) connectAi(WS.name);
+      }
+    }
+  });
+}
+
 function applyEngine(engine) {
   WS.engine = engine;
   WS.model = "";
@@ -4139,8 +4170,8 @@ function applyEngine(engine) {
   refreshAiModels();
   usageSelectionChanged();
   rememberAiChoice({ engine: WS.engine, model: "", effort: "" }); // remember per project or room
+  changeAiSelection();
   fetchLimit(); // limits are per engine — re-check for the newly selected one
-  if (aiPaneOpen()) connectAi(WS.name);
   scheduleSessionRefresh();
 }
 
@@ -4151,7 +4182,7 @@ function applyModel(model) {
   syncAiControls();
   usageSelectionChanged();
   rememberAiChoice({ model: WS.model, effort: "" }); // remember per project or room
-  if (aiPaneOpen()) connectAi(WS.name);
+  changeAiSelection();
   scheduleSessionRefresh();
 }
 
@@ -4159,7 +4190,7 @@ function applyEffort(effort) {
   WS.effort = effort;
   syncAiControls();
   rememberAiChoice({ effort: WS.effort });
-  if (aiPaneOpen()) connectAi(WS.name);
+  changeAiSelection();
   scheduleSessionRefresh();
 }
 
@@ -4493,9 +4524,9 @@ function aiBase(name = WS.name) {
 
 function connectAi(name) {
   if (WS.aiEs) WS.aiEs.close();
-  // send model/effort even when empty: empty means "the provider's default",
-  // and leaving them out lets the server fall back to the project's saved
-  // values — which is how switching engines used to drag the old model along
+  const key = conversationKey();
+  // These values initialize a new conversation. An existing conversation's
+  // selection comes from the server; only /ai/selection may change it.
   const params = new URLSearchParams({
     engine: WS.engine,
     model: WS.model || "",
@@ -4503,19 +4534,23 @@ function connectAi(name) {
   });
   const es = agentStream(`${aiBase(name)}/ai/stream?${params}`);
   WS.aiEs = es;
+  const current = () => WS.aiEs === es && conversationKey() === key;
   // on every (re)connection the server replays the whole transcript, so wipe
   // first — this makes a dropped/reconnected stream rebuild cleanly instead of
   // duplicating or going blank
   es.onopen = () => {
+    if (!current()) return;
     WS.pending = [];
     $("#ws-transcript").innerHTML = "";
   };
   es.onmessage = (e) => {
+    if (!current()) return;
     try {
       appendAiEvent(JSON.parse(e.data));
     } catch {}
   };
   es.addEventListener("status", (e) => {
+    if (!current()) return;
     try {
       const status = JSON.parse(e.data);
       WS.engine = status.engine || WS.engine;
@@ -4533,17 +4568,20 @@ function connectAi(name) {
   });
   // the server sends the last saved recap on (re)connect
   es.addEventListener("recap", (e) => {
+    if (!current()) return;
     try {
       setRecap(JSON.parse(e.data).summary);
     } catch {}
   });
   // a usage limit — pushed on connect if already limited, or when a turn hits one
   es.addEventListener("limit", (e) => {
+    if (!current()) return;
     try {
       setAiLimit(JSON.parse(e.data));
     } catch {}
   });
   es.addEventListener("question", (e) => {
+    if (!current()) return;
     try {
       const question = JSON.parse(e.data);
       WS.question = question;
@@ -4556,12 +4594,14 @@ function connectAi(name) {
     } catch {}
   });
   es.addEventListener("question-cleared", (e) => {
+    if (!current()) return;
     try {
       clearQuestion(conversationKey(), JSON.parse(e.data).id);
       fetchSessions();
     } catch {}
   });
   es.addEventListener("plan", (e) => {
+    if (!current()) return;
     try {
       const plan = JSON.parse(e.data).plan;
       if (!plan || plan.project !== WS.name || PLAN.dirty) return;

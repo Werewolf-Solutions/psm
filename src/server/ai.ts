@@ -1977,7 +1977,16 @@ export function subscribeAi(
   effort: AiEffort,
   extraDirs: string[] = [],
 ): void {
-  const s = getSession(name, cwd, engine, model, effort, extraDirs);
+  // Opening a transcript is observation. A tab can reconnect with stale saved
+  // picker values while a question is being answered in another project; that
+  // must not switch providers or stop the active turn.
+  const existing = sessions.get(name);
+  // Restored sessions have no cwd until the first request supplies it. That
+  // first passive connection must preserve their provider and resume id too.
+  const sameScope = !!existing && (existing.cwd === "" || existing.cwd === cwd)
+    && existing.extraDirs.join("\0") === extraDirs.join("\0");
+  const s = sameScope ? existing : getSession(name, cwd, engine, model, effort, extraDirs);
+  if (sameScope && !s.cwd) s.cwd = cwd;
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
@@ -1993,7 +2002,7 @@ export function subscribeAi(
   }
   if (s.summary) // show the last recap instantly; the client refreshes it if stale
     res.write(`event: recap\ndata: ${JSON.stringify({ summary: s.summary })}\n\n`);
-  const limit = aiLimit(engine, model); // surface a usage limit before the user types anything
+  const limit = aiLimit(s.engine, s.model); // report the active conversation's limit
   if (limit) res.write(`event: limit\ndata: ${JSON.stringify(limit)}\n\n`);
 
   s.subscribers.add(res);
@@ -2002,4 +2011,11 @@ export function subscribeAi(
     clearInterval(ping);
     s.subscribers.delete(res);
   });
+}
+
+/** Only an explicit picker action may change an existing conversation's provider. */
+export function selectAi(
+  name: string, cwd: string, engine: AiEngine, model: AiModel, effort: AiEffort, extraDirs: string[] = [],
+) {
+  return statusPayload(getSession(name, cwd, engine, model, effort, extraDirs));
 }

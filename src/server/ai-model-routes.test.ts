@@ -9,12 +9,19 @@ import ts from "typescript";
 function routes() {
   const handlers = new Map<string, any>();
   const discoveries: { engine: string; path: string }[] = [];
+  const selections: { name: string; engine: string; model: string; effort: string }[] = [];
   const context = vm.createContext({
     local: {
       get: (path: string, handler: any) => handlers.set(path, handler),
-      post() {},
+      post: (path: string, handler: any) => handlers.set(path, handler),
     },
     parseEngine: (value: string, fallback: string) => value || fallback,
+    parseModel: (value: string) => value || null,
+    parseEffort: (value: string) => value || null,
+    selectAi: (name: string, _path: string, engine: string, model: string, effort: string) => {
+      selections.push({ name, engine, model, effort });
+      return { engine, model, effort };
+    },
     modelCatalog: async (engine: string, path: string) => {
       discoveries.push({ engine, path });
       return { engine, models: [{ id: `${engine}-model` }] };
@@ -26,8 +33,17 @@ function routes() {
   vm.runInContext(ts.transpileModule(errors + mount, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
   }).outputText, context);
-  return { handlers, discoveries, context, run: (code: string) => vm.runInContext(code, context) };
+  return { handlers, discoveries, selections, context, run: (code: string) => vm.runInContext(code, context) };
 }
+
+test("changing a provider is an explicit project-scoped POST", () => {
+  const r = routes();
+  r.run('mountAiRoutes("/api/projects/:name", () => ({ name: "todo", path: "/workspace/todo", engine: "claude", model: "opus", effort: "medium", extraDirs: [] }))');
+  const res = response();
+  r.handlers.get("/api/projects/:name/ai/selection")({ body: { engine: "codex", model: "gpt-6", effort: "high" } }, res);
+  assert.equal(res.code, 200);
+  assert.deepEqual(r.selections, [{ name: "todo", engine: "codex", model: "gpt-6", effort: "high" }]);
+});
 
 function response() {
   return {
