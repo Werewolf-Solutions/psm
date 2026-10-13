@@ -47,6 +47,7 @@ function repairFingerprint(checked: ReadinessResult): string {
   })).digest("hex");
 }
 export interface PreparationRepairer {
+  exists?(roomId: string): boolean;
   start(job: PreparationJob, checked: ReadinessResult, purpose?: "repair" | "diagnose-external"): Promise<string>;
   status(roomId: string): { busy: boolean; question: boolean };
   stop(roomId: string): void;
@@ -130,6 +131,14 @@ export class DeploymentPreparationController {
   }) { this.repository = options.repository ?? new PreparationRepository(); }
   private key(projectId: string, environmentId: string): string { return `${projectId}/${environmentId}`; }
   current(projectId: string, environmentId: string): PreparationJob | null { return this.repository.get(projectId, environmentId); }
+  /** Recheck source and grants before replacing a deleted preparation room. */
+  private clearMissingRoom(job: PreparationJob): void {
+    if (!job.workroomId || this.options.repairs.exists?.(job.workroomId) !== false) return;
+    job.workroomId = null;
+    job.waitingForRepair = false;
+    job.repairBaseline = null;
+    job.diagnosedExternal = false;
+  }
   /**
    * Start, or rejoin, this deployment's preparation.
    *
@@ -152,11 +161,19 @@ export class DeploymentPreparationController {
       model: ai.model ?? (ai.engine ? null : previous?.model ?? null),
       effort: ai.effort ?? (ai.engine ? null : previous?.effort ?? null),
     };
+    this.clearMissingRoom(job);
     this.repository.save(job); this.schedule(job); return job;
   }
   /** Restart does not silently resume mutation authority; the user resumes with the button. */
   recover(): void {
     for (const job of this.repository.active()) {
+      // A pending publication grants no mutation authority; retain its explicit review.
+      if (job.state === "awaiting-approval" && job.phase === "publish" && job.publicationId && this.options.publisher) {
+        try {
+          const publication = this.options.publisher.get(job.publicationId);
+          if (publication.state === "pending" && publication.expiresAt > Date.now()) continue;
+        } catch { /* A missing or stale review needs a fresh preparation check. */ }
+      }
       job.state = "blocked"; job.message = "The agent restarted. Resume preparation to recheck its current state.";
       this.repository.save(job);
     }
@@ -179,6 +196,7 @@ export class DeploymentPreparationController {
     const resumed: PreparationJob[] = [];
     for (const job of projectId ? this.repository.forProject(projectId) : this.repository.all()) {
       if (job.state !== "blocked" || (job.blockedBy !== "capabilities" && job.blockedBy !== "checkout")) continue;
+      this.clearMissingRoom(job);
       let blockedBy: "capabilities" | "checkout" = job.blockedBy;
       let gap: string | null;
       try {
@@ -300,11 +318,13 @@ export class DeploymentPreparationController {
   private async step(projectId: string, environmentId: string): Promise<void> {
     const job = this.current(projectId, environmentId);
     if (!job || !this.live(job)) return;
+    this.clearMissingRoom(job);
     if (Date.now() - job.createdAt > 2 * 60 * 60_000) {
       job.state = "blocked"; job.message = "Preparation paused after two hours. Review its session and resume when ready.";
       this.save(job); if (job.workroomId) this.options.repairs.stop(job.workroomId); return;
     }
     let completedRepair = false;
+    let completedInfrastructure = false;
     if (job.waitingForRepair && job.workroomId) {
       const state = this.options.repairs.status(job.workroomId);
       if (state.busy || state.question) {
@@ -348,6 +368,9 @@ export class DeploymentPreparationController {
             : "The GitHub build succeeded, but PSM could not verify or import its artifact. Review the run error and Open GitHub run below. Resume preparation after correcting the cause in PSM or the artifact workflow; no application-source repair was started.";
           this.save(job); return;
         }
+      } else if (job.phase === "infrastructure") {
+        completedInfrastructure = true;
+        job.failure = null;
       }
       job.runId = null; job.planId = null; job.state = "running";
     }
@@ -407,6 +430,20 @@ export class DeploymentPreparationController {
       job.runId = prepared.runId; this.save(job);
       if (!this.live(job)) await this.options.runner.cancel(prepared.runId);
       return;
+    }
+    // Reconcile plans can deliberately contain unconditional reload actions.
+    // A successful run followed by fresh readiness is the completion evidence;
+    // creating another plan here would repeat those actions indefinitely.
+    if (completedInfrastructure) {
+      job.phase = "check";
+      if (checked.readiness.ready && !outstanding.length) {
+        job.state = "succeeded"; job.blockedBy = null;
+        job.message = "Ready to deploy. Source, dependencies, build and infrastructure have been checked.";
+      } else {
+        job.state = "blocked"; job.blockedBy = "external";
+        job.message = "Infrastructure reconciliation succeeded, but fresh readiness checks still need attention. Review the remaining checks, then resume preparation; no repeated infrastructure run was started.";
+      }
+      this.save(job); return;
     }
     const result = await service.createPlan(projectId, { environment: environmentId, operation: "reconcile" });
     if (!this.live(job)) return;

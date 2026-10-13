@@ -8,6 +8,7 @@ import { configuredRemotes, explainAccess, taskRunnerStatus } from "./agent-acce
 import { OperationReviews } from "./agent-reviews.ts";
 import { MachineCommands } from "./machines/commands.ts";
 import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
+import { workspaceAgentPolicyRouter } from "./workspace-agent-policy.ts";
 import express from "express";
 import type { Request, Response } from "express";
 import fs from "node:fs";
@@ -57,6 +58,7 @@ import {
   startFreshAgentSession,
   startPlanningLoop,
   stopSession as stopAiSession,
+  deleteSession as deleteAiSession,
   subscribeAi,
   selectAi,
   WORKSPACE_NAME,
@@ -81,6 +83,7 @@ import {
 import { PlanConflictError, PlanNotFoundError, PlanValidationError, planStore } from "./plans.ts";
 import { NOTE_KINDS, NoteNotFoundError, NoteValidationError, noteStore } from "./notes.ts";
 import { ensurePreviewProxy } from "./preview.ts";
+import { customCommandId, validateCustomCommands } from "./custom-commands.ts";
 import { BrowseError, browse } from "./browse.ts";
 import { StopError, machineProcesses, stopProcess } from "./machine.ts";
 import {
@@ -237,7 +240,7 @@ app.post("/api/auth/logout", async (_req, res) => {
  * so the page can notice it has gone stale and offer a reload rather than
  * failing at whichever button is pressed first.
  */
-const WEB_ASSETS = ["index.html", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "external-links.js", "styles.css"];
+const WEB_ASSETS = ["index.html", "privacy.js", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "monitoring.js", "external-links.js", "styles.css"];
 
 function webAssetVersion(): string {
   const parts: string[] = [];
@@ -270,7 +273,7 @@ app.get("/api/auth/session", async (req, res) => {
     ? { available: true }
     : await ssoAvailability(req).catch(() => ({ available: false, reason: "Could not reach Werewolf." }));
   const dapp = await ssoConfig(req).catch(() => null);
-  res.json({ user, provider: "werewolf", sso, dapp });
+  res.json({ user, provider: "werewolf", sso, dapp, localApprovalWithoutSignIn: localRequest(req) && isLoopbackHost(req.hostname) });
 });
 
 /* ---------- agent identity + pairing ---------- */
@@ -319,13 +322,13 @@ const OVERRIDE_KEYS: (keyof Override)[] = [
   "archived",
   "note",
   "runCommand",
+  "customCommands",
   "deployStaging",
   "deployProduction",
   "port",
   "aiEngine",
   "aiModel",
   "aiEffort",
-  "aiFullAccess",
   "aiExtraProjects",
 ];
 
@@ -344,7 +347,7 @@ app.get("/api/projects", (_req, res) => {
     statusMeta: STATUS_META,
     version: APP_VERSION,
     mode: psmMode(),
-    capabilities: { runsCommands: true, scansImplicitly: scansImplicitly(), canLink: true },
+    capabilities: { runsCommands: true, scansImplicitly: scansImplicitly(), canLink: true, customCommands: true },
   });
 });
 
@@ -931,6 +934,20 @@ local.patch("/api/projects/:name", (req, res) => {
   }
   const all = loadOverrides();
   const current: Override = all[name] || {};
+  if ("customCommands" in req.body) {
+    try {
+      const next = validateCustomCommands(req.body.customCommands, getProjects());
+      for (const saved of current.customCommands ?? []) {
+        const updated = next.find((entry) => entry.id === saved.id);
+        if (procState(name, `custom:${saved.id}`).status === "running" && JSON.stringify(updated) !== JSON.stringify(saved)) {
+          return res.status(409).json({ error: `Stop ${saved.name} before changing it.` });
+        }
+      }
+      req.body.customCommands = next;
+    } catch (error) {
+      return res.status(400).json({ error: (error as Error).message });
+    }
+  }
   for (const key of OVERRIDE_KEYS) {
     if (!(key in req.body)) continue;
     const val = req.body[key];
@@ -1141,6 +1158,7 @@ function findProject(name: string) {
 }
 
 function parseKind(v: unknown): ProcKind {
+  if (customCommandId(v)) return v as ProcKind;
   return v === "deploy:staging" || v === "deploy:production" ? v : "run";
 }
 
@@ -1330,7 +1348,7 @@ local.get("/api/projects/:name/ai/usage", async (req, res) => {
   res.json(await subscriptionUsage(engine, model, force));
 });
 
-// the workspace-wide chat target (its saved engine / full-access defaults)
+// the workspace-wide chat target
 local.get("/api/workspace", (_req, res) => {
   const o = loadOverrides()[WORKSPACE_NAME] || {};
   res.json({
@@ -1338,7 +1356,7 @@ local.get("/api/workspace", (_req, res) => {
     aiEngine: o.aiEngine || "claude",
     aiModel: parseModel(o.aiModel),
     aiEffort: parseEffort(o.aiEffort),
-    aiFullAccess: !!o.aiFullAccess,
+    aiFullAccess: false,
   });
 });
 
@@ -1364,9 +1382,21 @@ local.get("/api/projects/:name/proc", (req, res) => {
 
 // start the project's run (or deploy) command
 local.post("/api/projects/:name/run", (req, res) => {
+  if (typeof req.body?.kind === "string" && req.body.kind.startsWith("custom:") && !customCommandId(req.body.kind)) {
+    return res.status(400).json({ error: "invalid custom command ID" });
+  }
   const kind = parseKind(req.body?.kind);
   const proj = findProject(req.params.name);
   if (!proj) return res.status(404).json({ error: "unknown project" });
+  const customId = customCommandId(kind);
+  if (customId) {
+    const saved = proj.customCommands.find((entry) => entry.id === customId);
+    if (!saved) return res.status(404).json({ error: "unknown custom command" });
+    const directory = findProject(saved.directory);
+    if (!directory) return res.status(400).json({ error: `Directory ${saved.directory} is no longer linked.` });
+    const p = start(proj.name, kind, saved.command, directory.path);
+    return res.json({ ok: true, status: p.status, command: saved.command });
+  }
   const command =
     (req.body?.command && String(req.body.command).trim()) || commandForKind(proj, kind);
   if (!command)
@@ -1377,6 +1407,9 @@ local.post("/api/projects/:name/run", (req, res) => {
 
 // stop it
 local.post("/api/projects/:name/stop", (req, res) => {
+  if (typeof req.body?.kind === "string" && req.body.kind.startsWith("custom:") && !customCommandId(req.body.kind)) {
+    return res.status(400).json({ error: "invalid custom command ID" });
+  }
   const stopped = stop(req.params.name, parseKind(req.body?.kind));
   res.json({ ok: true, stopped });
 });
@@ -1439,7 +1472,7 @@ function aiTarget(name: string) {
       aiEngine: (o.aiEngine as AiEngine) || "claude",
       aiModel: parseModel(o.aiModel),
       aiEffort: parseEffort(o.aiEffort),
-      aiFullAccess: !!o.aiFullAccess,
+      aiFullAccess: false,
       aiExtraProjects: [] as string[], // the workspace chat already sees everything
     };
   }
@@ -1761,7 +1794,7 @@ local.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
  * One AI conversation, described in the terms the AI module needs.
  *
  * A project and a workroom differ in what they resolve to — one directory or
- * several, a saved full-access setting or none at all — and in nothing else.
+ * several, or one workspace directory — and in nothing else.
  * Describing both as this lets the six AI endpoints be written once instead of
  * twice, which matters more than it sounds: they are where authority is decided,
  * and a second copy is a second place for the two to drift apart.
@@ -1772,7 +1805,7 @@ interface AiConversation {
   engine: AiEngine;
   model: string | null;
   effort: string | null;
-  fullAccess: boolean; // the ceiling, before the request is allowed to lower it
+  fullAccess: boolean; // retained for legacy callers; always false
   extraDirs: string[];
   extraContext: string;
   onTurn?: () => void;
@@ -1793,7 +1826,7 @@ function projectConversation(name: string): AiConversation {
     engine: t.aiEngine,
     model: t.aiModel,
     effort: t.aiEffort,
-    fullAccess: !!t.aiFullAccess,
+    fullAccess: false,
     extraDirs: extraDirsFor(t),
     extraContext: t.name === WORKSPACE_NAME ? workspaceRundown() : "",
   };
@@ -1807,9 +1840,7 @@ function projectConversation(name: string): AiConversation {
  * shrinking its scope, because the whole point of the room is that the change
  * lands on both sides: half of it is worse than none.
  *
- * Full access is not offered. A workroom's promise is that these repositories
- * and no others are writable, and the flag that turns the sandbox off would make
- * that promise false.
+ * A workroom uses managed permissions for its selected repositories.
  */
 function workroomConversation(id: string): AiConversation {
   const room = workSessions.get(id);
@@ -2042,7 +2073,10 @@ local.get("/api/work-sessions/:id/git", async (req, res) => {
 local.get("/api/work-sessions/:id/deployments", (req, res) => {
   try {
     const room = workSessions.get(req.params.id);
-    res.json({ edges: deploymentEngine.service.crossProjectDependencies(room.projects) });
+    res.json({
+      members: deploymentEngine.service.deploymentCoverage(room.projects),
+      edges: deploymentEngine.service.crossProjectDependencies(room.projects),
+    });
   } catch (err) {
     workroomError(res, err);
   }
@@ -2079,9 +2113,9 @@ function workroomView(room: WorkSession) {
   return { ...room, members, ready: members.every((member) => member.present) };
 }
 
-local.get("/api/work-sessions", (_req, res) => {
+local.get("/api/work-sessions", (req, res) => {
   try {
-    res.json({ workSessions: workSessions.list().map(workroomView) });
+    res.json({ workSessions: workSessions.list({ includeArchived: req.query.includeArchived === "true" }).map(workroomView) });
   } catch (err) {
     workroomError(res, err);
   }
@@ -2131,6 +2165,16 @@ local.post("/api/work-sessions/:id/archive", (req, res) => {
     const room = workSessions.archive(req.params.id);
     stopAiSession(workSessionKey(room.id));
     res.json({ ok: true, workSession: workroomView(room) });
+  } catch (err) {
+    workroomError(res, err);
+  }
+});
+
+local.delete("/api/work-sessions/:id", (req, res) => {
+  try {
+    const room = workSessions.delete(req.params.id);
+    deleteAiSession(workSessionKey(room.id));
+    res.json({ ok: true });
   } catch (err) {
     workroomError(res, err);
   }
@@ -2189,7 +2233,8 @@ function permissionProject(id: string): PermissionProject {
 /** Grants a preparation room needs. These, and only these, are answered in Capabilities. */
 function preparationPermissionGap(projectId: string, engine: string | null, workroomId?: string | null): string | null {
   const snapshot = agentPermissions.snapshot(permissionProject(projectId));
-  return reviewAgentPermissions([snapshot], engine ?? (workroomId ? workSessions.get(workroomId).engine : null) ?? getProjects().find((item) => item.id === projectId)?.aiEngine ?? "claude", PREPARATION_OPERATIONS.map((entry) => entry.permission));
+  const roomEngine = workroomId ? workSessions.list({ includeArchived: true }).find((room) => room.id === workroomId)?.engine : null;
+  return reviewAgentPermissions([snapshot], engine ?? roomEngine ?? getProjects().find((item) => item.id === projectId)?.aiEngine ?? "claude", PREPARATION_OPERATIONS.map((entry) => entry.permission));
 }
 /**
  * Whether this checkout can take a managed commit at all.
@@ -2271,6 +2316,27 @@ local.use(agentPermissionRouter({
   },
 }));
 
+/** Business policy edits require live management authority as well as local operator access. */
+function authorizeWorkspaceManagement(ref: string): Promise<Awaited<ReturnType<typeof manageAuthority>>> {
+  if (ref === "personal") return manageAuthority(ref);
+  return sessionContext()
+    .then(({ accessToken }) => new Promise<Awaited<ReturnType<typeof manageAuthority>>>((resolve, reject) => {
+      runWithSession(accessToken, () => { manageAuthority(ref).then(resolve, reject); });
+    }))
+    .catch(() => manageAuthority(ref));
+}
+local.use(workspaceAgentPolicyRouter({
+  store: agentPermissions,
+  authorize: authorizeWorkspaceManagement,
+  changed: (workspaceId, { restrictive }) => {
+    if (!restrictive) return;
+    const state = loadWorkspaceState();
+    for (const project of getProjects()) {
+      if (project.id && projectWorkspaceRef(state, project.id) === workspaceId) stopProjectAgents(project.path);
+    }
+  },
+}));
+
 const deploymentPreparation = new DeploymentPreparationController({
   standingApproval: (input) => approveByStandingRule({
     permissions: agentPermissions, project: permissionProject, store: deploymentEngine.service.store,
@@ -2309,7 +2375,10 @@ const deploymentPreparation = new DeploymentPreparationController({
       try {
         const room = workSessions.get(roomId);
         return { engine: room.engine, model: room.model, effort: room.effort };
-      } catch { return null; }
+      } catch (error) {
+        if (error instanceof WorkSessionNotFoundError) return null;
+        throw error;
+      }
     },
     useAi: (roomId, ai) => { workSessions.setEngine(roomId, ai); },
     send: (roomId, message, preparation) => {
@@ -2321,7 +2390,7 @@ const deploymentPreparation = new DeploymentPreparationController({
         conversation.model,
         conversation.effort,
         message,
-        false, // a preparation room is never handed the sandbox-off flag
+        false,
         conversation.extraContext,
         conversation.extraDirs,
         preparation,
@@ -2385,13 +2454,7 @@ local.use(machineRouter({
   },
   // Only a business workspace needs the Werewolf session; personal never
   // waits on a remote refresh.
-  authorize: (ref) => ref === "personal"
-    ? manageAuthority(ref)
-    : sessionContext()
-      .then(({ accessToken }) => new Promise<Awaited<ReturnType<typeof manageAuthority>>>((resolve, reject) => {
-        runWithSession(accessToken, () => { manageAuthority(ref).then(resolve, reject); });
-      }))
-      .catch(() => manageAuthority(ref)),
+  authorize: authorizeWorkspaceManagement,
   actor: () => `local:${os.userInfo().username}`,
 }));
 

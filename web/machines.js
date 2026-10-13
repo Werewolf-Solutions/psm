@@ -86,7 +86,7 @@
             }));
           }
           if (access.role === "admin" && access.state === "ready") row.append(button("Remove administrator access", async () => {
-            if (!window.confirm(`Remove PSM's administrator access to ${machine.name}? Project accounts keep working; setting up new ones will need administrator access again.`)) return;
+            if (!await window.psmConfirm(`Remove PSM's administrator access to ${machine.name}? Project accounts keep working; setting up new ones will need administrator access again.`, "Remove administrator access")) return;
             try { await post(`/api/machine-access/${encodeURIComponent(access.id)}/release`); showList(); } catch (error) { view.error(error.message); }
           }));
           if (["planned", "setting-up", "failed"].includes(access.state)) row.append(button("Continue setup", async () => {
@@ -96,7 +96,7 @@
             } catch (error) { view.error(error.message); }
           }, "btn btn-primary"));
           if (!access.machineLevel && access.state !== "revoked") row.append(button("Disconnect", async () => {
-            if (!window.confirm(`Disconnect ${access.projectName} ${access.environmentId} from ${machine.name}? PSM forgets its keys; the server account stays until you remove it.`)) return;
+            if (!await window.psmConfirm(`Disconnect ${access.projectName} ${access.environmentId} from ${machine.name}? PSM forgets its keys; the server account stays until you remove it.`, "Disconnect machine access")) return;
             try { await post(`/api/machine-access/${encodeURIComponent(access.id)}/revoke`, { revision: access.revision }); showList(); } catch (error) { view.error(error.message); }
           }));
           card.append(row);
@@ -124,7 +124,7 @@
           const row = node("div", "", "machine-candidate");
           row.append(node("code", `${candidate.keyType} ${candidate.fingerprint}`));
           row.append(button("It matches — register", async () => {
-            if (!window.confirm(`Register ${host.value.trim()} with host key\n${candidate.fingerprint}?\n\nOnly confirm if you compared it with a trusted source.`)) return;
+            if (!await window.psmConfirm(`Register ${host.value.trim()} with host key\n${candidate.fingerprint}?\n\nOnly confirm if you compared it with a trusted source.`, "Confirm host identity")) return;
             try {
               const { machine } = await post("/api/machines", { name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: port.value, knownHost: candidate.knownHost, confirmFingerprint: candidate.fingerprint });
               showAdmin(machine.id);

@@ -75,7 +75,7 @@ async function fixture(t: test.TestContext, missing = false, fullApply = false) 
       if (path === `/repos/${controller}/git/commits/${initialHead}`) return Response.json({ tree: { sha: "c".repeat(40) } });
       if (path === `/repos/${controller}/git/trees` && method === "POST") {
         const body = JSON.parse(String(init?.body));
-        fileTree = body.tree.map((entry: { path: string; content: string }) => ({ path: entry.path, sha: gitBlobSha(entry.content), mode: "100644", type: "blob" }));
+        fileTree = [...fileTree.filter((entry) => !body.tree.some((replacement: { path: string }) => replacement.path === entry.path)), ...body.tree.map((entry: { path: string; content: string }) => ({ path: entry.path, sha: gitBlobSha(entry.content), mode: "100644", type: "blob" }))];
         return Response.json({ sha: "e".repeat(40) });
       }
       if (path === `/repos/${controller}/git/commits` && method === "POST") return Response.json({ sha: "d".repeat(40) });
@@ -101,6 +101,16 @@ async function fixture(t: test.TestContext, missing = false, fullApply = false) 
       expectedHeadSha: initialHead,
     }] } } });
   return { setup: new GitHubControllerSetup(service, fetcher, () => now), store, calls, legacy,
+    shared: (canonical = true) => {
+      const bundle = appControllerBundle({ targetId: "example:other", sshUser: "other-release" });
+      fileTree = Object.entries(bundle).map(([path, content]) => ({ path, sha: gitBlobSha(content), mode: "100644", type: "blob" }));
+      if (!canonical) fileTree = fileTree.filter((entry) => entry.path !== "scripts/psm_controller.py");
+      store.createConnection({ connectionId: "peer", kind: "github-actions@1", label: "Other project", readiness: "ready", secretGeneration: 0,
+        constraints: store.getConnection("github").constraints, createdAt: now,
+        metadata: { publicMetadata: { releaseControllers: [{ targetId: "example:other", repository: controller, ref: "refs/heads/main",
+          githubEnvironment: "example-other", expectedHeadSha: initialHead, expectedWorkflowBlobSha: gitBlobSha(bundle[".github/workflows/release-static.yml"]) }] } } });
+    },
+    tree: () => fileTree,
     forbidProtection: (message = "Resource not accessible by integration") => { protectionForbidden = message; }, move: () => { head = movedHead; },
     freePlan: () => { freePlan = true; protectionForbidden = "Upgrade to GitHub Pro or make this repository public to enable this feature."; },
     grantPush: (login: string) => { writers.push(login); }, hideMembers: () => { writers.length = 0; } };
@@ -223,4 +233,37 @@ test("an App that cannot see who can push is refused, never recorded as nobody",
     assert.match(error.message, /Members: Read at https:\/\/github\.com\/organizations\/example\/settings\/apps\/psm-example\/permissions/);
     return true;
   });
+});
+
+
+test("shared setup adds a target without changing peers or their credentials and keeps their pins usable", async (t) => {
+  const { setup, store, calls, shared, tree } = await fixture(t, false, true);
+  shared();
+  const before = tree().find((entry) => entry.path === "targets/example__other.json");
+  const preview = await setup.preview("prj_site", "staging");
+  assert.deepEqual(preview.changes.map((entry) => entry.path), ["targets/example__site-staging.json"]);
+  const result = await setup.apply(preview.id, "prj_site", "staging");
+  assert.deepEqual(tree().find((entry) => entry.path === before!.path), before);
+  const peer = (store.getConnection("peer").metadata as any).publicMetadata.releaseControllers[0];
+  assert.equal(peer.expectedHeadSha, result.headSha);
+  assert.equal(peer.githubEnvironment, "example-other");
+  assert.ok(!calls.some((call) => call.path.includes("/environments/example-other")));
+});
+
+test("target setup cannot replace a shared controller's common workflow bundle", async (t) => {
+  const { setup, calls, shared } = await fixture(t, false, true);
+  shared(false);
+  await assert.rejects(setup.preview("prj_site", "staging"), /repository-wide review/);
+  assert.ok(calls.every((call) => call.method === "GET" || call.path.includes("/access_tokens")));
+});
+
+test("a shared target changing after preview prevents setup writes", async (t) => {
+  const { setup, store, calls, shared } = await fixture(t, false, true);
+  shared();
+  const preview = await setup.preview("prj_site", "staging");
+  const peer = store.getConnection("peer");
+  store.updateConnection({ ...peer, expectedMetadataRevision: peer.metadataRevision, label: "Changed peer", updatedAt: now + 1 });
+  const start = calls.length;
+  await assert.rejects(setup.apply(preview.id, "prj_site", "staging"), /Shared controller targets changed/);
+  assert.ok(calls.slice(start).every((call) => call.method === "GET" || call.path.includes("/access_tokens")));
 });

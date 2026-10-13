@@ -86,6 +86,26 @@ export function compareWorkspaceVersions(left: string, right: string): number {
   return 0;
 }
 
+export type ReleaseBump = "major" | "minor" | "patch";
+
+export function bumpWorkspaceVersion(version: string, bump: ReleaseBump): string {
+  const parts = version.match(VERSION);
+  if (!parts) throw new DeploymentSourceError("version must use X.Y.Z");
+  const major = BigInt(parts[1]);
+  const minor = BigInt(parts[2]);
+  const patch = BigInt(parts[3]);
+  if (bump === "major") return `${major + 1n}.0.0`;
+  if (bump === "minor") return `${major}.${minor + 1n}.0`;
+  return `${major}.${minor}.${patch + 1n}`;
+}
+
+/** A display-only floor until preparation reviews the change and commits a release. */
+export function proposedDeploymentVersion(committed: string, working: string | null): string {
+  const patch = bumpWorkspaceVersion(committed, "patch");
+  if (!working || !VERSION.test(working)) return patch;
+  return compareWorkspaceVersions(working, patch) > 0 ? working : patch;
+}
+
 export function readDeploymentSource(
   checkoutPath: string,
   revision = "HEAD",

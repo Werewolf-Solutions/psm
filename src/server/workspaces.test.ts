@@ -45,7 +45,7 @@ const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "psm-workspaces-"));
 process.env.PSM_WORKSPACES_FILE = path.join(scratch, "workspaces.json");
 process.env.PSM_CLOUD_DEVICE_FILE = path.join(scratch, "device.json");
 
-const { workspaceRouter, loadState } = await import("./workspaces.ts");
+const { workspaceRouter, loadState, manageAuthority } = await import("./workspaces.ts");
 const { runWithSession } = await import("../store.ts");
 
 const entry = (ref: string, name: string, role: string) => ({
@@ -91,6 +91,25 @@ test.after(() => {
   server.close();
   dapp.close();
   fs.rmSync(scratch, { recursive: true, force: true });
+});
+
+test("workspace management verifies current owner/admin role and fails closed on membership outages", async () => {
+  const manage = (ref: string, token: string | null) => new Promise<Awaited<ReturnType<typeof manageAuthority>>>((resolve, reject) => {
+    runWithSession(token, () => { manageAuthority(ref).then(resolve, reject); });
+  });
+  assert.equal((await manage("personal", null)).ok, true);
+  assert.deepEqual(await manage("bad-ref", "tok"), { ok: false, status: 400, error: "Unknown workspace" });
+  assert.equal((await manage(BIZ_A, null)).ok, false);
+  for (const role of ["owner", "admin", "member", "viewer"]) {
+    member = [entry(BIZ_A, "Acme", role)];
+    assert.equal((await manage(BIZ_A.toUpperCase(), "tok")).ok, role === "owner" || role === "admin", role);
+  }
+  member = [entry(BIZ_A, "Acme", "owner")];
+  assert.equal((await manage(BIZ_A, "tok")).ok, true);
+  listStatus = 503;
+  const unavailable = await manage(BIZ_A, "tok");
+  assert.equal(unavailable.ok, false);
+  if (!unavailable.ok) assert.equal(unavailable.status, 503);
 });
 
 test("personal works with no login and no network to the account", async () => {

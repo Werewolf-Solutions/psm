@@ -628,6 +628,14 @@ preconditions, identities, policies and inputs are inside it.
 
 ### 7.3 Approval
 
+**Current local implementation and planned automation.** The local/paired rules
+below describe the implemented approval path. Product clarification 2026-10-05:
+after thorough acceptance, P12 delivers automatic staging and then automatic
+production under explicit environment policies. A loopback-origin human click is
+not required by the future unattended execution contract. Existing guards remain
+until that separate path is implemented and accepted; see
+[release automation milestones](../roadmaps/release-and-api-lifecycle.md#p12--release-promotion-and-api-consumer-lifecycle).
+
 Approval is a durable one-use record containing:
 
 ```ts
@@ -651,10 +659,13 @@ Inside one database transaction it checks that the plan is current, unblocked, u
 unconsumed; applies the server-side risk ceiling; records approval; creates the run; and consumes
 the approval. There is no later unbound “execute this” request.
 
-For this workspace, production uses `authenticated-local-operator`: the approval must come from
-the loopback cockpit and carry a valid Werewolf session so the actor is attributable. Paired
-browsers may inspect and plan production but cannot approve it. Staging may use `local-operator`
-or an authenticated paired operator according to local policy.
+For local use, the machine operator can approve source publication and production
+without Werewolf sign-in. The request must come from the exact loopback cockpit
+with same-origin browser headers. This also satisfies existing
+`authenticated-local-operator` policies in local mode; the actor is recorded as a
+local operator, never as a signed-in Werewolf user. Paired browsers may inspect and
+plan production but cannot approve it. Hosted SaaS authentication and workspace
+roles belong to the later hosted authorization milestone.
 
 **Standing approval (2026-09-24, P02).** A plan created by Make ready may instead be approved by
 an operator-set `deploy.approve` rule for its environment (Agent permissions; the Operate staging
@@ -691,6 +702,13 @@ existing attachment workflow's preview-digest and apply-time ownership checks.
 
 ### 7.5 Local policy and request authority
 
+This section describes the current local policy store and HTTP authority checks.
+P12's unattended executor will authorise the exact plan using a configured
+environment policy and durable service identity; P03's hosted operator controls
+use authenticated workspace authority and a registered HTTPS origin. That work
+must retain current scope, drift, revision, audit and revocation checks. It does
+not make the existing loopback endpoints public or remove their origin guards.
+
 Local SQLite stores versioned `deployment_policies` at global/risk, project, environment and target
 scope. Production has no permissive implicit default: until a local policy classifies its target
 and approval mode, planning is blocked. Effective policy composes fail-closed:
@@ -708,11 +726,13 @@ The plan stores the resulting policy and every input revision. Manifests may mak
 stricter, never looser. Required checks name exact contexts and publisher/app IDs; the release
 workflow's own pending check is excluded from becoming a circular prerequisite.
 
-For `authenticated-local-operator`, the actor record is `{ kind: "werewolf-user", origin:
-"local" }`. The server records the currently signed-in machine session; it does not claim proof
-that the account owner personally clicked. Production approval rejects no-Origin and non-loopback
-HTTP requests, requires the exact local-cockpit origin, a same-session intent/anti-CSRF nonce, a
-current Werewolf subject and the complete server-generated acknowledgement set. A retried approval
+For a signed-in approval the actor is `werewolf-user`; for a verified unsigned local
+approval it is `local-operator`. No Werewolf identity is fabricated for local use.
+Production approval rejects no-Origin and non-loopback requests, requires the exact
+local cockpit origin, a one-use actor-bound intent and the complete server-generated
+acknowledgement set. Unsigned local approval additionally requires same-origin
+browser request headers. Hosted controller configuration disables the local exemption
+and requires authenticated workspace authority. A retried approval
 for the same plan revision/digest returns its existing run through a unique database relation; it
 cannot create a second run.
 
@@ -1577,7 +1597,7 @@ immutable and a branch check is not called dependency verification.
 
 Production adoption remains blocked until:
 
-- PSM's production CloudApplication registration supports the authenticated local approval flow;
+- for the future hosted SaaS control plane, PSM's CloudApplication registration and authenticated workspace authorization must pass the hosted milestone; this is not a local deployment prerequisite;
 - werewolf-dapp owns a live read-only backup-readiness surface and its Mongo backup is scheduled;
 - the protected `Werewolf-Solutions/deployment-control` workflow, target Environments,
   artifact-reader App, target-contract convention and helper target enrollment are installed; and
@@ -1595,3 +1615,21 @@ rather than an edit:
 
 An adapter still cannot claim ready on its ADR alone: it needs an integration test against the
 real service, which is what the prerequisites above are blocking.
+
+## Monitoring provider update, October 6, 2026
+
+[ADR 0006](adrs/0006-werewolf-watch.md) makes Werewolf Watch the default.
+[The runbook](WEREWOLF-WATCH.md) describes the service, restricted reader and
+failure-domain acceptance. No external monitoring account is required.
+Same-host probes do not satisfy independent production observer acceptance.
+
+
+### Plan identity and monitor telemetry — PSM 0.3.37
+
+Approval digests retain monitor state, identity, observer/failure domain, status,
+TLS evidence and unknown verification fields. They exclude observation timestamps,
+probe duration and Werewolf Watch's rolling dashboard history (uptime counters,
+CPU, memory, disk and latency graphs). Those measurements remain in the review
+and dashboard. A fresh telemetry sample does not change deployment authority;
+stale/degraded/down observations and changed target or authority still stop it.
+Plans reviewed before this canonicalization change need a fresh review.

@@ -7,6 +7,12 @@ Todo's first managed release succeeded (`run_a7ef155bd9f04884`) using the
 manually prepared controller and credentials. That release is the known-good
 baseline for testing migration and repeatability.
 
+Reconciliation 2026-10-05: the October 1 Handymanservices release proves an App
+controller on that target. Todo migration and fresh-account setup remain distinct
+open gates. See the [acceptance register](acceptance-evidence.md). P07a supplies
+credentials/controllers for P12 automatic releases; a successful setup does not
+alone prove release automation.
+
 ### Current implementation checkpoint
 
 The local implementation now includes broker-backed App authentication,
@@ -69,9 +75,11 @@ GitHub requires the account owner's consent for two things, and no API can skip 
    GitHub redirects back with a one-time code. PSM exchanges it
    (`POST /app-manifests/{code}/conversions`) for the App ID and private key, and
    stores the key in its credential store. Nobody sees or copies it.
-   The redirect targets the local agent on loopback, matching today's hosted page +
-   local agent posture; hosted runners reuse it later
-   ([runners](agent-access-and-operations.md#runners-and-saas-operation)).
+   The implemented redirect targets the local agent on loopback. P03's hosted
+   path needs a separately registered HTTPS callback bound to the authenticated
+   workspace/operator and request state, with keys held by its secret broker.
+   Reusing a loopback URL cannot provide hosted setup. Prove both supported setup
+   postures; routine P12 release jobs use the resulting credentials unattended.
 2. **Installing it on repositories.** The owner picks repositories and presses
    **Install**. PSM then links to the installation settings when a new source
    repository needs adding.
@@ -95,14 +103,19 @@ Requested App permissions:
 | Permission | Why |
 | --- | --- |
 | Actions: read & write | Dispatch prepare/release workflows, read runs, jobs and artifacts |
-| Contents: read & write | Read source and workflows; write the release-controller repository only |
+| Contents: read & write | Read source/controller files; write reviewed controller updates or publish authorised application source, using separate single-repository tokens. |
 | Administration: read & write | Create/protect the controller repository and restrict deployment branches |
-| Workflows: write | Commit the release workflow with the controller bundle |
+| Workflows: write | Write controller workflows and publish application source containing workflow changes; the current source-publication adapter requests this on its write token. |
 | Environments: read & write | Create the controller Environment and publish its sealed secrets |
 | Metadata: read | Mandatory |
+| Organisation Members: read | The collaborator-read adapter requests this to inspect who can push when checking controller writer restrictions. |
 
-Contents-write is used only against the controller repository; every token for it
-is narrowed to that single repository.
+Controller setup writes are narrowed to the controller repository. Application
+source publication separately mints a token narrowed to the application's source
+repository with `contents: write` and, in the current adapter, `workflows: write`.
+Branch protections, exact-source/remote-ref checks and the operation's authority
+still apply. Release artifact download uses a third token with source-repository
+`actions: read` only. These are distinct credential purposes.
 
 ### The artifact reader goes away
 
@@ -184,4 +197,23 @@ release uses it. Verify a hand-edited controller commit is refused until reviewe
   both; the install screen differs).
 - Whether GitHub Environment protection rules are available on the user's plan for
   private repositories; PSM must say so rather than silently weakening protection.
-- Hosted posture: where the App key lives once runners are hosted (P03 secret broker).
+- Hosted posture: the App key belongs in P03's workspace-bound secret broker;
+  implement and accept its HTTPS callback, leases, rotation and revocation. This
+  remains an implementation gate rather than an unresolved storage direction.
+
+
+### Shared controller registration (implemented in PSM 0.3.34)
+
+Projects can reuse an existing approved controller repository and GitHub App.
+Target registration preserves the shared workflow/script and all other target
+files, publishes only the selected target's environment credentials, and advances
+compatible peer pins atomically after checking their complete unchanged bundles.
+A target setup cannot upgrade shared workflow code; that needs a repository-wide
+review. Tests cover peer file and credential isolation, stale peer metadata, and
+refusal of common bundle replacement.
+
+Remaining onboarding work: offer the company's existing compatible controller as
+the default for new projects and combine target registration with the reviewed
+machine enrollment flow. A fresh project must not require a fresh account or a
+fresh controller repository. Target-specific authority and production execution
+reviews continue to follow the deployment policy.

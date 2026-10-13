@@ -383,8 +383,8 @@ func TestFirstReleaseThatNeverBecomesHealthyIsStopped(t *testing.T) {
 	target := serviceTarget(t, healthServer(t, &status))
 	host := installFakeHost(t, target.Service)
 	request, archive, _ := deployRequest(t, "1.0.0", nil, nil)
-	if _, err := deployServiceRelease(t.TempDir(), target, "sha256:"+strings.Repeat("b", 64), request, bytes.NewReader(archive)); err == nil {
-		t.Fatal("an unhealthy first release was reported as deployed")
+	if _, err := deployServiceRelease(t.TempDir(), target, "sha256:"+strings.Repeat("b", 64), request, bytes.NewReader(archive)); err == nil || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "service was stopped") {
+		t.Fatalf("an unhealthy first release did not explain the failed check and stop: %v", err)
 	}
 	if !host.ran("systemctl stop psm-svc-handyman-staging") {
 		t.Fatal("an unhealthy first release was left running")
@@ -406,6 +406,58 @@ func TestStaticAndServiceOperationsDoNotCross(t *testing.T) {
 	proxy, err := renderProxy(service, proxyIngressDesired{Hostname: service.Hostname, SecurityHeaders: "app-managed@1", MaxBodyMB: 10}, true)
 	if err != nil || !strings.Contains(string(proxy), fmt.Sprintf("proxy_pass http://127.0.0.1:%d;", service.Service.Port)) {
 		t.Fatalf("proxy does not forward to the contract port: %v", err)
+	}
+}
+
+func TestProxyObservationDetectsLegacyRouteForSameHostname(t *testing.T) {
+	target := serviceTarget(t, servicePortMinimum+8)
+	for _, directory := range []string{target.NginxAvailableDir, target.NginxEnabledDir} {
+		if err := os.MkdirAll(directory, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desired := proxyIngressDesired{Hostname: target.Hostname, SecurityHeaders: "app-managed@1", MaxBodyMB: 10}
+	content, err := renderProxy(target, desired, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nginxPath(target), content, 0644); err != nil {
+		t.Fatal(err)
+	}
+	managedLink := filepath.Join(target.NginxEnabledDir, target.Hostname)
+	if err := os.Symlink(nginxPath(target), managedLink); err != nil {
+		t.Fatal(err)
+	}
+	request := mustJSON(proxyObserveDesired{Kind: "nginx-node-proxy@1", Hostname: target.Hostname, SecurityHeaders: "app-managed@1", MaxBodyMB: 10})
+	observe := func() map[string]any {
+		result, err := observeProxy(target, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.(map[string]any)
+	}
+	if state := observe()["state"]; state != "in-sync" {
+		t.Fatalf("the sole managed route is not in sync: %v", state)
+	}
+	legacyFile := filepath.Join(target.NginxAvailableDir, "legacy")
+	if err := os.WriteFile(legacyFile, []byte("server {\n listen 443 ssl;\n server_name "+target.Hostname+";\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	legacyLink := filepath.Join(target.NginxEnabledDir, "legacy")
+	if err := os.Symlink(legacyFile, legacyLink); err != nil {
+		t.Fatal(err)
+	}
+	if result := observe(); result["state"] != "conflict" || !strings.Contains(fmt.Sprint(result["detail"]), "legacy") {
+		t.Fatalf("competing legacy route was not reported: %v", result)
+	}
+	if err := os.Remove(legacyLink); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(managedLink); err != nil {
+		t.Fatal(err)
+	}
+	if state := observe()["state"]; state != "update" {
+		t.Fatalf("a missing managed enabled route was not reported: %v", state)
 	}
 }
 

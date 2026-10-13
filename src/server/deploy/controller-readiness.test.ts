@@ -184,3 +184,16 @@ test("a controller whose writers the App cannot see is not ready", async (t) => 
   assert.equal(check?.ready, false);
   assert.match(check?.detail ?? "", /cannot see who can push/);
 });
+
+test("App-managed missing target, moved pin and absent credentials use one bundle review instead of manual file edits", async (t) => {
+  const adapters = await fixture(t, { targetDigest: `sha256:${"c".repeat(64)}` }, true);
+  stubGitHub(t, {}, [], [], "c".repeat(40));
+  const checks = await adapters.controllerReadiness(unit, { checkoutId: "chk_1", environment });
+  for (const id of ["web:controller-pin", "web:controller-target", "web:controller-credentials"]) {
+    const item = checks.find((check) => check.id === id)!;
+    assert.equal(item.ready, false);
+    assert.match(item.detail, /Review controller setup \/ update/);
+    assert.match(item.detail, /Apply reviewed controller setup/);
+    assert.doesNotMatch(item.detail, /Create it at|Edit it at|then pin the new commit/);
+  }
+});

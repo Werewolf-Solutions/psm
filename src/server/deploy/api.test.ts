@@ -36,6 +36,7 @@ interface HarnessOptions {
   withRunner?: boolean;
   approval?: string;
   risk?: string;
+  allowLocalOperatorWithoutSignIn?: boolean;
 }
 
 async function harness(options: HarnessOptions = {}) {
@@ -88,6 +89,7 @@ async function harness(options: HarnessOptions = {}) {
     service,
     currentUser: async () => (options.user === undefined ? OPERATOR : options.user),
     localRequest: () => options.local ?? true,
+    allowLocalOperatorWithoutSignIn: options.allowLocalOperatorWithoutSignIn,
     ...(options.withRunner === false ? {} : {
       runner: {
         enqueue: (runId: string) => { enqueued.push(runId); },
@@ -652,7 +654,7 @@ test("a resumed preparation keeps the room and the engine it was last given", as
   assert.equal(asJob(again.body).workroomId, "wrk_room", "the transcript carries across the stop");
 });
 
-test("source publication requires same-origin review, an authenticated policy match and a one-use intent", async (t) => {
+test("local publication requires same-origin review and a one-use intent without Werewolf sign-in", async (t) => {
   let approved = 0, authenticated = false;
   const publication = { id: "pub_test", digest: "sha256:reviewed", state: "pending", expiresAt: Date.now() + 60_000, projectId: "project", environmentId: "staging", policy: policyDocument("authenticated-local-operator", "staging") };
   const app = express(); app.use(express.json());
@@ -665,8 +667,8 @@ test("source publication requires same-origin review, an authenticated policy ma
   const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const request = (action: string, body = {}, browser = true) => fetch(`${origin}/api/source-publications/pub_test/${action}`, { method: "POST", headers: { "Content-Type": "application/json", ...(browser ? { Origin: origin, "Sec-Fetch-Site": "same-origin" } : {}) }, body: JSON.stringify(body) });
   assert.equal((await request("approval-intents", {}, false)).status, 403);
-  assert.equal((await request("approval-intents")).status, 403);
-  authenticated = true;
+  assert.equal((await request("approval-intents")).status, 200);
+  // Continue signed out: the local machine operator owns this reviewed approval.
   assert.equal((await request("approve", { digest: publication.digest })).status, 403);
   const intent = await (await request("approval-intents")).json();
   assert.equal((await request("approve", { digest: "forged", intent: intent.intent })).status, 403);
@@ -691,4 +693,25 @@ test("external-only readiness does not ask for repository grants or checkout rep
   const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/projects/project/deployments/staging/readiness`, { method: "POST" });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).readiness.items.length, 1);
+});
+
+test("signed-out local cockpit can approve an exact production plan once", async (t) => {
+  const kit = await harness({ user: null }); t.after(kit.close);
+  const headers = { origin: kit.cockpit.origin, "sec-fetch-site": "same-origin" };
+  const minted = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approval-intents", {}, headers);
+  assert.equal(minted.status, 200, JSON.stringify(minted.body));
+  const body = { revision: 1, digest: PLAN_DIGEST, intent: minted.body.intent };
+  const approval = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", body, headers);
+  assert.equal(approval.status, 202, JSON.stringify(approval.body));
+  assert.equal(kit.enqueued.length, 1);
+  assert.equal((await kit.call("POST", "/api/deployment-plans/plan_todo_production/approve", body, headers)).status, 403);
+});
+
+test("hosted policy mode keeps authenticated operator approval even for a local browser", async (t) => {
+  const kit = await harness({ user: null, allowLocalOperatorWithoutSignIn: false }); t.after(kit.close);
+  const minted = await kit.call("POST", "/api/deployment-plans/plan_todo_production/approval-intents", {}, {
+    origin: kit.cockpit.origin, "sec-fetch-site": "same-origin",
+  });
+  assert.equal(minted.status, 403);
+  assert.match(String(minted.body.error), /authenticated operator/);
 });

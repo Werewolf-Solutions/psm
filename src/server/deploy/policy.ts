@@ -426,6 +426,8 @@ export interface DeploymentAuthorityContext {
   action: DeploymentAuthorityAction;
   origin: "local" | "paired";
   authenticated: boolean;
+  /** Verified same-origin browser on the loopback cockpit; never supplied by request JSON. */
+  localOperator?: boolean;
 }
 
 export interface DeploymentAuthorityDecision {
@@ -449,6 +451,7 @@ export function authorizeDeploymentAction(
   context: DeploymentAuthorityContext,
 ): DeploymentAuthorityDecision {
   const reasons: string[] = [];
+  const localOperator = context.origin === "local" && context.localOperator === true;
   if (LOCAL_ONLY_ACTIONS.has(context.action) && context.origin !== "local") {
     reasons.push(`${context.action} is local-only`);
   }
@@ -456,7 +459,7 @@ export function authorizeDeploymentAction(
   if (context.action === "approve") {
     const required = APPROVAL_REQUIREMENTS[policy.approval];
     if (required.local && context.origin !== "local") reasons.push("approval requires local origin");
-    if (required.authenticated && !context.authenticated) {
+    if (required.authenticated && !context.authenticated && !localOperator) {
       reasons.push("approval requires an authenticated operator");
     }
     if (context.origin === "paired" && !policy.authority.pairedApproval) {
@@ -466,7 +469,7 @@ export function authorizeDeploymentAction(
 
   if (context.action === "cancel-production") {
     if (policy.risk !== "production") reasons.push("production cancellation policy is not applicable");
-    if (!context.authenticated) reasons.push("production cancellation requires authentication");
+    if (!context.authenticated && !localOperator) reasons.push("production cancellation requires authentication");
   }
   if (context.action === "delete-resource" && !policy.authority.delete) {
     reasons.push("resource deletion is not authorized");

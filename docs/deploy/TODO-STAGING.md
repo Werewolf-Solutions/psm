@@ -1,5 +1,15 @@
 # Todo staging deployment
 
+## Current checkpoint — 2026-10-06
+
+Managed staging 0.6.5 is active; public `/version.json` matches commit
+`cc9942ab317c2f652f68c137c6917a2a1f1995f9` and artifact
+`artifact_237a859697ba428da91127ce`. Werewolf-owned monitoring is installed and bound, with healthy live checks.
+The initial observer shares the application server; see [Werewolf Watch](WEREWOLF-WATCH.md). The monitoring and subsequent
+Handymanservices cutover steps are in the
+[staging-to-production runbook](STAGING-TO-PRODUCTION.md).
+The dated checkpoints below remain historical evidence.
+
 ## Version and build selection — 2026-10-01 local checkpoint
 
 Todo remains clean at commit `ad02646`, version 0.6.1. PSM was retaining the

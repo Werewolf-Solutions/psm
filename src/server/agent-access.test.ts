@@ -63,3 +63,14 @@ test("remotes are found through a worktree's pointer to the shared config", (t) 
   fs.writeFileSync(path.join(checkout, ".git"), `gitdir: ${path.join(common, "worktrees", "w1")}\n`);
   assert.deepEqual(configuredRemotes(checkout), ["origin"]);
 });
+
+
+test("browser readiness requires script permission and the preloaded browser image", t => {
+  const { store, project } = fixture(t);
+  const snapshot = store.applyPreset(project, "develop", 0, "operator");
+  const missing = explainAccess({ ...base, snapshot, store, runner: { ...base.runner, browser: { ok: false, detail: "Browser image missing" } } });
+  assert.equal(status(missing, "browser"), "needs-runner");
+  assert.match(missing.find(item => item.id === "browser")!.action!, /task-browser.Dockerfile/);
+  const ready = explainAccess({ ...base, snapshot, store, runner: { ...base.runner, browser: { ok: true, detail: "ok" } } });
+  assert.equal(status(ready, "browser"), "ready");
+});

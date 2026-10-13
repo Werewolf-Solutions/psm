@@ -776,13 +776,18 @@ func deployServiceRelease(stateDir string, target TargetConfig, targetDigest str
 	}
 	verification := []map[string]any{{"id": "health", "state": "passed", "code": "ok"}}
 	verificationFailed := false
+	failureDetail := ""
 	if activationErr != nil {
 		verification[0] = map[string]any{"id": "health", "state": "failed", "code": "unhealthy", "detail": boundedError(activationErr)}
 		verificationFailed = true
+		failureDetail = "health: " + boundedError(activationErr)
 	}
 	if _, err := comparePM2(target, mustJSON(pm2CompareDesired{ExpectedDigest: desired.ExpectedPM2Digest})); err != nil {
 		verification = append(verification, map[string]any{"id": "pm2-unchanged", "state": "failed", "code": "pm2-changed"})
 		verificationFailed = true
+		if failureDetail == "" {
+			failureDetail = "PM2 state changed"
+		}
 	}
 	if !verificationFailed {
 		for _, probe := range desired.Probes {
@@ -790,6 +795,9 @@ func deployServiceRelease(stateDir string, target TargetConfig, targetDigest str
 			state, code := "passed", "ok"
 			if probeErr != nil {
 				state, code, verificationFailed = "failed", "probe-failed", true
+				if failureDetail == "" {
+					failureDetail = probe.ID + ": " + boundedError(probeErr)
+				}
 			}
 			verification = append(verification, map[string]any{"id": probe.ID, "state": state, "code": code})
 		}
@@ -799,7 +807,7 @@ func deployServiceRelease(stateDir string, target TargetConfig, targetDigest str
 		if !desired.RollbackAllowed || desired.Activate.ExpectedCurrentReleaseID == nil || desired.Activate.ExpectedCurrentPayloadDigest == nil {
 			_, _ = runCommand("systemctl", "stop", target.Service.UnitName)
 			return map[string]any{"state": "failed", "staged": staged, "activated": activated, "verification": verification},
-				errors.New("post-activation verification failed and rollback was not authorized; the service was stopped")
+				fmt.Errorf("post-activation verification failed (%s) and rollback was not authorized; the service was stopped", failureDetail)
 		}
 		rollback := activateDesired{
 			ReleaseID: *desired.Activate.ExpectedCurrentReleaseID, PayloadDigest: *desired.Activate.ExpectedCurrentPayloadDigest,

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 
 /** A managed process: a project's dev server, or a deploy to a target. */
-export type ProcKind = "run" | "deploy:staging" | "deploy:production";
+export type ProcKind = "run" | "deploy:staging" | "deploy:production" | `custom:${string}`;
 export type ProcStatus = "running" | "exited" | "error";
 
 export interface LogLine {

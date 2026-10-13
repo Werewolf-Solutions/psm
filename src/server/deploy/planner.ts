@@ -407,6 +407,15 @@ function digestableDocument(document: DeploymentPlanDocument): DeploymentPlanDoc
     ...(item.evidence && Object.hasOwn(item.evidence, "durationMs")
       ? { evidence: { ...item.evidence, durationMs: 0 } } : {}),
   });
+  const stableWatch = (item: WatchObservation): WatchObservation => {
+    if (!item.evidence) return atZero(item);
+    const evidence = { ...item.evidence };
+    // Probe latency and the Werewolf dashboard's rolling graphs/host samples
+    // change on every check. They remain in the review, but grant no authority.
+    delete evidence.durationMs;
+    if (evidence.provider === "werewolf-watch@1") delete evidence.history;
+    return { ...atZero(item), evidence };
+  };
   const observations = document.observations;
   return {
     ...document,
@@ -414,7 +423,7 @@ function digestableDocument(document: DeploymentPlanDocument): DeploymentPlanDoc
       ...observations,
       dependencies: observations.dependencies.map(stableDependency),
       resources: observations.resources.map(atZero),
-      watch: observations.watch.map(atZero),
+      watch: observations.watch.map(stableWatch),
       observedAt: 0,
     },
   };
@@ -437,7 +446,7 @@ export function buildDeploymentPlan(input: BuildDeploymentPlanInput): BuiltDeplo
     if (check.purpose === "deploy" && !check.ready) blockers.push(blocker("executor-not-ready", check.detail, `executor:${check.id}`));
   }
   if (input.sourceInputsDirty) {
-    blockers.push(blocker("source-dirty", "Local changes are not committed yet. Review changes and commit through PSM; it assigns the release version before preparing a new build.", "source"));
+    blockers.push(blocker("source-dirty", "Local changes are not committed yet. Choose “Commit and prepare build”; preparation reviews and commits the intended changes through PSM, assigns the release version, then continues to the build.", "source"));
   }
   if (input.environment.releasePolicy.requireReachableFromBranch && !input.sourceReachable) {
     blockers.push(blocker("source-unreachable", `Commit is not reachable from ${input.environment.releasePolicy.allowedBranch}`, "source"));

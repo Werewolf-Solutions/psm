@@ -5,13 +5,16 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { AgentPermission, PermissionSnapshot } from "./agent-permissions.ts";
 import { AgentPermissionStore, PermissionError } from "./agent-permissions.ts";
+import { taskInputs, packageDirectory } from "./agent-task-inputs.ts";
 import { operationDigest } from "./agent-policy.ts";
-import { compareWorkspaceVersions } from "./deploy/source.ts";
+import { bumpWorkspaceVersion, compareWorkspaceVersions, type ReleaseBump } from "./deploy/source.ts";
 
 const MAX_FILE = 1024 * 1024;
 const PROTECTED = /^(?:\.git|\.claude|\.codex|\.agents|\.ssh|\.psm-data|\.psm-sessions\.json|\.env(?:\..*)?|\.npmrc|\.netrc|\.mcp\.json|.*\.(?:pem|key|p12|pfx))$/i;
 const IGNORED = new Set(["node_modules", "vendor", "dist", "build", ".next", "coverage"]);
 export class RepositoryTools {
+  private readonly verifiedBuilds = new Map<string, string>();
+  private readonly verifiedPreviews = new Map<string, string>();
   private readonly staged = new Map<string, { index: string; head: string }>();
   constructor(readonly snapshot: PermissionSnapshot, private readonly store: AgentPermissionStore, private readonly protectedRoots: readonly string[] = []) {}
   private allow(permission: AgentPermission): void { this.store.check(this.snapshot, permission); }
@@ -209,7 +212,7 @@ export class RepositoryTools {
     return `Staged ${files.join(", ")}`;
   }
   /** Root X.Y.Z belongs to the managed commit, not to the model remembering a rule. */
-  private prepareCommitVersion(message: string): string | null {
+  private prepareCommitVersion(message: string, releaseBump: ReleaseBump): string | null {
     const names = this.stagedNames();
     if (names.length && names.every((file) => /\.(?:md|rst)$/i.test(file))) return null;
     const tracked = this.git(["ls-files", "-z", "--", "package.json"]).split("\0").includes("package.json");
@@ -226,10 +229,9 @@ export class RepositoryTools {
       const compared = compareWorkspaceVersions(version, previous);
       if (compared < 0 && !/(?:version[- ]regression[- ]reason|version decrease|lower version)\s*:/i.test(message))
         throw new PermissionError("A lower version requires a version-regression-reason: in the commit message.");
-      if (compared === 0) {
-        const parts = version.split(".");
-        parts[2] = String(BigInt(parts[2]) + 1n);
-        version = parts.join(".");
+      if (compared >= 0) {
+        const selected = bumpWorkspaceVersion(previous, releaseBump);
+        if (compareWorkspaceVersions(version, selected) < 0) version = selected;
       }
     }
     const edits: Array<{ file: string; text: string }> = [];
@@ -261,12 +263,58 @@ export class RepositoryTools {
     }
     return version;
   }
-  commit(message: string): string {
+  /** Only the managed runner records successful checks; there is no agent tool to bypass them. */
+  recordVerification(directory: string, kind: "build" | "preview", digest: string): void {
+    (kind === "build" ? this.verifiedBuilds : this.verifiedPreviews).set(directory, digest);
+  }
+  invalidateVerification(directory: string, kind: "build" | "preview"): void {
+    (kind === "build" ? this.verifiedBuilds : this.verifiedPreviews).delete(directory);
+  }
+  verificationStatus() {
+    const packages = this.verificationPackages();
+    const digest = taskInputs(this).digest;
+    return { verified: packages.every(pkg => (!pkg.build || this.verifiedBuilds.get(pkg.directory) === digest) && (!pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest)), packages: packages.map(pkg => ({ ...pkg, buildVerified: !pkg.build || this.verifiedBuilds.get(pkg.directory) === digest, browserVerified: !pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest })) };
+  }
+  verificationPackages(): Array<{ directory: string; build: boolean; browser: boolean }> {
+    return taskInputs(this).entries.filter(({ file }) => path.posix.basename(file) === "package.json").map(({ file }) => {
+      const pkg = JSON.parse(this.read(file));
+      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+      const browser = ["react", "vue", "@angular/core", "svelte", "next", "nuxt", "vite"].some(name => name in deps);
+      return { directory: packageDirectory(file), build: typeof pkg.scripts?.build === "string", browser };
+    }).filter(pkg => pkg.build || pkg.browser);
+  }
+  private requireVerification(): void {
+    const names = this.stagedNames();
+    if (!names.length || names.every(file => /\.(?:md|rst)$/i.test(file))) return;
+    const packages = this.verificationPackages();
+    if (!packages.length) return;
+    const digest = taskInputs(this).digest;
+    const missing: string[] = [];
+    for (const pkg of packages) {
+      if (pkg.build && this.verifiedBuilds.get(pkg.directory) !== digest) missing.push(`build in ${pkg.directory}`);
+      if (pkg.browser && this.verifiedPreviews.get(pkg.directory) !== digest) missing.push(`browser preview in ${pkg.directory}`);
+    }
+    if (missing.length) throw new PermissionError(`Commit blocked: current source is unverified. Required: ${missing.join(", ")}. Run install_packages and run_script(build), then preview_check for frontend packages. Checks that fail or are blocked do not count as completion.`);
+    // A passing worktree build cannot certify a different, partially staged file.
+    for (const file of names) {
+      const source = this.resolve(file, true);
+      const staged = this.git(["ls-files", "--stage", "-z", "--", file]);
+      if (!fs.existsSync(source)) {
+        if (staged) throw new PermissionError(`Commit blocked: ${file} differs from verified source. Restage and verify.`);
+      } else {
+        const hash = this.git(["hash-object", "--no-filters", "--stdin"], fs.readFileSync(source)).trim();
+        const mode = fs.statSync(source).mode & 0o111 ? "100755" : "100644";
+        if (!staged.startsWith(`${mode} ${hash} 0\t`)) throw new PermissionError(`Commit blocked: ${file} differs from verified source. Restage and verify.`);
+      }
+    }
+  }
+  commit(message: string, releaseBump: ReleaseBump = "patch"): string {
     this.allow("git.commit");
     if (!message.trim() || message.length > 4000 || message.includes("\0")) throw new PermissionError("Provide a commit message of 1–4000 characters.");
     const key = this.snapshot.project.path;
     if (!this.staged.has(key) || this.staged.get(key)?.index !== this.indexDigest() || this.staged.get(key)?.head !== this.headIdentity()) throw new PermissionError("Commit only files staged by this turn; the index changed or belongs to another turn.");
-    const version = this.prepareCommitVersion(message);
+    this.requireVerification();
+    const version = this.prepareCommitVersion(message, releaseBump);
     const result = this.git(["-c", "core.editor=false", "commit", "--no-verify", "--no-gpg-sign", "-m", message]);
     this.staged.delete(key);
     return version ? `${result}\nPSM committed release version ${version} (root package and lockfiles synchronized).` : result;

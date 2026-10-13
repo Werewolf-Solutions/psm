@@ -1,6 +1,7 @@
 import { connectionDiagnostics, sameObservedConnection } from "./connection-diagnostics.ts";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
+import path from "node:path";
 import type { Project } from "../../types.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { discoverConnectionDefaults, type GitHubDefaults } from "./connection-defaults.ts";
@@ -15,7 +16,7 @@ import {
 } from "./connections.ts";
 import { expandDeploymentGraph } from "./graph.ts";
 import { loadDeploymentManifest, parseDeploymentManifest } from "./manifest.ts";
-import { observeEnvironment, type ObservationAdapters } from "./observations.ts";
+import { observeEnvironment, type ObservationAdapters, type WatchObservation } from "./observations.ts";
 import { buildDeploymentPlan, planAuthorityDigest, planView, type DeploymentPlanDocument, type PlanConnectionSnapshot } from "./planner.ts";
 import { composeDeploymentPolicy, type DeploymentPolicyLayer } from "./policy.ts";
 import { deploymentReadiness, type DeploymentReadiness } from "./readiness.ts";
@@ -23,6 +24,7 @@ import {
   checkoutId,
   commitReachableFrom,
   deploymentInputsDirty,
+  proposedDeploymentVersion,
   readDeploymentSource,
   resolveCommit,
   type DeploymentSourceSnapshot,
@@ -213,6 +215,7 @@ function releaseView(release: DeploymentRelease, activeReleaseId: string | null)
     psmArtifactId: release.artifactId,
     activatedAt: release.activatedAt,
     active: release.releaseId === activeReleaseId,
+    verified: receipt.verified !== false,
     retained: release.tombstonedAt === null,
     provenance: release.provenance,
   };
@@ -485,6 +488,11 @@ export class DeploymentService {
 
   async environmentView(idOrName: string, environmentId: string): Promise<Record<string, unknown>> {
     const context = this.loadCurrent(idOrName);
+    let workingTreeVersion: string | null = null;
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(context.project.path, "package.json"), "utf8"));
+      workingTreeVersion = typeof pkg.version === "string" ? pkg.version : null;
+    } catch { /* Invalid working inputs stay blocked; the committed source remains authoritative. */ }
     const resolved = await this.resolveEnvironment(context, environmentId);
     const { environment, connections } = resolved;
     const { all, active } = this.releases(environment);
@@ -514,7 +522,12 @@ export class DeploymentService {
         (controller as { targetId?: unknown } | null)?.targetId === unit.target.targetId);
     });
     const blockers = [
-      ...(!context.committed ? [{ id: "source-uncommitted", code: "source-dirty", title: "Commit deployment inputs", message: "The managed manifest is preview-only until committed" }] : []),
+      ...(!context.committed || context.sourceInputsDirty ? [{
+        id: "source-uncommitted", code: "source-dirty", title: "Commit source changes",
+        message: context.committed
+          ? `${workingTreeVersion && workingTreeVersion !== context.source.version ? `Working files are ${workingTreeVersion}; committed source is ${context.source.version}. ` : ""}Commit the intended changes before preparing a build. Make ready can prepare a reviewed source commit.`
+          : "The source is preview-only until committed. Commit the intended changes before preparing a build.",
+      }] : []),
       ...connections.filter((item) => !item.ready).map((item) => ({ id: `connection:${item.slot}`, code: "connection-missing", title: `${item.slot} connection`, message: item.detail })),
       ...unpinned.map((unit) => {
         const binding = connections.find((item) => item.slot === unit.executor.connection);
@@ -535,9 +548,22 @@ export class DeploymentService {
       risk: environment.risk,
       hostname,
       releasePolicy: environment.releasePolicy,
-      source: { version: context.source.version, branch: context.source.branch, commit: context.source.commit, committed: context.committed, inputsDirty: context.sourceInputsDirty },
+      source: {
+        version: context.source.version,
+        workingTreeVersion,
+        proposedVersion: !context.committed || context.sourceInputsDirty ? proposedDeploymentVersion(context.source.version, workingTreeVersion) : null,
+        branch: context.source.branch,
+        commit: context.source.commit,
+        committed: context.committed,
+        inputsDirty: context.sourceInputsDirty,
+      },
       activeRelease: activeFirst ? releaseView(activeFirst, activeFirst.releaseId) : null,
-      watch: watch ? { effectiveState: watch.effectiveState, observedAt: watch.observedAt, freshness: watch.freshness } : { effectiveState: "not-monitored" },
+      watch: watch ? {
+        ...(watch.normalizedState as Record<string, JsonValue>),
+        effectiveState: Date.now() - watch.observedAt > (watchDefinition!.maxObservationAgeSeconds * 1000) ? "stale" : watch.effectiveState,
+        observedAt: watch.observedAt,
+        freshness: Date.now() - watch.observedAt > (watchDefinition!.maxObservationAgeSeconds * 1000) ? "stale" : watch.freshness,
+      } : { effectiveState: "not-monitored" },
       target: firstUnit ? { targetId: firstUnit.target.targetId, kind: firstUnit.target.kind, hostname } : null,
       dependencies,
       resources,
@@ -577,6 +603,45 @@ export class DeploymentService {
     const context = this.loadCurrent(idOrName);
     const environments = await Promise.all(context.manifest.environments.map((environment) => this.environmentView(context.project.id, environment.id)));
     return { managed: true, project: { id: context.project.id, name: context.project.name }, environments };
+  }
+
+  /** Read-only deployment coverage for every member of a workroom. No probes or plans. */
+  deploymentCoverage(names: readonly string[]) {
+    const projectNames = new Map(this.#projects().filter((item) => item.id).map((item) => [item.id!, item.name]));
+    return names.map((name) => {
+      const found = this.#projects().find((item) => item.name === name);
+      if (!found) return { name, status: "missing" as const, environments: [] };
+      if (!found.id) return { name, status: "unmanaged" as const, reason: "Project has no stable PSM identity", environments: [] };
+      const project = this.resolveProject(found.id);
+      try {
+        const context = this.loadCurrent(project.id);
+        return {
+          name: project.name,
+          status: "managed" as const,
+          committed: context.committed,
+          sourceInputsDirty: context.sourceInputsDirty,
+          environments: context.manifest.environments.map((environment) => ({
+            id: environment.id,
+            risk: environment.risk,
+            dependencies: environment.dependencies.flatMap((dependency) => {
+              const ownerProjectId = "projectId" in dependency ? dependency.projectId : undefined;
+              return ownerProjectId && ownerProjectId !== project.id
+                ? [{ id: dependency.id, ownerProjectId, ownerProjectName: projectNames.get(ownerProjectId) ?? null }]
+                : [];
+            }),
+          })),
+        };
+      } catch (error) {
+        return {
+          name: project.name,
+          status: "unmanaged" as const,
+          reason: error instanceof ManagedDeploymentError && error.code === "manifest-missing"
+            ? "No managed deployment manifest"
+            : "Managed deployment manifest is unavailable or invalid",
+          environments: [],
+        };
+      }
+    });
   }
 
   /**
@@ -772,6 +837,23 @@ export class DeploymentService {
     return { ...context, policy: composed.policy };
   }
 
+  /** Refresh monitoring independently of planning, building or deploying. */
+  async refreshWatch(idOrName: string, environmentId: string): Promise<Record<string, unknown>> {
+    const context = this.loadCurrent(idOrName);
+    const {environment} = await this.resolveEnvironment(context, environmentId);
+    for (const definition of environment.watch) {
+      let observation: WatchObservation | null;
+      try { observation = await this.observations.watch?.(definition, {projectId: context.project.id, checkoutId: context.source.checkoutId, environment}) ?? null; }
+      catch { observation = {monitorId:definition.id,providerState:"unavailable",effectiveState:"unknown",observedAt:Date.now(),detail:"Monitoring observer is unavailable"}; }
+      if (!observation) observation = {monitorId:definition.id,providerState:"unavailable",effectiveState:"unknown",observedAt:Date.now(),detail:"Monitoring observer is unavailable"};
+      this.store.putWatchSnapshot({monitorId:definition.id,projectId:context.project.id,environmentId,unitId:definition.unit,
+        providerState:observation.providerState,effectiveState:observation.effectiveState,
+        freshness:observation.effectiveState === "stale" ? "stale" : "fresh",observedAt:observation.observedAt,ingestedAt:Date.now(),
+        normalizedState:json({detail:observation.detail ?? null,evidence:observation.evidence ?? null})});
+    }
+    return this.environmentView(idOrName, environmentId);
+  }
+
   runs(idOrName: string, environmentId?: string): Record<string, unknown>[] {
     const project = this.resolveProject(idOrName);
     return this.store.listRuns(project.id, environmentId).map((run) => this.runView(run.runId));
@@ -797,7 +879,11 @@ export class DeploymentService {
             environment: environment.id,
             unit: unit.id,
             activeRelease: active ? releaseView(active, active.releaseId) : null,
-            watch: watch ? { effectiveState: watch.effectiveState, freshness: watch.freshness, observedAt: watch.observedAt } : null,
+            watch: watch ? {
+              effectiveState: Date.now() - watch.observedAt > watchDefinition!.maxObservationAgeSeconds * 1000 ? "stale" : watch.effectiveState,
+              freshness: Date.now() - watch.observedAt > watchDefinition!.maxObservationAgeSeconds * 1000 ? "stale" : watch.freshness,
+              observedAt: watch.observedAt,
+            } : null,
             lock: lock ? { ownerRunId: lock.ownerRunId, leaseExpiresAt: lock.leaseExpiresAt } : null,
           });
         }

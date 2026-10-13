@@ -17,7 +17,7 @@ function browser(storage = new Map<string, string>()) {
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
     location: { hash: "#/p/prj_todo/deploy" },
     history: { replaceState: (_state: unknown, _unused: string, hash: string) => { context.location.hash = hash; } },
-    STATE: { projects: [project], sessions: [{ name: "todo-app" }, { kind: "work", id: "room", name: "Prepare staging", projects: ["todo-app"] }] },
+    STATE: { projects: [project], can: { customCommands: false }, sessions: [{ name: "todo-app" }, { kind: "work", id: "room", name: "Prepare staging", projects: ["todo-app"] }] },
     WS: { kind: "project", name: "todo-app", id: null, pane: "plan", recapFetched: true, managedDeploy: {} },
     PLAN: {}, PLANNER: {}, CAPS: {}, NOTES: {},
     $: (key: string) => { if (!nodes.has(key)) nodes.set(key, element()); return nodes.get(key); },
@@ -25,7 +25,7 @@ function browser(storage = new Map<string, string>()) {
     document: { querySelectorAll: () => [], body: element() },
     window: {},
   });
-  for (const name of ["clearDeploymentPoll", "clearPreparationPoll", "ensureAiConnected", "disconnectAi", "connectPlanner", "disconnectPlanner", "renderWorkingButton", "renderWebPane", "openDeployPane", "fetchSessionState", "loadChanges", "loadPlan", "loadCapabilities", "loadNotes", "fetchRecap", "fetchLimit", "stashDraft", "emptyPlannerState", "emptyManagedDeploymentState", "usageSelectionChanged", "renderMembers", "renderRoomDependencies", "clearConsole", "renderSessionPane", "loadDraft", "syncAiControls", "refreshAiModels", "loadDevNotes", "setWsStatus", "setAiBusy", "connectLogs", "toast", "closeWorkspace", "renderBoard"]) context[name] = () => {};
+  for (const name of ["clearDeploymentPoll", "clearPreparationPoll", "ensureAiConnected", "disconnectAi", "connectPlanner", "disconnectPlanner", "renderWorkingButton", "renderWebPane", "openDeployPane", "fetchSessionState", "loadChanges", "loadPlan", "loadCapabilities", "loadNotes", "fetchRecap", "fetchLimit", "stashDraft", "emptyPlannerState", "emptyManagedDeploymentState", "usageSelectionChanged", "renderMembers", "renderRoomDependencies", "renderCustomCommands", "clearConsole", "clearAiTranscript", "renderSessionPane", "loadDraft", "syncAiControls", "refreshAiModels", "loadDevNotes", "setWsStatus", "setAiBusy", "connectLogs", "toast", "closeWorkspace", "renderBoard"]) context[name] = () => {};
   context.emptyPlannerState = (project: string) => ({ project });
   context.emptyManagedDeploymentState = () => ({});
   context.aiPaneOpen = () => context.WS.pane === "ai" || context.WS.pane === "session";
@@ -92,7 +92,7 @@ test("late room responses cannot replace a project selected while the room loads
 });
 
 test("invalid or unavailable storage falls back safely and target kinds stay separate", () => {
-  const b = browser(new Map([["psm.selected-panes.v1", '{"project:prj_todo":"not-a-tab","work:room":"deploy"}']]));
+  const b = browser(new Map([["psm.selected-panes.v1", '{"project:prj_todo":"not-a-tab","work:room":"plan"}']]));
   assert.equal(b.context.projectHash("prj_todo"), "#/p/prj_todo/plan");
   assert.equal(b.context.workroomHash("room"), "#/w/room/ai");
   b.context.localStorage.setItem = () => { throw new Error("storage denied"); };

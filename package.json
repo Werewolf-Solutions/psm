@@ -1,7 +1,7 @@
 {
   "name": "psm",
-  "version": "0.3.22",
-  "description": "Workspace cockpit and project glue — scans every project, runs work sessions, and helps reuse capabilities before creating new projects. Runs locally, or as an agent driven by the hosted cockpit at psm.werewolf.solutions.",
+  "version": "0.3.38",
+  "description": "Workspace cockpit and project glue \u2014 scans every project, runs work sessions, and helps reuse capabilities before creating new projects. Runs locally, or as an agent driven by the hosted cockpit at psm.werewolf.solutions.",
   "type": "module",
   "engines": {
     "node": ">=22.5.0"
@@ -18,7 +18,9 @@
     "typecheck": "tsc --noEmit",
     "providers:check": "tsx scripts/check-providers.ts",
     "control": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/control/main.ts",
-    "runner": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/runner/main.ts"
+    "runner": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/runner/main.ts",
+    "watch:build": "node scripts/build-watch.mjs",
+    "watch": "NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx src/watch/main.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.223",
@@ -35,6 +37,7 @@
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^22.20.1",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "esbuild": "^0.28.1"
   }
 }

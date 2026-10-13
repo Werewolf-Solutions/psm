@@ -19,7 +19,12 @@ Connecting an account, granting the agent access, and having a working tool are
 three separate requirements. A permission toggle cannot supply a missing API,
 provider entitlement, credential or administrator identity.
 
-## Diagnosis from the current checkout
+## Historical diagnosis: September 23 checkout
+
+The findings below explain the original plan, not the current implementation.
+P02/P04/P05 subsequently delivered several of these capabilities. Use the
+[acceptance evidence register](acceptance-evidence.md) for dated results and
+remaining gaps.
 
 The quoted answer alone cannot establish why two complete conversations differ.
 Model, effort, earlier context and available credentials may also differ. These
@@ -303,10 +308,18 @@ use verified paths. No placeholder `target.json` is presented as a prepared file
 
 The current hosted UI is static and uses a paired local agent. Remote unattended
 work therefore needs an additional execution service. **User decision,
-2026-09-23: PSM-hosted runners are part of the first SaaS version.** The laptop
-must not be required for a connected repository's deployment or maintenance.
+2026-09-23: PSM-hosted runners are part of the first SaaS version.** Routine
+deployment and maintenance run through an available authorized execution service.
 Local and user-hosted runners remain optional execution targets using the same
 protocol; they are not prerequisites for the main onboarding flow.
+
+**User clarification, 2026-10-05:** after thorough acceptance testing, automate
+staging deployment and then production deployment. An environment's configured
+policy authorizes routine releases; a local cockpit click is not required for
+each release. [P12](release-and-api-lifecycle.md) defines the staged acceptance
+gates. Hosted PSM execution needs P03; an accepted CI executor can provide release
+automation independently. Existing local runtime approval checks remain the
+implementation baseline until these milestones ship.
 
 Separate the UI/control service from runners. Runners register to one workspace,
 authenticate through outbound connections, report available tools and receive
@@ -338,7 +351,7 @@ by the hosted service; the current local-only privacy description must change.
 
 ## Delivery sequence
 
-The execution order is the phase queue in the [delivery index](README.md#ordered-delivery-queue);
+The execution order follows prerequisites in the [delivery index](README.md#development-sequence-and-prerequisites);
 this document does not define a competing sequence. The table records which part
 of this specification each phase delivers. Deliver each as an observable workflow.
 Broader integrations should follow a working first deployment, without delaying
@@ -350,9 +363,9 @@ basic coding capability.
 | P02 · Unified policy and honest access | Scoped Allow/Ask/Deny policies, presets, secure credential use and managed/admin execution profiles; route both providers and integration calls through current decisions. Make access honest first: capture effective tools, model/effort and context handling, rename the current button to describe its limited managed grants, and explain blocker causes. Start in `agent-permissions.ts`, both runtime adapters and `web/agent-permissions.js`. | Every limitation reports whether the cause is missing grant, tool, connection, provider restriction or runner. Presets describe actual enforcement, and full access is unavailable in a Workroom (see the index's P02 row). |
 | P03 · Hosted foundation | Workspace-authenticated hosted control API, isolated job runner, durable queue and cloud secret leases. | Workspace isolation and unattended provider authentication are verified; a job survives a closed browser and a runner restart. |
 | P04 · Web machine onboarding | Connect → Choose access → Set up → Ready wizard; automatic bootstrap or one generated copyable enrollment command, then verify/bind/resume automatically. | A user onboards a supported host through PSM, adds another project without repeating machine setup, and sees verified allowed/denied access, including hosted-to-target execution. |
-| P05 · Usable execution and continuity | Extend `agent-task-runner.ts`; preserve task context across turns; discovery and Grant and continue; matched baseline comparison. | From the hosted UI with the laptop agent disconnected, an authorized agent can check out a repository, install/change a dependency, build, typecheck, test, run a preview, inspect it and repair a failure. |
+| P05 · Usable execution and continuity | Extend `agent-task-runner.ts`; preserve task context across turns; discovery and Grant and continue; matched baseline comparison. | Through the selected runner, an authorized agent can check out a repository, install/change a dependency, build, typecheck, test, inspect a rendered preview and repair a failure. Local and hosted execution have separate acceptance evidence. |
 | P07 · Todo staging | Administrator bootstrap/enrollment, account setup actions, inline grant-and-resume and policy-authorized publication/deployment. Extend connections, host-helper adapter, `repair-sessions.ts`, `make-ready.ts` and existing deployment approvals. | The enrollment case above completes against an authorized staging host, including verification and rollback exercise, with no copied shell commands after connection. |
-| P08 · General application operations | Recipes for an application backend, workers and scheduled tasks; managed databases, migrations, secrets/config, DNS/TLS, logs, restart/scale, backups and recovery. Extend connector support through API, MCP and CLI adapters with a custom adapter contract. | A representative frontend + API + worker + database application can be deployed, updated, diagnosed and restored; unsupported operations are explained and discoverable. |
+| P08 · Application operations milestones | [P08a.1 service baseline, P08a.2 recovery, P08a.3 uninterrupted switching, P08b workers/jobs, P08c data/migrations/recovery, P08d observation](application-operations.md). Extend connectors through API, MCP and CLI adapters with a custom adapter contract. | Each milestone proves its named workflow and failure/recovery cases. Later phases require only the relevant accepted slices; the first service does not wait for every worker/database recipe. |
 | P09 · Maintenance and SaaS scale | Extend the hosted foundation with schedules, monitoring-triggered tasks within granted policy, runner autoscaling, usage controls and optional local/user-hosted runners. Reuse deployment locking, events and recovery. | An authorized update/maintenance task survives closing the browser and restarting a runner, with no duplicate external mutation or cross-workspace access. |
 
 For the first rollout, use the current GitHub, host helper and DigitalOcean
@@ -389,7 +402,8 @@ staging environment and retain the current profile during rollout. Update
 phase ships. Local tests and mocks are prerequisites; they are not evidence
 that a real deployment or hosted isolation works.
 
-The first complete outcome is P07 in the delivery index, beginning with deployment
-machine setup and including hosted execution: provision usable target identities,
-restore practical agent tools, make access understandable, and finish the user's
-actual deployment workflow from the SaaS with the laptop disconnected.
+The first complete deployment outcome is P07: usable target identities, practical
+agent tools, understandable access, and a verified staging release with recovery
+evidence. Hosted execution adds P03 and its own acceptance checks. P12 then
+introduces automatic staging followed by automatic production; P13 expands
+progressive rollout and measured production scale.

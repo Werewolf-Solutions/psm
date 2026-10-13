@@ -53,14 +53,14 @@
     // them apart: the agent is unreachable, the account cannot be asked who you
     // work for, or you are simply signed out. Only the last is normal.
     select.title = state.agentError
-      ? `The psm agent is not reachable (${state.agentError}). Showing personal only; business workspaces are unknown, not empty.`
+      ? `The psm agent is not reachable (${state.agentError}). Showing personal only; business spaces are unknown, not empty.`
       : state.businessError
-        ? `Signed in, but your business workspaces could not be listed (${state.businessError}). This is an error, not an empty list — retry before assuming you have none.`
+        ? `Signed in, but your business spaces could not be listed (${state.businessError}). This is an error, not an empty list — retry before assuming you have none.`
         : state.pending
-          ? "Your last business workspace returns when you sign in with an account that belongs to it"
+          ? "Your last business space returns when you sign in with an account that belongs to it"
           : state.current.kind === "business"
-            ? "Business workspace — access comes from your membership"
-            : "Personal workspace — private to you";
+            ? "Business project space — access comes from your membership"
+            : "Personal project space — private to you";
     select.classList.toggle("workspace-degraded", !!(state.agentError || state.businessError));
   }
 
@@ -112,7 +112,7 @@
     renderProject();
     if (failure && typeof toast === "function" && failure !== lastReported) {
       lastReported = failure;
-      toast(`Workspaces unavailable: ${failure}. Showing every project, unfiltered.`);
+      toast(`Project spaces unavailable: ${failure}. Showing every project, unfiltered.`);
     }
     if (!failure) lastReported = null;
     if (typeof render === "function") render();

@@ -110,3 +110,17 @@ test("a restart truncates the transcript rather than appending to the last run",
 test("a project that never ran has no transcript", () => {
   assert.equal(transcript("never-started", "run"), null);
 });
+
+test("custom commands run in their chosen directory without replacing the main run", async () => {
+  const directory = path.join(sandbox, "werewolf-dapp");
+  fs.mkdirSync(directory, { recursive: true });
+  const kind = "custom:12345678-1234-1234-1234-123456789abc" as const;
+  start("todo-app", "run", "sleep 10", sandbox);
+  start("todo-app", kind, "pwd", directory);
+  for (let i = 0; i < 50 && getProc("todo-app", kind)?.status === "running"; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(getProc("todo-app", "run")?.status, "running");
+  assert.match(getProc("todo-app", kind)?.log.map((line) => line.line).join("\n") || "", /werewolf-dapp/);
+  stop("todo-app", "run");
+});

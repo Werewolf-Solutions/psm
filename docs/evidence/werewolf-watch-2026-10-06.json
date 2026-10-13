@@ -1,0 +1,68 @@
+{
+  "capturedAt": "2026-10-06T14:13:46.214076+00:00",
+  "psmVersion": "0.3.32",
+  "service": "psm-watch.service",
+  "host": "werewolf-alpha",
+  "serviceState": "active/running",
+  "enabled": true,
+  "memoryBytes": 12677120,
+  "bundleSha256": "a6d3b599f14f3eef6beef7069436895332cb840a73072e72fac8a3893d8d5beb",
+  "failureDomain": "same-host",
+  "externalMonitoringAccountRequired": false,
+  "readerArbitraryCommandDenied": true,
+  "testResults": {
+    "total": 784,
+    "passed": 779,
+    "failed": 0,
+    "skipped": 5,
+    "typecheck": "passed"
+  },
+  "todo": {
+    "sourceVersion": "0.6.6",
+    "sourceCommit": "45454a3bb8b24086de6ec6e1b8384ae7c23e0ad7",
+    "activeVersion": "0.6.5",
+    "activeCommit": "cc9942ab317c2f652f68c137c6917a2a1f1995f9",
+    "watch": {
+      "detail": "Werewolf Watch: HTTP 200; TLS verified",
+      "evidence": {
+        "provider": "werewolf-watch@1",
+        "providerMonitorId": "todo-staging-web",
+        "url": "https://todo.werewolf.solutions/",
+        "observer": "werewolf-alpha",
+        "failureDomain": "same-host",
+        "status": 200,
+        "durationMs": 31,
+        "tlsExpiresAt": 1798370749000,
+        "incidents": []
+      },
+      "effectiveState": "healthy",
+      "observedAt": 1791295966428,
+      "freshness": "fresh"
+    }
+  },
+  "otherLiveChecks": [
+    {
+      "monitorId": "handymanservices-staging-web",
+      "url": "https://handymanservices-staging.werewolf.solutions/healthz",
+      "state": "healthy",
+      "observedAt": 1791295906276,
+      "status": 200,
+      "tlsVerified": true,
+      "healthJsonMatched": true
+    },
+    {
+      "monitorId": "werewolf-staging-api",
+      "url": "https://staging.werewolf.solutions/api/v1/health",
+      "state": "healthy",
+      "observedAt": 1791295906287,
+      "status": 200,
+      "tlsVerified": true
+    }
+  ],
+  "openAcceptance": [
+    "Independent company-owned observation host",
+    "Company notification delivery and background outage exercise",
+    "Handymanservices monitor manifest binding and production routing transfer",
+    "Rendered browser acceptance"
+  ]
+}

@@ -82,6 +82,19 @@ test("archiving takes it out of the list without deleting it", () => {
   assert.equal(s.list({ includeArchived: true }).length, 1);
 });
 
+test("deleting an open or archived room removes its membership", () => {
+  const s = store();
+  const open = s.create({ projects: ["todo-app", "psm"] }, known);
+  const archived = s.create({ projects: ["todo-app", "werewolf-dapp"] }, known);
+  s.archive(archived.id);
+  assert.equal(s.delete(open.id).id, open.id);
+  assert.equal(s.delete(archived.id).id, archived.id);
+  assert.deepEqual(s.list({ includeArchived: true }), []);
+  assert.deepEqual(s.forProject("todo-app"), []);
+  assert.throws(() => s.get(open.id), WorkSessionNotFoundError);
+  assert.throws(() => s.delete(archived.id), WorkSessionNotFoundError);
+});
+
 test("rooms list by what was worked on most recently", async () => {
   const s = store();
   const first = s.create({ projects: ["todo-app", "psm"] }, known);

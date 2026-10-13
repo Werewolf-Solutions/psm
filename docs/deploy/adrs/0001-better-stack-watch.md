@@ -26,3 +26,7 @@ account authority into an implicit side effect of planning.
 - The operator creates the monitor and API token out of band, then binds its ID locally.
 - TLS-expiration alerting requires a Better Stack plan that supports it.
 - API responses are schema-checked and reduced to normalized evidence before persistence.
+
+## Superseded default, 2026-10-06
+
+[ADR 0006](0006-werewolf-watch.md) replaces the external account requirement with Werewolf-owned monitoring. Existing adapters remain optional compatibility.

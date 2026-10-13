@@ -35,6 +35,8 @@ interface SetupPlan {
   hostConnectionId: string; hostRevision: number; ciConnectionId: string; ciRevision: number; ciGeneration: number;
   contextDigest: string;
   previousSettings: string;
+  peers: Array<{ connectionId: string; metadataRevision: number; controllers: Array<Record<string, any>> }>;
+  peerSnapshot: string;
   /** Who can push to the controller, reviewed in place of branch protection the GitHub plan does not offer. */
   writers: string[] | null;
 }
@@ -170,16 +172,21 @@ export class GitHubControllerSetup {
     return result.tree as Array<{ path: string; sha: string; mode: string; type: string }>;
   }
 
+  #peers(repository: string, targetId: string) {
+    return this.service.store.listConnections().filter((record) => record.kind === "github-actions@1").map((record) => ({
+      connectionId: record.connectionId, metadataRevision: record.metadataRevision,
+      controllers: ((deploymentConnectionProfile(record).publicMetadata?.releaseControllers as Array<Record<string, any>> | undefined) || [])
+        .filter((entry) => entry.repository === repository && entry.targetId !== targetId),
+    })).filter((record) => record.controllers.length).sort((a, b) => a.connectionId.localeCompare(b.connectionId));
+  }
+
   async preview(projectId: string, environmentId: string) {
     const context = this.#context(projectId, environmentId);
     const { github, host, ci, unit } = context;
     const setup = object(github.publicMetadata?.githubAppSetup);
     const repository = String(setup.controllerRepository || "");
     if (!github.constraints.allowedRepositories?.includes(repository) || repository === unit.executor.sourceRepository) throw new Error("The controller must be a separate approved repository");
-    const otherTargets = this.service.store.listConnections().filter((record) => record.kind === "github-actions@1")
-      .flatMap((record) => (deploymentConnectionProfile(record).publicMetadata?.releaseControllers as Array<Record<string, any>> | undefined) || [])
-      .filter((entry) => entry.repository === repository && entry.targetId !== unit.target.targetId);
-    if (otherTargets.length) throw new Error("This controller repository also serves another target. Give this target a dedicated controller repository before changing its workflow");
+    const peers = this.#peers(repository, unit.target.targetId);
     const previous = this.#previousController(github, repository, unit.target.targetId, context.projectId, environmentId);
     let repositoryInfo: Record<string, any> = {};
     let repositoryMissing = false;
@@ -226,6 +233,25 @@ export class GitHubControllerSetup {
       }
       changes.push({ path: name, before, after, sha: gitBlobSha(after) });
     }
+    if (peers.length) {
+      if (changes.some((change) => !change.path.startsWith("targets/")))
+        throw new Error("Shared controller workflow updates need a repository-wide review. Target setup can reuse the existing workflow and add its own target file.");
+      for (const peer of peers) for (const controller of peer.controllers) {
+        if (controller.githubEnvironment === githubEnvironment) throw new Error("Each controller target must use its own GitHub Environment");
+        if (controller.ref !== `refs/heads/${branch}`) continue;
+        if (!controller.expectedHeadSha || controller.expectedWorkflowBlobSha !== gitBlobSha(files[".github/workflows/release-static.yml"]))
+          throw new Error("Shared controller has an unverified workflow pin; review that target first");
+        if (writers && JSON.stringify(controller.reviewedWriters) !== JSON.stringify(writers))
+          throw new Error("Shared controller push access differs from an existing target's review");
+        const pinned = controller.expectedHeadSha === head ? tree : await this.#tree(github, repository, controller.expectedHeadSha);
+        for (const path of [".github/workflows/release-static.yml", "scripts/psm_controller.py", `targets/${String(controller.targetId).replace(/[:/]/g, "__")}.json`]) {
+          const old = pinned.find((entry) => entry.path === path);
+          const current = tree.find((entry) => entry.path === path);
+          if (!old || old.type !== "blob" || old.mode !== "100644" || current?.sha !== old.sha || current.mode !== old.mode)
+            throw new Error(`Shared target bundle changed: ${path}. Review that target before registering another.`);
+        }
+      }
+    }
     for (const [id, value] of this.#plans) if (value.expires <= this.now()) this.#plans.delete(id);
     if (this.#plans.size >= 32) throw new Error("Too many setup previews; wait for an earlier preview to expire");
     const id = randomBytes(24).toString("hex");
@@ -233,14 +259,14 @@ export class GitHubControllerSetup {
       connectionId: github.connectionId, metadataRevision: Number(github.metadataRevision), secretGeneration: this.service.store.getConnection(github.connectionId).secretGeneration,
       hostConnectionId: host.connectionId, hostRevision: Number(host.metadataRevision), ciConnectionId: ci.connectionId, ciRevision: Number(ci.metadataRevision),
       ciGeneration: this.service.store.getConnection(ci.connectionId).secretGeneration,
-      previousSettings: this.#settings(previous), writers,
+      previousSettings: this.#settings(previous), writers, peers, peerSnapshot: JSON.stringify(peers),
       contextDigest: createHash("sha256").update(JSON.stringify([context.unit, context.environment.risk, context.environment.releasePolicy])).digest("hex") });
     const guard = writers
       ? [`Branch protection is not part of ${repository}'s GitHub plan, so PSM guards it instead: releases run only at the commit pinned here, and are refused if anyone other than ${writers.join(", ") || "nobody"} can push to it`,
         "Restrict the target environment to this branch where the plan allows it"]
       : ["Protect the controller branch", "Restrict the target environment to this branch"];
     return { id, repository, branch, githubEnvironment, head, changes, expiresAt: this.now() + 600_000, writers,
-      actions: [head ? "Update reviewed controller files" : "Repository is unavailable to this App; attempt to create it only if absent (an existing private repository must be added to the App)", ...guard, "Publish the CI release key and known host", "Verify the complete bundle and pin its commit"] };
+      actions: [head ? "Update reviewed controller files" : "Repository is unavailable to this App; attempt to create it only if absent (an existing private repository must be added to the App)", ...guard, ...(peers.length ? ["Preserve shared workflow and other target files; advance compatible target pins on this branch"] : []), "Publish the CI release key and known host", "Verify the complete bundle and pin its commit"] };
   }
 
   async apply(id: string, projectId: string, environmentId: string) {
@@ -258,6 +284,8 @@ export class GitHubControllerSetup {
         || ci.connectionId !== plan.ciConnectionId || ci.metadataRevision !== plan.ciRevision
         || this.service.store.getConnection(ci.connectionId).secretGeneration !== plan.ciGeneration
         || this.service.store.getConnection(github.connectionId).secretGeneration !== plan.secretGeneration) throw new Error("Connections changed; review controller setup again");
+      if (JSON.stringify(this.#peers(plan.repository, unit.target.targetId)) !== plan.peerSnapshot)
+        throw new Error("Shared controller targets changed; review setup again");
       let head: string | null;
       if (plan.repositoryMissing) {
         const token = await this.#tokens.token(github, unit.executor.sourceRepository, { metadata: "read" });
@@ -352,20 +380,43 @@ export class GitHubControllerSetup {
       }
       const verifiedTree = await this.#tree(github, plan.repository, head);
       for (const [name, text] of Object.entries(plan.files)) if (!verifiedTree.some((entry) => entry.path === name && entry.mode === "100644" && entry.sha === gitBlobSha(text))) throw new Error(`Controller file verification failed: ${name}`);
+      for (const peer of plan.peers) for (const controller of peer.controllers) {
+        const path = `targets/${String(controller.targetId).replace(/[:/]/g, "__")}.json`;
+        const before = currentTree.find((entry) => entry.path === path);
+        const after = verifiedTree.find((entry) => entry.path === path);
+        if (!before || before.sha !== after?.sha || before.mode !== after?.mode)
+          throw new Error(`Shared target file changed during setup: ${path}`);
+      }
       if (await this.#head(github, plan.repository, plan.branch) !== head) throw new Error("Controller branch moved before pinning");
+      if (JSON.stringify(this.#peers(plan.repository, unit.target.targetId)) !== plan.peerSnapshot)
+        throw new Error("Shared controller targets changed before pinning; review setup again");
+      const advance = (entry: any) => entry.repository === plan.repository && entry.targetId !== unit.target.targetId && entry.ref === `refs/heads/${plan.branch}`
+        ? { ...entry, expectedHeadSha: head } : entry;
       const controller = { controller: "werewolf-static@1", sourceAuthorization: "installation-token", targetId: unit.target.targetId, repository: plan.repository,
         workflow: "release-static.yml", workflowPath: ".github/workflows/release-static.yml", ref: `refs/heads/${plan.branch}`, expectedHeadSha: head,
         expectedWorkflowBlobSha: gitBlobSha(plan.files[".github/workflows/release-static.yml"]), githubEnvironment: plan.githubEnvironment, allowedSourceRepositories: [unit.executor.sourceRepository],
         ...(writers ? { branchProtection: "unavailable-on-plan", reviewedWriters: writers } : {}) };
-      const publicMetadata = { ...github.publicMetadata, releaseControllers: [...(github.publicMetadata?.releaseControllers as any[] || []).filter((entry) => entry.targetId !== unit.target.targetId), controller] };
+      const publicMetadata = { ...github.publicMetadata, releaseControllers: [...(github.publicMetadata?.releaseControllers as any[] || []).filter((entry) => entry.targetId !== unit.target.targetId).map(advance), controller] };
       const adapter = new GitHubActionsAdapter({ metadata: publicMetadata as unknown as GitHubActionsConnectionMetadata, fetch: this.fetcher,
         token: () => this.#tokens.token(github, plan.repository, { environments: "write" }) });
       await this.service.secretBroker.withLease(ci.connectionId, ["privateKey"], (lease) => lease.useUtf8("privateKey", (key) =>
         adapter.publishEnvironmentSecrets(unit.target.targetId, { PSM_TARGET_SSH_PRIVATE_KEY: key, PSM_TARGET_KNOWN_HOSTS: `${ci.publicMetadata?.knownHost}\n` })));
+      if (JSON.stringify(this.#peers(plan.repository, unit.target.targetId)) !== plan.peerSnapshot)
+        throw new Error("Shared controller targets changed while publishing credentials; review setup again");
       const record = this.service.store.getConnection(github.connectionId);
-      this.service.store.updateConnection({ connectionId: record.connectionId, expectedMetadataRevision: plan.metadataRevision, label: record.label,
+      const updates: Array<Parameters<DeploymentService["store"]["updateConnection"]>[0]> = [{ connectionId: record.connectionId, expectedMetadataRevision: plan.metadataRevision, label: record.label,
         metadata: json({ ...object(record.metadata), publicMetadata }), constraints: record.constraints, readiness: record.readiness,
-        secretGeneration: record.secretGeneration, updatedAt: this.now() });
+        secretGeneration: record.secretGeneration, updatedAt: this.now() }];
+      for (const peer of plan.peers) {
+        if (peer.connectionId === github.connectionId || !peer.controllers.some((entry) => entry.ref === `refs/heads/${plan.branch}`)) continue;
+        const record = this.service.store.getConnection(peer.connectionId);
+        const metadata = object(record.metadata), publicMetadata = object(metadata.publicMetadata);
+        updates.push({ connectionId: record.connectionId, expectedMetadataRevision: peer.metadataRevision,
+          label: record.label, metadata: json({ ...metadata, publicMetadata: { ...publicMetadata,
+            releaseControllers: (publicMetadata.releaseControllers as any[]).map(advance) } }),
+          constraints: record.constraints, readiness: record.readiness, secretGeneration: record.secretGeneration, updatedAt: this.now() });
+      }
+      this.service.store.updateConnections(updates);
       return { repository: plan.repository, headSha: head, githubEnvironment: plan.githubEnvironment, pinned: true };
     } finally { this.#busy.delete(plan.repository); }
   }

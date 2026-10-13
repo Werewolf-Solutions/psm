@@ -8,6 +8,12 @@ The hosted verified registry and conversational project scaffolder remain deferr
 registry ownership/review keys and the exact new-project conversation contract are still open
 product decisions. This document keeps those phases visible without presenting them as shipped.
 
+The planned [P11 engineering workflow extension](roadmaps/engineering-workflows.md)
+adds bundles, component lifecycle management, workflow evaluation and explicit
+harness execution adapters, beginning with Sandcastle. The file-wiring-only
+architecture below describes ordinary attachments; executable harnesses use the
+separate adapter and runner contract in that plan.
+
 ## 1. The idea in one line
 
 Any project in the workspace can **attach** a capability — a workspace project, an MCP

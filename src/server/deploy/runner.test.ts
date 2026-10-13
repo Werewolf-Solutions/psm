@@ -64,6 +64,7 @@ interface HarnessOptions {
   blocked?: boolean;
   recheck?: () => PlanRecheckResult;
   safeToRecover?: boolean;
+  unverifiedRelease?: boolean;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -77,6 +78,17 @@ function harness(options: HarnessOptions = {}) {
     { actionId: "web-staged", kind: "stage-static-release@1", phase: "release", sideEffecting: true },
     { actionId: "web-verified", kind: "verify-release@1", phase: "verify", sideEffecting: false },
   ];
+  if (options.unverifiedRelease) store.createPreparationRun({
+    runId: "run_prepare_todo", projectId: "prj_todo", environmentId: "production", createdAt: 20,
+  });
+  const artifact = options.unverifiedRelease ? store.recordArtifact({
+    artifactId: "artifact_todo_052", producingRunId: "run_prepare_todo", provenance: "managed", projectId: "prj_todo",
+    kind: "static-files", sourceRepository: "Werewolf-Solutions/todo-app", githubArtifactId: "8123",
+    producerRunId: "4567", commitSha: "7c21e4a9", version: "0.5.2",
+    buildProfileDigest: "sha256:build", payloadAlgorithm: "psm-static-tree-sha256@1",
+    payloadDigest: "sha256:payload", archiveDigest: "sha256:archive", providerLocator: {},
+    provenanceUrl: null, createdAt: 30, retainedUntil: 10_000,
+  }) : null;
 
   store.createPlan({
     planId: "plan_todo_production",
@@ -88,10 +100,15 @@ function harness(options: HarnessOptions = {}) {
     operation: "deploy",
     risk: "production",
     manifestDigest: "sha256:manifest",
-    artifactId: null,
+    artifactId: artifact?.artifactId ?? null,
     requiredAcknowledgementIds: [],
     blocked: options.blocked ?? false,
-    document: { schema: "deployment-plan@1", lockKeys },
+    document: options.unverifiedRelease ? {
+      schema: "deployment-plan@1", lockKeys, operation: "deploy", projectId: "prj_todo",
+      environmentId: "production", artifact: JSON.parse(JSON.stringify(artifact)), manifest: { environments: [{ id: "production", units: [
+        { id: "web", target: { targetId: "werewolf:todo-production-web" } },
+      ] }] },
+    } : { schema: "deployment-plan@1", lockKeys },
     createdAt: 40,
     expiresAt: 1_000_000,
     actions: actions.map((action, ordinal) => ({
@@ -122,6 +139,15 @@ function harness(options: HarnessOptions = {}) {
     expiresAt: 900_000,
   });
 
+  if (artifact) store.activateRelease({
+    releaseId: `release_${artifact.artifactId}`, artifactId: artifact.artifactId,
+    activationRunId: queued.run.runId, targetId: "werewolf:todo-production-web",
+    projectId: "prj_todo", environmentId: "production", unitId: "web", provenance: "managed",
+    targetContractDigest: "sha256:target", activatedAt: 100, expectedCurrentReleaseId: null,
+    receipt: { verified: false, releaseId: `release_${artifact.artifactId}`, commit: artifact.commitSha,
+      version: artifact.version, payloadDigest: artifact.payloadDigest },
+  });
+
   let clock = 1_000;
   const build = (adapters: DeploymentActionAdapter[], bootId = "boot_test") => new DeploymentRunner({
     store,
@@ -144,11 +170,79 @@ function harness(options: HarnessOptions = {}) {
     }),
   });
 
-  return { store, log, rechecks, build, runId: queued.run.runId, lockKeys, advance: (ms: number) => { clock += ms; } };
+  return { database, store, log, rechecks, build, runId: queued.run.runId, lockKeys, advance: (ms: number) => { clock += ms; } };
 }
 
 const stepStates = (store: DeploymentStore, runId: string) =>
   Object.fromEntries(store.listRunSteps(runId).map((step) => [step.stepId, step.state]));
+
+test("a successful in-place release verification records its receipt only after the final Watch check", async () => {
+  const actions = [
+    { actionId: "web-verified", kind: "verify-release@1", phase: "verify", sideEffecting: false },
+    { actionId: "watch-observed", kind: "observe-watch@1", phase: "watch", sideEffecting: false },
+  ];
+  const { store, log, build, runId } = harness({ actions, unverifiedRelease: true });
+  const runner = build([
+    scripted("verify-release@1", { check: [{}] }, log),
+    scripted("observe-watch@1", { check: [{}] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "succeeded");
+  const active = store.getActiveRelease("werewolf:todo-production-web");
+  assert.equal((active?.receipt as { verified?: boolean }).verified, true);
+  assert.equal((active?.receipt as { verifiedByRunId?: string }).verifiedByRunId, runId);
+  assert.deepEqual(log.map((entry) => entry.kind), ["verify-release@1", "observe-watch@1"]);
+});
+
+test("a failed final Watch check does not mark an active release verified", async () => {
+  const actions = [
+    { actionId: "web-verified", kind: "verify-release@1", phase: "verify", sideEffecting: false },
+    { actionId: "watch-observed", kind: "observe-watch@1", phase: "watch", sideEffecting: false },
+  ];
+  const { store, log, build, runId } = harness({ actions, unverifiedRelease: true });
+  const runner = build([
+    scripted("verify-release@1", { check: [{}] }, log),
+    scripted("observe-watch@1", { check: [new Error("observer unavailable"), new Error("observer unavailable"), new Error("observer unavailable")] }, log),
+  ]);
+  assert.equal((await runner.enqueue(runId)).state, "failed");
+  assert.equal((store.getActiveRelease("werewolf:todo-production-web")?.receipt as { verified?: boolean }).verified, false);
+});
+
+test("startup reconciles a completed verification run left with an unverified receipt", async () => {
+  const actions = [
+    { actionId: "web-verified", kind: "verify-release@1", phase: "verify", sideEffecting: false },
+    { actionId: "watch-observed", kind: "observe-watch@1", phase: "watch", sideEffecting: false },
+  ];
+  const { database, store, log, build, runId } = harness({ actions, unverifiedRelease: true });
+  const adapters = [
+    scripted("verify-release@1", { check: [{}] }, log),
+    scripted("observe-watch@1", { check: [{}] }, log),
+  ];
+  assert.equal((await build(adapters).enqueue(runId)).state, "succeeded");
+  database.prepare("UPDATE deployment_releases SET receipt = json_set(receipt, '$.verified', json('false')) WHERE target_id = ?")
+    .run("werewolf:todo-production-web");
+  assert.equal((store.getActiveRelease("werewolf:todo-production-web")?.receipt as { verified: boolean }).verified, false);
+  assert.deepEqual(build(adapters, "boot_restart").start().map((item) => item.runId), ["run_prepare_todo"]);
+  assert.equal((store.getActiveRelease("werewolf:todo-production-web")?.receipt as { verified: boolean }).verified, true);
+});
+
+test("startup does not trust a succeeded run without durable Watch evidence", async () => {
+  const actions = [
+    { actionId: "web-verified", kind: "verify-release@1", phase: "verify", sideEffecting: false },
+    { actionId: "watch-observed", kind: "observe-watch@1", phase: "watch", sideEffecting: false },
+  ];
+  const { database, store, log, build, runId } = harness({ actions, unverifiedRelease: true });
+  const adapters = [
+    scripted("verify-release@1", { check: [{}] }, log),
+    scripted("observe-watch@1", { check: [{}] }, log),
+  ];
+  assert.equal((await build(adapters).enqueue(runId)).state, "succeeded");
+  database.prepare("UPDATE deployment_releases SET receipt = json_set(receipt, '$.verified', json('false')) WHERE target_id = ?")
+    .run("werewolf:todo-production-web");
+  database.prepare("DELETE FROM deployment_events WHERE run_id = ? AND event_type = 'action-checked' AND phase = 'watch'")
+    .run(runId);
+  build(adapters, "boot_restart").start();
+  assert.equal((store.getActiveRelease("werewolf:todo-production-web")?.receipt as { verified: boolean }).verified, false);
+});
 
 test("an approved run executes its actions, releases its locks and ends succeeded", async () => {
   const { store, log, rechecks, build, runId } = harness();

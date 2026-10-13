@@ -1,0 +1,77 @@
+{
+  "capturedAt": "2026-10-06T14:28:41.068824+00:00",
+  "psmVersion": "0.3.33",
+  "bundleSha256": "0f79f313cb3a2d9af6331634c409bc8c2fa12417d1438782ad5f189fa4416a67",
+  "watch": {
+    "detail": "Werewolf Watch: HTTP 200; TLS verified",
+    "evidence": {
+      "provider": "werewolf-watch@1",
+      "providerMonitorId": "todo-staging-web",
+      "url": "https://todo.werewolf.solutions/",
+      "observer": "werewolf-alpha",
+      "failureDomain": "same-host",
+      "history": {
+        "bucketSeconds": 3600,
+        "retentionDays": 7,
+        "incidentTime24hMs": 0,
+        "incidentTime7dMs": 0,
+        "checks": [
+          {
+            "at": 1791295200000,
+            "checks": 27,
+            "healthy": 27,
+            "degraded": 0,
+            "down": 0,
+            "latencyMs": 114.5
+          }
+        ],
+        "host": [
+          {
+            "at": 1791295200000,
+            "cpuPercent": 9.6,
+            "memoryUsedBytes": 755037525,
+            "memoryTotalBytes": 1011990528,
+            "diskUsedBytes": 8256544768,
+            "diskTotalBytes": 25821052928,
+            "load1": 0.39
+          }
+        ],
+        "hostLatest": {
+          "observedAt": 1791296908316,
+          "cpuPercent": 6.381901063650175,
+          "memoryUsedBytes": 750129152,
+          "memoryTotalBytes": 1011990528,
+          "diskUsedBytes": 8256544768,
+          "diskTotalBytes": 25821052928,
+          "load1": 0.37,
+          "uptimeSeconds": 19863649.66,
+          "hostname": "werewolf-alpha",
+          "diskPath": "/srv"
+        }
+      },
+      "status": 200,
+      "durationMs": 42,
+      "tlsExpiresAt": 1798370749000,
+      "incidents": []
+    },
+    "effectiveState": "healthy",
+    "observedAt": 1791296908360,
+    "freshness": "fresh"
+  },
+  "checks": {
+    "typecheck": "passed",
+    "suite": {
+      "total": 788,
+      "passed": 783,
+      "failed": 0,
+      "skipped": 5
+    },
+    "dashboardScriptRendering": "passed",
+    "servedAssets": "passed"
+  },
+  "openAcceptance": [
+    "Rendered browser acceptance",
+    "Independent observer for whole-host outages",
+    "Company notification delivery"
+  ]
+}

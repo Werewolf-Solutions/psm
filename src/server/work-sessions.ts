@@ -293,6 +293,13 @@ export class WorkSessionStore {
     return this.get(session.id);
   }
 
+  /** Permanently remove a room and its project membership. */
+  delete(id: string): WorkSession {
+    const session = this.get(id);
+    this.database.prepare("DELETE FROM work_sessions WHERE id = ?").run(session.id);
+    return session;
+  }
+
   /** Rooms a project belongs to — so the cockpit can say where else it is in use. */
   forProject(project: string): WorkSession[] {
     const rows = this.database

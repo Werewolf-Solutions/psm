@@ -1,0 +1,20 @@
+{
+  "psmVersion": "0.3.37",
+  "failedRun": "run_f8fa593b0c1f471a",
+  "cause": "Only rolling Werewolf Watch history/host measurements and probe duration changed between review and execution.",
+  "fix": "Exclude measurement diagnostics from canonical plan identity; retain health, target identity, TLS, policy and credential authority.",
+  "freshInfrastructurePlan": {
+    "planId": "dpl_bc0a2a61058447f6",
+    "approvedDigest": "sha256:240a065556fa9ff15261884d0223f3e965ead0417a15a7e0e1965ec5694bf5cd",
+    "rebuiltDigest": "sha256:240a065556fa9ff15261884d0223f3e965ead0417a15a7e0e1965ec5694bf5cd",
+    "differences": []
+  },
+  "preparationState": "awaiting-approval",
+  "verification": {
+    "testsPassed": 801,
+    "testsSkipped": 5,
+    "testsFailed": 0,
+    "typecheck": "passed"
+  },
+  "oldApprovalReplayed": false
+}

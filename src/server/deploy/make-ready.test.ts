@@ -10,6 +10,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
   let outstanding: { action: string; status: string; detail: string }[] = [];
   let canPrepare = true;
   let busy = false;
+  let roomExists = true;
   let question = false;
   let mutations = false;
   let commit = "source-1";
@@ -41,7 +42,8 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     } },
     runner: { enqueue: () => { throw new Error("Preparation must not queue infrastructure"); }, cancel: async (id) => { cancellations.push(id); } },
     repairs: {
-      start: async (_job, _checked, purpose = "repair") => { repairs++; repairPurposes.push(purpose); busy = true; return "room"; },
+      exists: () => roomExists,
+      start: async (_job, _checked, purpose = "repair") => { repairs++; repairPurposes.push(purpose); busy = true; roomExists = true; return "room"; },
       status: () => ({ busy, question }), stop: () => { stops++; busy = false; },
     },
   });
@@ -53,6 +55,7 @@ function harness(reviewCapabilities?: () => string | null, reviewCheckout?: () =
     blockers: (actions: string[]) => { outstanding = actions.map((action) => ({ action, status: "blocked", detail: action })); },
     buildAvailable: (available: boolean) => { canPrepare = available; },
     source: (value: string) => { commit = value; },
+    deleteRoom: () => { roomExists = false; },
     worker: (state: { busy: boolean; question?: boolean }) => { busy = state.busy; question = state.question ?? false; },
     infrastructure: () => { mutations = true; },
     counts: () => ({ repairs, builds, stops }), repairPurposes,
@@ -77,6 +80,34 @@ test("source repair continues to build and verified readiness without another cl
   await h.advance(); assert.equal(h.counts().builds, 1);
   Object.assign(h.runs[0], { terminal: true, state: "succeeded" }); h.blockers([]);
   await h.advance(); assert.equal(h.current().state, "succeeded");
+});
+
+test("resume drops a deleted room before checking its capabilities and continues to build", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["review-source", "prepare-artifact"]); h.start(); await h.advance();
+  const stopped = h.current(); stopped.state = "blocked"; stopped.message = "no such workroom";
+  h.repository.save(stopped); h.deleteRoom();
+  h.controller.options.reviewCapabilities = (_project, _engine, room) => {
+    assert.equal(room, null, "capability review must not dereference the deleted room");
+    return null;
+  };
+  assert.equal(h.start().workroomId, null);
+  await h.advance();
+  assert.equal(h.current().state, "running");
+  assert.equal(h.current().workroomId, "room");
+  h.worker({ busy: false }); h.blockers(["prepare-artifact"]); await h.advance();
+  assert.equal(h.current().phase, "build");
+  assert.equal(h.counts().builds, 1);
+});
+
+test("deleting a room during preparation rechecks source instead of counting an unchanged repair", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.blockers(["review-source"]); h.start(); await h.advance();
+  h.deleteRoom(); await h.advance();
+  assert.equal(h.current().state, "running");
+  assert.equal(h.counts().repairs, 2);
+  assert.equal(h.current().waitingForRepair, true);
+  assert.equal(h.counts().builds, 0);
 });
 
 test("missing build prerequisites pause without spending a repair or CI run", async (t) => {
@@ -104,6 +135,46 @@ test("infrastructure always waits for the existing plan approval flow", async (t
   await h.advance(); assert.equal(h.current().state, "awaiting-approval");
   h.runs.push({ runId: "approved-run", planId: "infrastructure", runKind: "deployment", state: "running", terminal: false });
   await h.advance(); assert.equal(h.current().runId, "approved-run");
+});
+
+test("successful reviewed reconciliation finishes without creating another reload plan", async (t) => {
+  const h = harness(); t.after(h.close);
+  h.infrastructure(); h.start(); await h.advance();
+  h.runs.push({ runId: "approved-run", planId: "infrastructure", runKind: "deployment", state: "succeeded", terminal: true });
+  h.controller.options.service.createPlan = async () => { throw new Error("Must not recreate the successful infrastructure plan"); };
+  await h.advance();
+  assert.equal(h.current().state, "succeeded");
+  assert.equal(h.current().phase, "check");
+  assert.equal(h.current().runId, null);
+  await h.advance(); assert.equal(h.current().state, "succeeded");
+});
+
+test("a standing rule reconciles once and completes after fresh readiness", async (t) => {
+  let approvals = 0;
+  const h = harness(undefined, undefined, async () => { approvals++; return { runId: "policy-run", reason: "standing grant" }; });
+  t.after(h.close);
+  h.infrastructure(); h.start(); await h.advance();
+  h.runs.push({ runId: "policy-run", planId: "infrastructure", runKind: "deployment", state: "running", terminal: false });
+  await h.advance(); assert.equal(h.current().state, "running");
+  Object.assign(h.runs[0], { terminal: true, state: "succeeded" });
+  await h.advance(); await h.advance();
+  assert.equal(h.current().state, "succeeded");
+  assert.equal(approvals, 1, "unconditional reloads must not cause an approval/run loop");
+});
+
+test("remaining infrastructure drift after a successful run blocks instead of repeating it", async (t) => {
+  let approvals = 0;
+  const h = harness(undefined, undefined, async () => { approvals++; return { runId: "policy-run", reason: "standing grant" }; });
+  t.after(h.close);
+  h.infrastructure(); h.start(); await h.advance();
+  h.runs.push({ runId: "policy-run", planId: "infrastructure", runKind: "deployment", state: "succeeded", terminal: true });
+  h.controller.options.service.checkReadiness = async () => ({ readiness: {
+    ready: false, canMakeReady: false, items: [{ status: "blocked", repairScope: "infrastructure", action: "review-resource", title: "Ingress still differs", detail: "resource drift" }],
+  }, environment: {}, plan: {} } as unknown as ReadinessResult);
+  await h.advance(); await h.advance();
+  assert.equal(h.current().state, "blocked");
+  assert.match(h.current().message, /fresh readiness checks still need attention/);
+  assert.equal(approvals, 1);
 });
 
 test("a failed build enters repairs instead of reporting ready", async (t) => {
@@ -416,4 +487,16 @@ test("workflow failure details reach the source repair room", async (t) => {
   await h.advance();
   assert.equal(h.current().phase, "repair");
   assert.equal(observedFailure, "artifact workflow concluded failure");
+});
+
+test("restart preserves a valid waiting publication without starting work", (t) => {
+  const h = harness(); t.after(h.close);
+  const job = h.start();
+  job.state = "awaiting-approval"; job.phase = "publish"; job.publicationId = "pending-review";
+  h.repository.save(job);
+  h.controller.options.publisher = { get: () => ({ state: "pending", expiresAt: Date.now() + 60_000 }) } as never;
+  h.controller.recover();
+  assert.equal(h.current().state, "awaiting-approval");
+  assert.equal(h.current().publicationId, "pending-review");
+  assert.deepEqual(h.counts(), { repairs: 0, builds: 0, stops: 0 });
 });

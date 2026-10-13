@@ -38,6 +38,13 @@ lockfile through the normal dependency workflow, and run `npm run typecheck` and
 appears. Run these checks per account and representative project settings; one
 machine's catalog does not establish availability for everyone.
 
+For managed Codex protocol upgrades, also follow the
+[continuity acceptance case](roadmaps/managed-codex-continuity.md): check the
+installed experimental schema, run broker/lifecycle tests, then verify a dummy
+two-turn thread across app-server processes. Recheck permission overrides and
+failure without replay, rather than treating successful model discovery as proof
+that managed resume works.
+
 ## Adding a provider
 
 Add an explicit entry to `MODEL_PROVIDERS` with its discovery adapter and official
@@ -54,3 +61,11 @@ References checked 2026-09-07:
 
 - [Codex app server model discovery](https://learn.chatgpt.com/docs/app-server#list-models-modellist)
 - [Claude Code models and effort](https://code.claude.com/docs/en/model-config)
+
+## Planned ai-mesh integration
+
+The [ai-mesh provider plan](roadmaps/ai-mesh-provider.md) separates model selection
+from execution location. It adds live mesh discovery and trusted routine/agent
+execution while retaining authorized Claude/Codex sessions on the PSM agent
+machine. This is planned, not implemented; no subscription credentials are
+exported to mesh workers. See M04/M05 for separate provider acceptance gates.

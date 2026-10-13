@@ -49,6 +49,8 @@ export interface DeploymentApiOptions {
   reviewCheckout?: (projectId: string) => string | null;
   currentUser: () => Promise<PsmSessionUser | null>;
   localRequest: (request: Request) => boolean;
+  /** Disable in a hosted SaaS controller; local cockpit approval uses the machine operator. */
+  allowLocalOperatorWithoutSignIn?: boolean;
   runner?: DeploymentRunController;
   preparer?: ArtifactPreparationController;
   /** When configured, "make ready" runs the whole preparation flow instead of one build. */
@@ -154,6 +156,9 @@ function requireLocal(options: DeploymentApiOptions, req: Request, res: Response
 
 export function createDeploymentRouter(options: DeploymentApiOptions): express.Router {
   const router = express.Router();
+  const localOperatorRequest = (req: Request) => options.allowLocalOperatorWithoutSignIn !== false
+    && options.localRequest(req) && exactLocalCockpitOrigin(req) && isPermissionOperatorRequest(req);
+
   const { service } = options;
   const githubSetup = new GitHubSetup(service);
   const githubControllerSetup = new GitHubControllerSetup(service);
@@ -233,6 +238,10 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
 
   router.get("/api/projects/:id/deployments/:environment", async (req, res) => {
     try { res.json({ managed: true, environment: await service.environmentView(req.params.id, req.params.environment) }); } catch (error) { apiError(res, error); }
+  });
+  router.get("/api/projects/:id/deployments/:environment/watch", async (req, res) => {
+    try { res.json({environment:await service.refreshWatch(req.params.id,req.params.environment)}); }
+    catch (error) { apiError(res,error); }
   });
 
   // The last answer, so reopening the page shows it instead of checking every provider again.
@@ -360,7 +369,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
         if (!options.publisher) throw new Error("Source publishing is not configured.");
         const plan = options.publisher.get(req.params.publicationId);
         const user = await options.currentUser();
-        const decision = authorizeDeploymentAction(plan.policy, { action: "approve", origin: "local", authenticated: !!user });
+        const decision = authorizeDeploymentAction(plan.policy, { action: "approve", origin: "local", authenticated: !!user, localOperator: localOperatorRequest(req) });
         if (!decision.allowed) return res.status(403).json({ error: decision.reasons.join("; ") });
         if (plan.state !== "pending" || plan.expiresAt <= Date.now()) return res.status(409).json({ error: "Publication review is stale or consumed." });
         const actor = user?.id ?? "local-operator";
@@ -414,7 +423,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       const policy = effectivePolicy(plan.document);
       const user = await options.currentUser();
       const origin = options.localRequest(req) ? "local" as const : "paired" as const;
-      const decision = authorizeDeploymentAction(policy, { action: "approve", origin, authenticated: !!user });
+      const decision = authorizeDeploymentAction(policy, { action: "approve", origin, authenticated: !!user, localOperator: localOperatorRequest(req) });
       if (!decision.allowed) return res.status(403).json({ error: decision.reasons.join("; "), code: "approval-required" });
       if (plan.risk === "production" && !exactLocalCockpitOrigin(req)) {
         return res.status(403).json({ error: "production approval intent requires the exact local cockpit origin", code: "approval-required" });
@@ -432,7 +441,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       const policy = effectivePolicy(plan.document);
       const user = await options.currentUser();
       const origin = options.localRequest(req) ? "local" as const : "paired" as const;
-      const decision = authorizeDeploymentAction(policy, { action: "approve", origin, authenticated: !!user });
+      const decision = authorizeDeploymentAction(policy, { action: "approve", origin, authenticated: !!user, localOperator: localOperatorRequest(req) });
       if (!decision.allowed) return res.status(403).json({ error: decision.reasons.join("; "), code: "approval-required" });
       if (plan.risk === "production" && !exactLocalCockpitOrigin(req)) {
         return res.status(403).json({ error: "production approval requires the exact local cockpit origin", code: "approval-required" });
@@ -557,7 +566,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     const plan = service.store.getPlan(run.planId, run.planRevision!);
     const user = await options.currentUser();
     const origin = options.localRequest(req) ? "local" as const : "paired" as const;
-    const decision = authorizeDeploymentAction(effectivePolicy(plan.document), { action: "approve", origin, authenticated: !!user });
+    const decision = authorizeDeploymentAction(effectivePolicy(plan.document), { action: "approve", origin, authenticated: !!user, localOperator: localOperatorRequest(req) });
     if (!decision.allowed) return `resolving held work needs the authority that approves this plan: ${decision.reasons.join("; ")}`;
     if (plan.risk === "production" && !exactLocalCockpitOrigin(req)) return "resolving held production work requires the exact local cockpit origin";
     return null;
@@ -570,7 +579,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
         const plan = service.store.getPlan(run.planId, run.planRevision!);
         if (plan.risk === "production") {
           const user = await options.currentUser();
-          if (!exactLocalCockpitOrigin(req) || !user) return res.status(403).json({ error: "production cancellation requires the authenticated local cockpit", code: "approval-required" });
+          if (!exactLocalCockpitOrigin(req) || (!user && !localOperatorRequest(req))) return res.status(403).json({ error: "production cancellation requires the local cockpit operator", code: "approval-required" });
         }
       }
       if (options.runner) await options.runner.cancel(run.runId);

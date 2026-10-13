@@ -180,7 +180,7 @@ export async function manageAuthority(ref: string): Promise<Verdict> {
   if (sameRef(ref, PERSONAL)) return { ok: true, entry: PERSONAL_ENTRY };
   const found = resolveWorkspace(ref, await availableWorkspaces());
   if (!found.ok) return found;
-  if (!found.entry.canManage) return { ok: false, status: 403, error: "Your role in that workspace cannot manage machines" };
+  if (!found.entry.canManage) return { ok: false, status: 403, error: "Your role in that workspace cannot manage resources" };
   return found;
 }
 

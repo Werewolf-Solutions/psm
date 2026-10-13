@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { taskInputs } from "./agent-task-inputs.ts";
+import { browserPreviewProbe } from "./agent-browser-preview.ts";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
 import type { AgentPermissionStore } from "./agent-permissions.ts";
 
@@ -85,7 +87,7 @@ export async function downloadLockedPackage(resolved: string, integrity: string,
 export class ManagedTaskRunner {
   private directory: string | null = null;
   private sourceDigest = "";
-  private packagesReady = false;
+  private packagesReady = new Set<string>();
   private pending: Promise<unknown> = Promise.resolve();
   private serialize<T>(action: () => Promise<T>): Promise<T> {
     const result = this.pending.then(action);
@@ -96,35 +98,23 @@ export class ManagedTaskRunner {
     private readonly download: typeof downloadLockedPackage = downloadLockedPackage) {}
   private snapshot(): string {
     this.store.check(this.repository.snapshot, "repo.read");
-    const entries = this.repository.taskFiles().filter((file) => !file.startsWith(".psm/") && !file.startsWith(".psm-"));
-    const hash = createHash("sha256");
-    let sourceBytes = 0;
-    const files = entries.map((file) => {
-      const source = this.repository.resolve(file);
-      const stat = fs.statSync(source);
-      if (!stat.isFile() || stat.size > 8 * 1024 * 1024) throw new Error("A project file exceeds the task snapshot limit.");
-      sourceBytes += stat.size;
-      if (sourceBytes > 128 * 1024 * 1024) throw new Error("Project exceeds the task snapshot limit.");
-      const bytes = fs.readFileSync(source); hash.update(file).update("\0").update(bytes);
-      return { file, bytes, mode: stat.mode & 0o777 };
-    });
-    const digest = hash.digest("hex");
+    const { digest } = taskInputs(this.repository);
     if (this.directory && digest === this.sourceDigest) return this.directory;
-    this.close(); this.directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-")); this.sourceDigest = digest;
+    this.close(); this.directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-")); this.sourceDigest = "";
     fs.mkdirSync(path.join(this.directory, "workspace")); fs.mkdirSync(path.join(this.directory, "packages"));
-    for (const { file, bytes, mode } of files) {
-      const target = path.join(this.directory, "workspace", file);
-      fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, bytes, { mode });
-    }
+    // Hash the bytes actually copied, so a concurrent host edit cannot certify
+    // different content from the disposable source snapshot.
+    this.sourceDigest = taskInputs(this.repository, path.join(this.directory, "workspace")).digest;
     return this.directory;
   }
-  private async container(directory: string, command: string[], install = false): Promise<string> {
+  private async container(directory: string, command: string[], install = false, cwd = ".", browser = false): Promise<string> {
     if (this.signal.aborted) throw new Error("This turn was stopped.");
     const name = `psm-task-${randomUUID()}`;
-    const image = process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim";
-    const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...(install ? [["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"]] : []), command])}; for(const [cmd,...args] of commands){const result=cp.spawnSync(cmd,args,{cwd:'/workspace',stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
+    const image = browser ? (process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0") : (process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim");
+    const installs = install ? [...this.packagesReady].map(dir => ({ command: ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd: dir })) : [];
+    const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...installs, { command, cwd }])}; for(const {command:[cmd,...args],cwd} of commands){const result=cp.spawnSync(cmd,args,{cwd:require('path').join('/workspace',cwd),stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
     try {
-      return await this.execute(["run", "--name", name, "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=256", "--memory=1g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,nosuid,nodev,size=768m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", image, "node", "-e", bootstrap], this.signal);
+      return await this.execute(["run", "--name", name, "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", image, "node", "-e", bootstrap], this.signal);
     } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
   }
   tests(script = "test"): Promise<string> { return this.serialize(() => this.runTests(script)); }
@@ -132,57 +122,62 @@ export class ManagedTaskRunner {
     this.store.check(this.repository.snapshot, "test.run");
     if (script !== "node --test" && !/^test(?::[a-zA-Z0-9_-]+)*$/.test(script)) throw new Error("Choose node --test or a package script named test or test:….");
     const directory = this.snapshot();
-    const output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady);
+    const output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady.size > 0);
     this.store.check(this.repository.snapshot, "test.run"); return output;
   }
   /** Any package.json script — build, typecheck, lint — in the same offline sandbox. */
-  script(name: string): Promise<string> { return this.serialize(() => this.runScript(name)); }
-  private async runScript(name: string): Promise<string> {
+  script(name: string, cwd = "."): Promise<string> { return this.serialize(() => this.runScript(name, cwd)); }
+  private async runScript(name: string, cwd: string): Promise<string> {
     this.store.check(this.repository.snapshot, "script.run");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(name)) throw new Error("Give the name of a script in package.json.");
     let scripts: Record<string, unknown> = {};
-    try { scripts = JSON.parse(this.repository.read("package.json")).scripts ?? {}; } catch { throw new Error("This project has no readable package.json."); }
+    try { scripts = JSON.parse(this.repository.read(this.packageFile(cwd, "package.json"))).scripts ?? {}; } catch { throw new Error("This project has no readable package.json."); }
     if (typeof scripts[name] !== "string") throw new Error(`package.json has no script named ${name}. Available: ${Object.keys(scripts).join(", ") || "none"}.`);
     const directory = this.snapshot();
-    const output = await this.container(directory, ["npm", "run", name], this.packagesReady);
+    const digest = this.sourceDigest;
+    if (name === "build") this.repository.invalidateVerification(cwd, "build");
+    const output = await this.container(directory, ["npm", "run", name], this.packagesReady.size > 0, cwd);
     this.store.check(this.repository.snapshot, "script.run");
-    return `${this.packagesReady ? "" : "Dependencies were not installed in this sandbox; if the script needs them, run install_packages first.\n"}${output}`;
+    if (name === "build") this.repository.recordVerification(cwd, "build", digest);
+    return `${this.packagesReady.has(cwd) ? "" : "Dependencies were not installed in this sandbox; if the script needs them, run install_packages first.\n"}${output}`;
   }
   /**
    * Start a project script (a dev or preview server) inside the same offline
-   * sandbox, wait for its port, fetch the given paths from inside the
+   * sandbox, execute app JavaScript and inspect each route inside the
    * container, then stop it. Nothing listens outside the container.
    */
-  preview(script: string, port: number, paths: string[]): Promise<string> { return this.serialize(() => this.runPreview(script, port, paths)); }
-  private async runPreview(script: string, port: number, paths: string[]): Promise<string> {
+  preview(script: string, port: number, paths: string[], cwd = "."): Promise<string> { return this.serialize(() => this.runPreview(script, port, paths, cwd)); }
+  private async runPreview(script: string, port: number, paths: string[], cwd: string): Promise<string> {
     this.store.check(this.repository.snapshot, "script.run");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(script)) throw new Error("Give the name of a script in package.json.");
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Give the port the script listens on (1024–65535).");
     const wanted = (paths.length ? paths : ["/"]).slice(0, 10);
-    if (wanted.some((entry) => !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,300}$/.test(entry))) throw new Error("Paths start with / and contain no spaces.");
-    let scripts: Record<string, unknown> = {};
-    try { scripts = JSON.parse(this.repository.read("package.json")).scripts ?? {}; } catch { throw new Error("This project has no readable package.json."); }
+    if (wanted.some(entry => !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,300}$/.test(entry))) throw new Error("Paths start with / and contain no spaces.");
+    const scripts = JSON.parse(this.repository.read(this.packageFile(cwd, "package.json"))).scripts ?? {};
     if (typeof scripts[script] !== "string") throw new Error(`package.json has no script named ${script}.`);
-    const probe = `
-const cp=require('child_process');
-const server=cp.spawn('npm',['run',${JSON.stringify(script)}],{detached:true,stdio:['ignore','pipe','pipe'],env:{...process.env,PORT:'${port}',HOST:'127.0.0.1',BROWSER:'none'}});
-let log='';server.stdout.on('data',d=>log=(log+d).slice(-4000));server.stderr.on('data',d=>log=(log+d).slice(-4000));
-const stop=()=>{try{process.kill(-server.pid,'SIGKILL')}catch{}};
-(async()=>{const paths=${JSON.stringify(wanted)};const deadline=Date.now()+90000;let up=false;
-while(Date.now()<deadline&&!up){try{await fetch('http://127.0.0.1:${port}/');up=true}catch{await new Promise(r=>setTimeout(r,500))}if(server.exitCode!==null)break}
-const results=[];if(up)for(const p of paths){try{const r=await fetch('http://127.0.0.1:${port}'+p);const t=await r.text();results.push({path:p,status:r.status,type:r.headers.get('content-type'),body:t.slice(0,2000)})}catch(e){results.push({path:p,error:String(e)})}}
-console.log(JSON.stringify({listening:up,results,serverLog:log.slice(-2000)},null,1));stop();process.exit(0)})();`;
     const directory = this.snapshot();
-    const output = await this.container(directory, ["node", "-e", probe], this.packagesReady);
+    const digest = this.sourceDigest;
+    const args = /(?:^|\s)vite(?:\s|$)/.test(scripts[script]) ? ["--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [];
+    this.repository.invalidateVerification(cwd, "preview");
+    const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script));
+    const output = await this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true);
     this.store.check(this.repository.snapshot, "script.run");
+    // The probe exits nonzero on any page error. A listening server is not a pass.
+    this.repository.recordVerification(cwd, "preview", digest);
     return output;
   }
-  install(): Promise<string> { return this.serialize(() => this.installPackages()); }
-  private async installPackages(): Promise<string> {
+  private packageFile(cwd: string, name: string): string {
+    if (cwd === ".") return name;
+    this.repository.resolve(cwd);
+    return `${cwd}/${name}`;
+  }
+  install(cwd = "."): Promise<string> { return this.serialize(() => this.installPackages(cwd)); }
+  private async installPackages(cwd: string): Promise<string> {
     this.store.check(this.repository.snapshot, "pkg.install");
-    this.close();
+    const lockFile = this.packageFile(cwd, "package-lock.json");
     const directory = this.snapshot();
-    const lock = JSON.parse(this.repository.read("package-lock.json"));
+    this.packagesReady.delete(cwd);
+    const lock = JSON.parse(this.repository.read(lockFile));
     if (![2, 3].includes(lock.lockfileVersion) || !lock.packages) throw new Error("Managed installs require package-lock.json version 2 or 3.");
     const entries = Object.entries(lock.packages) as [string, any][];
     if (entries.length > 2000) throw new Error("Lockfile exceeds the managed package limit.");
@@ -201,13 +196,13 @@ console.log(JSON.stringify({listening:up,results,serverLog:log.slice(-2000)},nul
       fs.writeFileSync(path.join(directory, "packages", filename), bytes);
       entry.resolved = `file:/packages/${filename}`;
     }
-    fs.writeFileSync(path.join(directory, "workspace", "package-lock.json"), JSON.stringify(lock));
+    fs.writeFileSync(path.join(directory, "workspace", lockFile), JSON.stringify(lock));
     // This private lockfile changes tarball locations only. The real lockfile
     // and checkout are never writable by npm or by package lifecycle scripts.
-    const output = await this.container(directory, ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    const output = await this.container(directory, ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"], false, cwd);
     this.store.check(this.repository.snapshot, "pkg.install");
-    this.packagesReady = true;
+    this.packagesReady.add(cwd);
     return `Installed dependencies in this turn's sandbox. Tests can use them until repository inputs change.\n${output}`;
   }
-  close(): void { if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true }); this.directory = null; this.sourceDigest = ""; this.packagesReady = false; }
+  close(): void { if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true }); this.directory = null; this.sourceDigest = ""; this.packagesReady.clear(); }
 }

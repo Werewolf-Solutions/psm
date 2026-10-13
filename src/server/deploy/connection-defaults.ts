@@ -122,6 +122,12 @@ export async function discoverConnectionDefaults(input: {
       set(`revision${i}`, contract.revision, savedSource);
     });
   }
+  if (kind === "external-monitor@1" && saved) {
+    set("provider", saved.publicMetadata?.provider, savedSource);
+    set("monitors", saved.constraints.allowedMonitorIds?.join(", "), savedSource);
+    for (const key of ["host", "user", "port", "hostKeyFingerprint"] as const) set(key, saved.constraints.ssh?.[key], savedSource);
+    set("knownHost", saved.publicMetadata?.knownHost, savedSource);
+  }
   if (kind !== "github-actions@1") return result;
 
   const units = environment.units.filter((unit) => unit.executor.connection === slot);

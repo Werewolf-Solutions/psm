@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-05",
+  "milestone": "P05 managed Codex continuity",
+  "deliveryState": "working tree, not published or deployed",
+  "psmVersion": "0.3.27",
+  "headAtCheck": "0ba714c",
+  "codexVersion": "0.160.0",
+  "modelSelection": "configured provider default",
+  "actualModel": "gpt-6.1-sol",
+  "nativeSmoke": {
+    "inferenceTurns": 2,
+    "fixture": "temporary project prj_smoke with one dummy text file",
+    "firstTurn": "Read fixture.txt through psm_read and return its phrase",
+    "betweenTurns": "Delete the fixture file, close app-server, start a new app-server process and broker",
+    "secondTurn": "Recall the first turn's phrase without calling tools",
+    "sameThread": true,
+    "firstTurnBrokerCalls": ["psm_read"],
+    "secondTurnBrokerCalls": [],
+    "phraseRecalled": true,
+    "nativeWorkingDirectories": "fresh empty directory per turn, removed afterwards",
+    "testThreadArchived": true,
+    "source": "temporary managed-continuity smoke script; sanitized result retained here",
+    "scope": "one local account and configured model; no customer data, cloud policy writes or deployment changes"
+  },
+  "localChecks": {
+    "typecheck": "npm run typecheck: passed",
+    "fullSuite": "npm test: 764 tests, 759 passed, 0 failed, 5 skipped",
+    "targeted": "12 protocol and permission-lifecycle tests passed before the final model-selection fence; the full suite covers that final fence",
+    "cases": [
+      "resume in a second process with current scope and broker",
+      "reject foreign-thread and previous-turn tools and notifications",
+      "current broker rejects revoked authority on resumed thread",
+      "tool catalog mismatch and missing thread fall back before turn start",
+      "authentication and active-turn failures are not replayed",
+      "failed and interrupted completion are not success",
+      "workspace restriction changes fence retained provider state",
+      "changed model selection and return to provider defaults start fresh",
+      "managed thread id and tool digest persist separately from CLI session id"
+    ]
+  },
+  "limitations": [
+    "The installed provider does not materialize a resumable rollout before its first turn",
+    "Stored managed thread history uses the configured local Codex session store",
+    "PSM reset or deletion clears its reference, not provider rollout files",
+    "Hosted provider authentication and browser tooling need separate acceptance",
+    "Full regression results include pre-existing working-tree changes"
+  ]
+}

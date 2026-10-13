@@ -50,8 +50,7 @@ browser tab on https://psm.werewolf.solutions
 ## Why this shape
 
 - **Local stays local.** Source, logs, and model output never transit a server. That is the
-  same promise the current localhost-only tool makes, and the reason the cockpit is trusted
-  with `aiFullAccess`.
+  same promise the current localhost-only tool makes.
 - **It reuses what exists.** The agent is today's `src/server/index.ts` — the scanner, proc
   registry, SSE log stream, and AI pane are unchanged.
 - **The join key already exists.** Stable `prj_…` ids (0.1.1, `<project>/.psm/identity.json`)
@@ -143,8 +142,8 @@ the repo.
 - Every hosted read and write is owner-checked; a project id is a **capability-free
   identifier**, not a secret, and must never be the only thing authorizing access. (It is
   displayed on cards and copyable by design.)
-- `aiFullAccess` must remain a local-only setting. A hosted toggle that grants full filesystem
-  access to an agent is a remote-code-execution feature.
+- The retired `aiFullAccess` setting must not grant filesystem access through either
+  local or hosted requests. Agents use sandboxed or managed permissions.
 
 ## Verification
 

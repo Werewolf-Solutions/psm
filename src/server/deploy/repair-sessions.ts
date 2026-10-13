@@ -85,7 +85,7 @@ export function repairBrief(job: PreparationJob, checked: ReadinessResult, purpo
     "",
     "How to work here:",
     ...PREPARATION_OPERATIONS.map((operation) => `- ${operation.instruction}`),
-    "- PSM's managed git_commit assigns the next root X.Y.Z version for code changes and synchronizes root lockfiles. Preserve an already chosen newer version. If an external commit needs only a release-version increment, stage package.json and use git_commit to record that increment; never relabel an existing artifact.",
+    "- Before committing, inspect the actual diff and choose git_commit releaseBump: major for an incompatible API or behavior change (next X.0.0), minor for a compatible new feature (next X.Y.0), patch for a bug fix or small compatible change (next X.Y.Z). The displayed next version is provisional; do not treat it as a decision about the diff. PSM assigns the selected root X.Y.Z version and synchronizes root lockfiles. Preserve an already chosen higher version. Docs-only commits do not consume a version. If an external commit needs only a release-version increment, stage package.json and use git_commit to record that increment; never relabel an existing artifact.",
     "- Do not read, write or invent deployment credentials or secrets, and do not run a deployment, a release build or an infrastructure change yourself. psm runs those, and the operator approves the exact plan first.",
     "- If a step needs a credential, a business decision or an approval, ask the operator a question instead of guessing. Preparation waits for the answer and resumes when you have it.",
     "- Stop the turn once the listed checks would pass, or once only the operator can act. psm rechecks readiness on its own and continues from there.",
@@ -101,7 +101,7 @@ export class WorkroomPreparationRepairer implements PreparationRepairer {
 
   async start(job: PreparationJob, checked: ReadinessResult, purpose: "repair" | "diagnose-external" = "repair"): Promise<string> {
     const ai = { engine: job.engine, model: job.model, effort: job.effort };
-    const roomId = job.workroomId ?? this.host.open({
+    const roomId = job.workroomId && this.exists(job.workroomId) ? job.workroomId : this.host.open({
       projectId: job.projectId,
       environmentId: job.environmentId,
       title: `Ready ${job.environmentId} to deploy`,
@@ -137,6 +137,8 @@ export class WorkroomPreparationRepairer implements PreparationRepairer {
     }
     return roomId;
   }
+
+  exists(roomId: string): boolean { return this.host.ai(roomId) !== null; }
 
   status(roomId: string): { busy: boolean; question: boolean } {
     return this.host.state(roomId);

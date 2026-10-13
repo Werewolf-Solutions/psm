@@ -99,6 +99,14 @@ export interface ProjectProfile {
   updatedAt: number;
 }
 
+/** A saved command shown in a project's workspace. The directory is a scanned project name. */
+export interface CustomCommand {
+  id: string;
+  name: string;
+  directory: string;
+  command: string;
+}
+
 export type CapabilityKind = "mcp" | "skill" | "doc" | "api" | "project";
 export type CapabilitySource = "workspace" | "registry" | "custom";
 export type CapabilityIntegrity =
@@ -227,13 +235,14 @@ export interface Override {
   note?: string; // short archive/context note
   // cockpit fields
   runCommand?: string; // overrides the auto-detected run command
+  customCommands?: CustomCommand[];
   deployStaging?: string; // how to deploy this project to staging
   deployProduction?: string; // how to deploy this project to production
   port?: number; // dev-server port, for the web-preview pane
   aiEngine?: "claude" | "codex"; // which CLI the AI pane shells out to
   aiModel?: string; // optional model id/alias passed to the selected AI CLI
   aiEffort?: string; // optional reasoning/effort level passed to the selected AI CLI
-  aiFullAccess?: boolean; // let the AI run commands, not just edit files
+  aiFullAccess?: boolean; // retired setting, ignored when loading old overrides
   // other projects this project's AI may also edit, by name. Names, not paths:
   // psm resolves them itself before every turn, so a stale or renamed entry
   // drops out of scope rather than pointing the CLI at a directory that has
@@ -266,13 +275,14 @@ export interface Project {
   hasGit: boolean;
   // cockpit
   runCommand: string | null; // merged: override ?? auto-detected
+  customCommands: CustomCommand[];
   deployStaging: string | null;
   deployProduction: string | null;
   port: number | null;
   aiEngine: "claude" | "codex";
   aiModel: string | null;
   aiEffort: string | null;
-  aiFullAccess: boolean;
+  aiFullAccess: boolean; // always false; retained for API compatibility
   aiExtraProjects: string[]; // merged: other projects this AI may also edit
   attachments: Attachment[];
   // provenance so the UI can show what's auto vs overridden

@@ -121,6 +121,41 @@ function service(projects: { id: string; name: string; path: string }[]) {
 }
 
 /** todo-app waits on werewolf-dapp; the dapp waits on nobody. */
+test("deployment source distinguishes an uncommitted version bump and follows its commit immediately", async (t) => {
+  const root = repository(TODO, "todo-app", []);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const kit = service([{ id: TODO, name: "todo-app", path: root }]);
+  const initial = await kit.service.environmentView(TODO, "production");
+  assert.equal((initial.source as any).version, "0.1.0");
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "todo-app", version: "0.1.1" }) + "\n");
+  const pending = await kit.service.environmentView(TODO, "production");
+  assert.equal((pending.source as any).version, "0.1.0", "artifacts must still use committed source");
+  assert.equal((pending.source as any).workingTreeVersion, "0.1.1");
+  assert.equal((pending.source as any).proposedVersion, "0.1.1");
+  assert.equal((pending.source as any).inputsDirty, true);
+  assert.match((pending.blockers as any[]).find((item) => item.code === "source-dirty").message, /Working files are 0.1.1; committed source is 0.1.0/);
+  await assert.rejects(kit.service.artifactPreparationContext(TODO, "production"), /deployment inputs differ/);
+  execFileSync("git", ["-C", root, "add", "package.json"]);
+  execFileSync("git", ["-C", root, "commit", "-qm", "Bump fixture version"]);
+  const committed = await kit.service.environmentView(TODO, "production");
+  assert.equal((committed.source as any).version, "0.1.1");
+  assert.equal((committed.source as any).workingTreeVersion, "0.1.1");
+  assert.equal((committed.source as any).proposedVersion, null);
+  assert.equal((committed.source as any).inputsDirty, false);
+  assert.ok(!(committed.blockers as any[]).some((item) => item.code === "source-dirty"));
+});
+
+test("dirty source previews a higher version before package.json is bumped", async (t) => {
+  const root = repository(TODO, "todo-app", []);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, "feature.js"), "export const feature = true;\n");
+  const kit = service([{ id: TODO, name: "todo-app", path: root }]);
+  const view = await kit.service.environmentView(TODO, "production");
+  assert.equal((view.source as any).workingTreeVersion, "0.1.0");
+  assert.equal((view.source as any).proposedVersion, "0.1.1");
+  assert.equal((view.source as any).version, "0.1.0");
+});
+
 function workspace() {
   const todo = repository(TODO, "todo-app", [
     { id: "dapp-api", kind: "http-status@1", projectId: DAPP, request: { url: "https://api.example.com/todo", method: "GET" }, expect: { status: 401 } },
@@ -150,6 +185,25 @@ test("a room reports the cross-project edges its members declare", () => {
   assert.equal(edge.ownerInRoom, true);
   // Nothing has been planned, so the honest answer is "not observed", never "failing".
   assert.equal(edge.state, "unknown");
+});
+
+test("room deployment coverage names every member and its declared release order", () => {
+  const kit = workspace();
+  const coverage = kit.service.deploymentCoverage(["todo-app", "werewolf-dapp", "missing"]);
+  assert.equal(coverage[0].status, "managed");
+  assert.equal(coverage[0].environments[0]?.id, "production");
+  assert.deepEqual(coverage[0].environments[0]?.dependencies, [
+    { id: "dapp-api", ownerProjectId: DAPP, ownerProjectName: "werewolf-dapp" },
+  ]);
+  assert.equal(coverage[1].status, "managed");
+  assert.equal(coverage[2].status, "missing");
+
+  fs.rmSync(path.join(kit.dappPath, ".psm", "deployments.json"));
+  execFileSync("git", ["-C", kit.dappPath, "add", "-u"]);
+  execFileSync("git", ["-C", kit.dappPath, "commit", "-qm", "remove manifest"]);
+  const withoutManifest = kit.service.deploymentCoverage(["werewolf-dapp"]);
+  assert.equal(withoutManifest[0].status, "unmanaged");
+  assert.deepEqual(withoutManifest[0].environments, []);
 });
 
 test("a probe that names no owning project is not a cross-project edge", () => {
@@ -355,4 +409,19 @@ test("live credential presence reconciles stale runtime readiness without overri
   assert.equal((view.connections as { slot: string; ready: boolean }[]).find((connection) => connection.slot === "dns")?.ready, false);
   assert.throws(() => kit.store.updateConnectionSecretStatus({ connectionId: record.connectionId, expectedSecretGeneration: 0, expectedMetadataRevision: 1, secretGeneration: 0, readiness: "ready", updatedAt: Date.now() }), /changed/);
   assert.throws(() => kit.store.updateConnectionSecretStatus({ connectionId: record.connectionId, expectedSecretGeneration: 0, expectedMetadataRevision: 2, secretGeneration: 0, readiness: "ready", updatedAt: Date.now() }), /changed/);
+});
+
+test('monitor refresh needs no artifact or plan and unavailable or aged evidence never stays healthy', async(t) => {
+ const root=repository(TODO,'todo-app',[]);
+ t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const file=path.join(root,'.psm','deployments.json');const manifest=JSON.parse(fs.readFileSync(file,'utf8'));
+ manifest.environments[0].connections.monitor={kind:'external-monitor@1'};
+ manifest.environments[0].watch=[{id:'todo-public-web',kind:'external-http-monitor@1',connection:'monitor',unit:'web',monitorKey:'todo-staging-web',hostname:'todo-app.example.com',maxObservationAgeSeconds:300}];
+ fs.writeFileSync(file,JSON.stringify(manifest));execFileSync('git',['-C',root,'add','.psm/deployments.json']);execFileSync('git',['-C',root,'commit','-qm','monitor']);
+ const database=openDatabase(':memory:'); const store=new DeploymentStore(database); t.after(()=>database.close());
+ let unavailable=false;let at=Date.now()-301000;
+ const service=new DeploymentService({store,secretBroker:new SecretBroker(),projects:()=>[{id:TODO,name:'todo-app',path:root}],githubConnectionDefaults:async()=>({}),observations:{watch:async()=>{if(unavailable)throw Error('do not leak secret');return {monitorId:'todo-public-web',providerState:'healthy',effectiveState:'healthy',observedAt:at,detail:'HTTPS verified',evidence:{provider:'werewolf-watch@1',failureDomain:'same-host'}};}}});
+ const stale=await service.refreshWatch(TODO,'production');assert.equal((stale.watch as any).effectiveState,'stale');assert.equal(((await service.targets())[0].watch as any).effectiveState,'stale');
+ at=Date.now();const healthy=await service.refreshWatch(TODO,'production');assert.equal((healthy.watch as any).effectiveState,'healthy');assert.equal((healthy.watch as any).evidence.provider,'werewolf-watch@1');
+ unavailable=true;const unknown=await service.refreshWatch(TODO,'production');assert.equal((unknown.watch as any).effectiveState,'unknown');assert.doesNotMatch(JSON.stringify(unknown.watch),/do not leak secret/);
 });

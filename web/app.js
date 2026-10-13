@@ -9,7 +9,7 @@ const CAT_ORDER = [
 let STATE = {
   projects: [], meta: {}, version: "", filter: "all", query: "", procs: {}, sessions: [], sessionsSig: "",
   runtimeServices: {}, runtimeServicesSig: "",
-  mode: "dev", can: { runsCommands: true, scansImplicitly: true, canLink: true },
+  mode: "dev", can: { runsCommands: true, scansImplicitly: true, canLink: true, customCommands: false },
 };
 
 /**
@@ -176,7 +176,7 @@ async function load() {
   STATE.mode = data.mode || "dev";
   // what this psm can do at all — a hosted one has no disk, an agent scans only
   // what has been linked, so the board's empty state differs by posture
-  STATE.can = data.capabilities || { runsCommands: true, scansImplicitly: true, canLink: true };
+  STATE.can = data.capabilities || { runsCommands: true, scansImplicitly: true, canLink: true, customCommands: false };
   await Promise.all([fetchSessions(false), fetchRuntimeServices(), window.PsmWorkspaces?.refresh()]);
   render();
 }
@@ -259,7 +259,7 @@ function routeKey(project) {
 }
 
 const PANE_MEMORY_KEY = "psm.selected-panes.v1";
-const PROJECT_PANES = ["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy"];
+const PROJECT_PANES = ["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy", "monitoring"];
 const SELECTED_PANES = (() => {
   try {
     const saved = JSON.parse(localStorage.getItem(PANE_MEMORY_KEY) || "{}");
@@ -268,7 +268,7 @@ const SELECTED_PANES = (() => {
 })();
 
 function selectedPane(kind, key, requested = null) {
-  const allowed = kind === "work" ? ["ai", "session", "changes"]
+  const allowed = kind === "work" ? ["ai", "session", "changes", "deploy"]
     : key === "__workspace__" ? ["ai", "session"] : PROJECT_PANES;
   const chosen = requested ?? SELECTED_PANES.get(`${kind}:${key}`);
   return allowed.includes(chosen) ? chosen : allowed[0];
@@ -824,9 +824,6 @@ function openDrawer(p) {
     effort: $("#d-effort").value,
   }), $("#d-effort"));
 
-  $("#d-full").checked = false;
-  $("#d-full").disabled = true;
-  $("#d-full").closest("label").title = "Project agent access is controlled in Capabilities → Agent permissions.";
   renderScopePicker(p);
   $("#d-deploy-staging").value = p.deployStaging || "";
   $("#d-deploy-production").value = p.deployProduction || "";
@@ -920,7 +917,6 @@ async function saveDrawer() {
     aiEngine: $("#d-engine").value,
     aiModel: $("#d-model").value.trim(),
     aiEffort: $("#d-effort").value,
-    aiFullAccess: $("#d-full").checked,
     aiExtraProjects: chosenScope(),
     deployStaging: $("#d-deploy-staging").value.trim(),
     deployProduction: $("#d-deploy-production").value.trim(),
@@ -985,7 +981,7 @@ function emptyManagedDeploymentState() {
 
 let WS = {
   name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-  engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+  engine: "claude", model: "", effort: "", actualModel: null, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
   deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
   managedDeploy: emptyManagedDeploymentState(),
 };
@@ -1292,7 +1288,6 @@ function openWorkspace(p, pane = null, opts = {}) {
   WS.model = p.aiModel || "";
   WS.effort = p.aiEffort || "";
   WS.actualModel = null;
-  WS.fullAccess = !!p.aiFullAccess;
   WS.extraProjects = p.aiExtraProjects || [];
   WS.scopeDirs = p.aiScopeDirs || [];
   WS.deploy = { staging: p.deployStaging || null, production: p.deployProduction || null };
@@ -1319,8 +1314,9 @@ function openWorkspace(p, pane = null, opts = {}) {
   renderWorkingButton();
   // hide the run/web/deploy cockpit when this is the workspace-wide chat
   $("#ws-runbar").hidden = chat;
+  $("#ws-custom-commands").hidden = chat || !STATE.can.customCommands;
   $("#ws-status").hidden = chat;
-  const roomPanes = new Set(["ai", "session", "changes"]);
+  const roomPanes = new Set(["ai", "session", "changes", "deploy"]);
   for (const t of document.querySelectorAll(".ws-tab"))
     t.hidden = chat && !roomPanes.has(t.dataset.pane);
   // The workspace-wide chat has no repositories of its own to show.
@@ -1328,11 +1324,15 @@ function openWorkspace(p, pane = null, opts = {}) {
   // A workroom has no working button of its own: it is not a project, and
   // "working on" is a mark psm keeps per project.
   $("#ws-working").hidden = WS.kind === "work";
+  $("#ws-work-together").hidden = WS.kind !== "project" || p.name === "__workspace__";
   $("#ws-cmd").value = p.runCommand || "";
+  WS.logKind = "run";
+  $("#ws-custom-form").hidden = true;
+  renderCustomCommands();
   clearConsole();
   clearConsole($("#ws-depconsole"));
   $("#ws-webframe").innerHTML = "";
-  $("#ws-transcript").innerHTML = "";
+  clearAiTranscript();
   renderSessionPane(null);
   loadDraft(p.name); // restore this chat's own unsent text (empty if none)
   syncAiControls();
@@ -1422,7 +1422,7 @@ function renderMembers(room) {
 }
 
 /**
- * The managed dependency edges in this room that are not passing.
+ * The managed dependency edges in this room that need attention or observation.
  *
  * A cross-project break is the reason a room exists: one repository is waiting on
  * something another one owns, and both are in this conversation. Each row links to
@@ -1460,7 +1460,7 @@ async function renderRoomDependencies(room) {
   }
   strip.hidden = false;
   const label = el("span", "ws-room-deps-label");
-  label.textContent = edges.length === 1 ? "1 dependency not passing" : `${edges.length} dependencies not passing`;
+  label.textContent = edges.length === 1 ? "1 dependency finding" : `${edges.length} dependency findings`;
   strip.append(label);
 
   for (const edge of edges) {
@@ -1532,22 +1532,30 @@ async function setRoomProjects(projects) {
 }
 
 async function loadWorkrooms() {
-  try {
-    const r = await agentApi("/api/work-sessions");
-    WORKROOMS = (await r.json()).workSessions || [];
-  } catch {
-    WORKROOMS = [];
-  }
+  const r = await agentApi("/api/work-sessions?includeArchived=true");
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Could not list workrooms");
+  WORKROOMS = (await r.json()).workSessions || [];
   return WORKROOMS;
 }
 
-function openWorkModal() {
+function openWorkModal(prefill = null) {
   $("#work-backdrop").hidden = false;
   $("#work-modal").hidden = false;
-  $("#work-title").value = "";
-  $("#work-objective").value = "";
-  renderWorkPicker();
-  loadWorkrooms().then(renderWorkroomList);
+  $("#work-title").value = prefill?.title || "";
+  $("#work-objective").value = prefill?.objective || "";
+  $("#work-engine").value = prefill?.engine || "claude";
+  const selected = Array.isArray(prefill?.projects) ? prefill.projects : [];
+  const available = new Set(STATE.projects.filter((p) => !p.archived).map((p) => p.name));
+  const missing = selected.filter((name) => !available.has(name));
+  const context = $("#work-context");
+  context.hidden = !prefill;
+  context.textContent = missing.length
+    ? `Choose replacements for unavailable projects: ${missing.join(", ")}. Review the scope and objective before creating the room.`
+    : "Review the projects and objective. Creating the room starts its AI session with this objective.";
+  renderWorkPicker(selected);
+  loadWorkrooms().then(renderWorkroomList).catch((error) => {
+    $("#work-open-list").replaceChildren(el("p", "work-row-warn", error.message || "Could not list workrooms"));
+  });
 }
 
 function closeWorkModal() {
@@ -1555,42 +1563,85 @@ function closeWorkModal() {
   $("#work-modal").hidden = true;
 }
 
-/** Rooms already open, so the button is a way back in and not only a way to start. */
+/** Open and archived rooms, with access to each conversation and its lifecycle. */
 function renderWorkroomList(rooms) {
   const list = $("#work-open-list");
-  list.innerHTML = "";
+  list.replaceChildren();
   if (!rooms.length) {
     list.append(el("p", "hint", "No workrooms yet. Pick two projects below to start one."));
     return;
   }
-  list.append(el("h3", null, "Open workrooms"));
-  for (const room of rooms) {
-    const row = el("div", "work-row");
-    const main = el("div", "work-row-main");
-    main.append(el("strong", null, room.title));
-    main.append(el("span", "work-row-projects", room.projects.join(" · ")));
-    if (!room.ready) main.append(el("span", "work-row-warn", "a project is missing"));
-    const open = el("button", "btn btn-primary", "Open");
-    open.onclick = () => {
-      closeWorkModal();
-      openWorkroom(room.id);
-    };
-    const archive = el("button", "btn", "Archive");
-    archive.onclick = async () => {
-      await agentApi(`/api/work-sessions/${encodeURIComponent(room.id)}/archive`, { method: "POST" });
-      renderWorkroomList(await loadWorkrooms());
-    };
-    row.append(main, open, archive);
-    list.append(row);
+  for (const [heading, group] of [
+    ["Open workrooms", rooms.filter((room) => !room.archivedAt)],
+    ["Archived workrooms", rooms.filter((room) => !!room.archivedAt)],
+  ]) {
+    list.append(el("h3", null, `${heading} (${group.length})`));
+    if (!group.length) {
+      list.append(el("p", "hint", `No ${heading.toLowerCase()}.`));
+      continue;
+    }
+    for (const room of group) {
+      const row = el("div", "work-row");
+      const main = el("div", "work-row-main");
+      main.append(el("strong", null, room.title));
+      main.append(el("span", "work-row-projects", room.projects.join(" · ")));
+      if (!room.ready) main.append(el("span", "work-row-warn", "a project is missing"));
+      const open = el("button", "btn btn-primary", room.archivedAt ? "View" : "Open");
+      open.onclick = () => {
+        closeWorkModal();
+        openWorkroom(room.id);
+      };
+      row.append(main, open);
+      if (!room.archivedAt) {
+        const archive = el("button", "btn", "Archive");
+        archive.onclick = async () => {
+          archive.disabled = true;
+          try {
+            const response = await agentApi(`/api/work-sessions/${encodeURIComponent(room.id)}/archive`, { method: "POST" });
+            if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not archive workroom");
+            renderWorkroomList(await loadWorkrooms());
+            await fetchSessions();
+          } catch (error) {
+            toast(error.message);
+            archive.disabled = false;
+          }
+        };
+        row.append(archive);
+      }
+      const remove = el("button", "btn work-delete", "Delete");
+      remove.title = "Permanently delete this workroom and its conversation";
+      remove.onclick = async () => {
+        if (!await confirmInApp({ title: "Delete workroom", message: "Permanently delete this workroom and its conversation? This cannot be undone.", facts: [["Workroom", room.title]], accept: "Delete workroom" })) return;
+        remove.disabled = true;
+        try {
+          const response = await agentApi(`/api/work-sessions/${encodeURIComponent(room.id)}`, { method: "DELETE" });
+          if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not delete workroom");
+          if (WS.kind === "work" && WS.id === room.id) {
+            location.hash = "#/";
+            closeWorkspace(true);
+          }
+          renderWorkroomList(await loadWorkrooms());
+          await fetchSessions();
+          toast("Workroom deleted");
+        } catch (error) {
+          toast(error.message);
+          remove.disabled = false;
+        }
+      };
+      row.append(remove);
+      list.append(row);
+    }
   }
 }
 
-function renderWorkPicker() {
+function renderWorkPicker(selected = []) {
   const picker = $("#work-picker");
+  const chosen = new Set(selected);
+  const order = new Map(selected.map((name, index) => [name, index]));
   picker.innerHTML = STATE.projects
     .filter((p) => !p.archived)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((p) => `<label class="scope-item"><input type="checkbox" value="${esc(p.name)}" /> ${esc(p.name)}</label>`)
+    .sort((a, b) => (order.get(a.name) ?? Infinity) - (order.get(b.name) ?? Infinity) || a.name.localeCompare(b.name))
+    .map((p) => `<label class="scope-item"><input type="checkbox" value="${esc(p.name)}"${chosen.has(p.name) ? " checked" : ""} /> ${esc(p.name)}</label>`)
     .join("");
   picker.onchange = renderWorkSummary;
   renderWorkSummary();
@@ -1616,6 +1667,8 @@ async function createWorkroom(event) {
   event.preventDefault();
   const projects = chosenWorkProjects();
   if (projects.length < 2) return toast("Pick at least two projects");
+  const objective = $("#work-objective").value.trim();
+  if (!objective) return toast("Describe what the shared AI should work on");
   const button = $("#work-create");
   button.disabled = true;
   try {
@@ -1625,14 +1678,25 @@ async function createWorkroom(event) {
       body: JSON.stringify({
         projects,
         title: $("#work-title").value.trim(),
-        objective: $("#work-objective").value.trim(),
+        objective,
         engine: $("#work-engine").value,
       }),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return toast(data.error || "Could not open the workroom");
     closeWorkModal();
-    openWorkroom(data.workSession.id);
+    const roomId = data.workSession.id;
+    try {
+      const started = await agentApi(`/api/work-sessions/${encodeURIComponent(roomId)}/ai`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: objective, engine: data.workSession.engine, model: data.workSession.model, effort: data.workSession.effort }),
+      });
+      if (!started.ok) toast((await started.json().catch(() => ({}))).error || "Workroom created, but its AI session could not start");
+    } catch (error) {
+      toast(`Workroom created, but its AI session could not start: ${error.message}`);
+    }
+    openWorkroom(roomId);
   } finally {
     button.disabled = false;
   }
@@ -1669,7 +1733,6 @@ async function openWorkroom(id, fromRoute = false, pane = null) {
     {
       name: room.id, port: null, runCommand: null, deployStaging: null, deployProduction: null,
       aiExtraProjects: [], aiEngine: room.engine, aiModel: room.model, aiEffort: room.effort,
-      aiFullAccess: false, // a workroom is never handed the sandbox-off flag
     },
     pane,
     { chatOnly: true, title: room.title, fromRoute: true, kind: "work", id: room.id, room },
@@ -1683,14 +1746,14 @@ async function openWorkspaceChat(fromRoute = false, pane = null) {
     return;
   }
   const requestedRoute = location.hash;
-  let w = { aiEngine: "claude", aiModel: null, aiEffort: null, aiFullAccess: false };
+  let w = { aiEngine: "claude", aiModel: null, aiEffort: null };
   try {
     w = await (await agentApi("/api/workspace")).json();
   } catch {}
   if (location.hash !== requestedRoute) return;
   openWorkspace(
     { name: "__workspace__", port: null, runCommand: null, deployStaging: null, deployProduction: null, aiExtraProjects: [],
-      aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiEffort: w.aiEffort || null, aiFullAccess: !!w.aiFullAccess },
+      aiEngine: w.aiEngine || "claude", aiModel: w.aiModel || null, aiEffort: w.aiEffort || null },
     pane,
     { chatOnly: true, title: "psm · all projects", fromRoute: true },
   );
@@ -1736,6 +1799,7 @@ function switchPane(pane) {
   renderWorkingButton();
   if (pane === "web") renderWebPane();
   if (pane === "deploy") openDeployPane();
+  if (pane === "monitoring") void loadMonitoringPane();
   if (pane === "session") fetchSessionState();
   if (pane === "changes") loadChanges();
   if (pane === "plan") loadPlan();
@@ -2028,8 +2092,10 @@ async function applyDevNotes() {
   const name = WS.name;
   if (!WS.aiEs) connectAi(name);
   WS.pending.push(message);
+  finishAiToolGroup();
   const optimistic = renderAiBubble({ t: Date.now(), role: "user", text: message });
   optimistic.pendingMessage = message;
+  compactAiTranscript();
   const wasBusy = WS.aiBusy;
   setAiBusy(true);
   const { ok, body } = await postAiMessage(name, message);
@@ -2084,9 +2150,12 @@ window.addEventListener("message", (event) => {
   }
 });
 
-function connectLogs(name) {
+function connectLogs(name, kind = "run") {
   if (WS.es) WS.es.close();
-  const es = agentStream(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=run`);
+  WS.logKind = kind;
+  const command = (projectByName(name)?.customCommands || []).find((entry) => `custom:${entry.id}` === kind);
+  $("#ws-log-title").textContent = kind === "run" ? "Run logs" : `${command?.name || "Custom command"} logs`;
+  const es = agentStream(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=${encodeURIComponent(kind)}`);
   WS.es = es;
   es.onopen = () => clearConsole(); // rebuild on (re)connect, don't duplicate
   es.onmessage = (e) => {
@@ -2096,11 +2165,13 @@ function connectLogs(name) {
   };
   es.addEventListener("status", (e) => {
     try {
-      setWsStatus(JSON.parse(e.data).status);
+      if (kind === "run") setWsStatus(JSON.parse(e.data).status);
+      else pollProcs();
     } catch {}
   });
   // the running project told us its real web port — trust it over the guess
   es.addEventListener("port", (e) => {
+    if (kind !== "run") return;
     try {
       const { port } = JSON.parse(e.data);
       if (port && port !== WS.port) {
@@ -2131,7 +2202,7 @@ function closeWorkspace(fromRoute = false) {
   clearPreparationPoll();
   WS = {
     name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
-    engine: "claude", model: "", effort: "", actualModel: null, fullAccess: false, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
+    engine: "claude", model: "", effort: "", actualModel: null, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
     deploy: { staging: null, production: null }, depTarget: "staging", depEs: null, depArmed: false,
     managedDeploy: emptyManagedDeploymentState(),
   };
@@ -2144,6 +2215,7 @@ function closeWorkspace(fromRoute = false) {
   CAPS = { project: null, catalog: [], loading: false, applying: false, preview: null };
   // restore the full cockpit for the next (normal) workspace
   $("#ws-runbar").hidden = false;
+  $("#ws-custom-commands").hidden = !STATE.can.customCommands;
   $("#ws-status").hidden = false;
   for (const t of document.querySelectorAll(".ws-tab")) t.hidden = false;
   fetchSessions(); // the "Working on" lane may have gained/updated a session
@@ -3893,8 +3965,6 @@ async function answerQuestion(event) {
   const submit = $("#question-submit");
   submit.disabled = true;
   try {
-    const project = STATE.projects.find((p) => p.name === active.project);
-    const fullAccess = conversationKey() === active.project ? WS.fullAccess : !!project?.aiFullAccess;
     const planner = active.scope === "planner";
     const r = await agentApi(`${questionBase(active.project)}/${planner ? "planner" : "ai"}/question`, {
       method: "POST",
@@ -3902,7 +3972,7 @@ async function answerQuestion(event) {
       body: JSON.stringify({
         requestId: active.request.id,
         answers,
-        ...(planner ? { role: active.role } : { fullAccess }),
+        ...(planner ? { role: active.role } : {}),
       }),
     });
     const data = await r.json().catch(() => ({}));
@@ -4061,8 +4131,8 @@ function repoBlock(repo) {
 // of controls the user touches, WS is the single source of truth and both
 // mirrors are redrawn from it.
 const AI_CONTROLS = [
-  { engine: "#ws-engine", model: "#ws-model", effort: "#ws-effort", full: "#ws-full", current: "#ws-model-current", usage: "#usage-open", scope: "#ws-scope" },
-  { engine: "#web-engine", model: "#web-model", effort: "#web-effort", full: "#web-full", current: "#web-model-current", usage: "#web-usage", scope: "#web-scope" },
+  { engine: "#ws-engine", model: "#ws-model", effort: "#ws-effort", current: "#ws-model-current", usage: "#usage-open", scope: "#ws-scope" },
+  { engine: "#web-engine", model: "#web-model", effort: "#web-effort", current: "#web-model-current", usage: "#web-usage", scope: "#web-scope" },
 ];
 const aiControlNodes = (key) => AI_CONTROLS.map((set) => $(set[key])).filter(Boolean);
 
@@ -4081,16 +4151,12 @@ function renderAiModel() {
   }
 }
 
-/** Push WS's engine/model/effort/full-access onto every mirror. */
+/** Push WS's engine/model/effort onto every mirror. */
 function syncAiControls() {
   for (const set of AI_CONTROLS) {
     $(set.engine).value = WS.engine;
     $(set.model).value = WS.model;
     renderEffortOptions($(set.effort), WS.engine, WS.model, WS.effort, WS.name);
-    const managed = WS.name !== "__workspace__";
-    $(set.full).checked = managed ? false : WS.fullAccess;
-    $(set.full).disabled = managed;
-    $(set.full).closest("label").title = managed ? "Project and workroom agents use Capabilities → Agent permissions, never an unrestricted sandbox." : "Workspace chat only: run the AI with its sandbox off. It can run any command as you, on every project and file you can reach.";
   }
   renderScopeChip();
   renderAiModel();
@@ -4114,13 +4180,12 @@ function refreshAiModels() {
  * PATCH 404s, the catch swallows it, and the picker springs back on reload with
  * no sign anything went wrong.
  */
-function rememberAiChoice({ engine, model, effort, fullAccess } = {}) {
+function rememberAiChoice({ engine, model, effort } = {}) {
   if (WS.kind === "work" && WS.id) {
     const body = {};
     if (engine !== undefined) body.engine = engine;
     if (model !== undefined) body.model = model;
     if (effort !== undefined) body.effort = effort;
-    // A workroom is never handed the sandbox-off flag, so there is nothing to save.
     if (!Object.keys(body).length) return Promise.resolve(false);
     return agentApi(`/api/work-sessions/${encodeURIComponent(WS.id)}`, {
       method: "PATCH",
@@ -4132,7 +4197,6 @@ function rememberAiChoice({ engine, model, effort, fullAccess } = {}) {
   if (engine !== undefined) body.aiEngine = engine;
   if (model !== undefined) body.aiModel = model;
   if (effort !== undefined) body.aiEffort = effort;
-  if (fullAccess !== undefined) body.aiFullAccess = fullAccess;
   return patchProject(WS.name, body);
 }
 
@@ -4192,17 +4256,6 @@ function applyEffort(effort) {
   rememberAiChoice({ effort: WS.effort });
   changeAiSelection();
   scheduleSessionRefresh();
-}
-
-function applyFullAccess(fullAccess) {
-  // Sandbox-off is a machine-wide grant, so turning it on is a deliberate act.
-  if (fullAccess && !WS.fullAccess && !window.confirm("Run workspace chat unrestricted?\n\nThe AI's sandbox is turned off: it can run any command as you, read and change any file you can, on every project. Project and workroom agents are unaffected; they use Agent permissions.")) {
-    for (const node of aiControlNodes("full")) node.checked = false;
-    return;
-  }
-  WS.fullAccess = fullAccess;
-  for (const node of aiControlNodes("full")) node.checked = fullAccess;
-  rememberAiChoice({ fullAccess: WS.fullAccess }); // remember per project
 }
 
 function setAiActivity(text) {
@@ -4451,6 +4504,7 @@ function renderAiBubble(ev) {
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
   const preparation = preparationEntryLabel(ev);
   const b = el(preparation ? "details" : "div", preparation ? "ai-msg ai-preparation" : "ai-msg ai-" + ev.role);
+  b.aiConversation = ev.role === "user" || ev.role === "assistant";
   if (preparation) {
     const summary = el("summary");
     summary.textContent = preparation;
@@ -4459,7 +4513,19 @@ function renderAiBubble(ev) {
     brief.textContent = ev.text;
     b.append(summary, brief);
   } else if (ev.role === "assistant") {
-    if (renderAiText(b, ev.text)) b.classList.add("has-figure"); // figures need the width
+    if (ev.workroomProposal) {
+      const proposal = ev.workroomProposal;
+      b.classList.add("ai-workroom-proposal");
+      b.append(el("strong", null, "Work together in a shared room"));
+      const objective = el("p");
+      objective.textContent = proposal.objective;
+      const projects = el("span", "work-row-projects");
+      projects.textContent = proposal.projects.join(" · ");
+      b.append(objective, projects);
+      const open = el("button", "btn btn-primary", "Review and create workroom");
+      open.onclick = () => openWorkModal({ ...proposal, engine: WS.engine });
+      b.append(open);
+    } else if (renderAiText(b, ev.text)) b.classList.add("has-figure"); // figures need the width
   } else {
     b.textContent = ev.text;
   }
@@ -4467,6 +4533,77 @@ function renderAiBubble(ev) {
   t.append(b);
   if (nearBottom) t.scrollTop = t.scrollHeight;
   return b;
+}
+
+const AI_RECENT_MESSAGES = 12;
+
+function clearAiTranscript() {
+  $("#ws-transcript").innerHTML = "";
+  WS.aiToolGroup = null;
+  WS.aiOlder = null;
+}
+
+function isAiActivity(ev) {
+  return ev.role === "system" && (/^→\s/.test(ev.text || "") || /^● session\b/.test(ev.text || ""));
+}
+
+function finishAiToolGroup() {
+  const group = WS.aiToolGroup;
+  if (!group) return;
+  group.aiSummary.textContent = group.aiCount
+    ? `${group.aiCount} tool call${group.aiCount === 1 ? "" : "s"}`
+    : "Session details";
+  WS.aiToolGroup = null;
+}
+
+function appendAiActivity(ev) {
+  const transcript = $("#ws-transcript");
+  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  let group = WS.aiToolGroup;
+  if (!group) {
+    group = el("details", "ai-tools");
+    group.aiSummary = el("summary");
+    group.aiList = el("div", "ai-tools-list");
+    group.aiCount = 0;
+    group.append(group.aiSummary, group.aiList);
+    transcript.append(group);
+    WS.aiToolGroup = group;
+  }
+  const row = el("div", "ai-tool-line");
+  row.textContent = ev.text;
+  row.append(eventTimeNode(ev.t, "ai-time"));
+  group.aiList.append(row);
+  if (/^→\s/.test(ev.text || "")) {
+    group.aiCount++;
+    group.aiLast = ev.text.replace(/^→\s*/, "");
+  }
+  group.aiSummary.textContent = group.aiLast ? `Using ${group.aiLast}` : "Session details";
+  if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
+}
+
+function compactAiTranscript() {
+  const transcript = $("#ws-transcript");
+  const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80;
+  const visible = [...transcript.children].filter((node) => node !== WS.aiOlder);
+  const messages = visible.filter((node) => node.aiConversation);
+  if (messages.length <= AI_RECENT_MESSAGES) return;
+  const firstKept = messages[messages.length - AI_RECENT_MESSAGES];
+  const moved = visible.slice(0, visible.indexOf(firstKept));
+  if (!moved.length) return;
+  let older = WS.aiOlder;
+  if (!older) {
+    older = el("details", "ai-older");
+    older.aiSummary = el("summary");
+    older.aiList = el("div", "ai-older-list");
+    older.aiCount = 0;
+    older.append(older.aiSummary, older.aiList);
+    transcript.prepend(older);
+    WS.aiOlder = older;
+  }
+  older.aiCount += moved.filter((node) => node.aiConversation).length;
+  older.aiSummary.textContent = `Earlier messages (${older.aiCount})`;
+  older.aiList.append(...moved);
+  if (nearBottom) transcript.scrollTop = transcript.scrollHeight;
 }
 
 function appendAiEvent(ev) {
@@ -4484,7 +4621,12 @@ function appendAiEvent(ev) {
       return;
     }
   }
-  renderAiBubble(ev);
+  if (isAiActivity(ev)) appendAiActivity(ev);
+  else {
+    finishAiToolGroup();
+    renderAiBubble(ev);
+    if (ev.role === "user" || ev.role === "assistant") compactAiTranscript();
+  }
   scheduleSessionRefresh();
   if (WS.aiBusy) {
     const label = activityFor(ev);
@@ -4502,8 +4644,11 @@ function setAiBusy(busy) {
   // shows alongside it so the running turn can still be cancelled.
   $("#ws-send").hidden = false;
   $("#ws-cancel").hidden = !busy;
-  if (busy) setAiActivity("Thinking…");
-  else $("#ws-ai-activity").hidden = true;
+  if (busy) setAiActivity(WS.aiToolGroup?.aiLast ? `Working: ${WS.aiToolGroup.aiLast}` : "Thinking…");
+  else {
+    finishAiToolGroup();
+    $("#ws-ai-activity").hidden = true;
+  }
   refreshComposer();
   renderWorkingButton();
 }
@@ -4541,7 +4686,7 @@ function connectAi(name) {
   es.onopen = () => {
     if (!current()) return;
     WS.pending = [];
-    $("#ws-transcript").innerHTML = "";
+    clearAiTranscript();
   };
   es.onmessage = (e) => {
     if (!current()) return;
@@ -4767,7 +4912,7 @@ async function postAiMessage(name, message) {
   const r = await agentApi(`${aiBase(name)}/ai`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort, fullAccess: WS.fullAccess }),
+    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort }),
   });
   return { ok: r.ok, body: await r.json().catch(() => ({})) };
 }
@@ -4790,8 +4935,10 @@ async function sendAi() {
   // pending is a multiset: several messages may be in flight/queued at once, and
   // each server echo cancels one so we don't double-render it.
   WS.pending.push(message);
+  finishAiToolGroup();
   const optimistic = renderAiBubble({ t: Date.now(), role: "user", text: message });
   optimistic.pendingMessage = message;
+  compactAiTranscript();
   setAiBusy(true);
   const { ok, body: e } = await postAiMessage(name, message);
   if (!ok) {
@@ -4869,11 +5016,95 @@ function invalidateDeploymentReadiness(state = WS.managedDeploy) {
   state.readinessTimer = null;
 }
 
+function roomDeployText(tag, className, value) {
+  const node = el(tag, className);
+  node.textContent = value;
+  return node;
+}
+
+/** A room coordinates deployments; individual project approval remains authoritative. */
+async function renderRoomDeploy() {
+  const panel = $("#ws-room-deploy");
+  const roomId = WS.id;
+  const header = el("div", "room-deploy-member-head");
+  const refresh = el("button", "btn", "Refresh");
+  refresh.onclick = () => renderRoomDeploy();
+  header.append(roomDeployText("h2", null, "Deployment coordination"), refresh);
+  panel.replaceChildren(
+    header,
+    roomDeployText("p", "hint", "Review each project's environment and dependencies here. Deployments still require a fresh plan and approval in each project's Deploy tab."),
+    roomDeployText("p", "hint", "Loading recorded deployment state…"),
+  );
+  try {
+    const response = await agentApi(`/api/work-sessions/${encodeURIComponent(roomId)}/deployments`);
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || "Could not read deployment state");
+    const { members = [], edges = [] } = await response.json();
+    if (WS.kind !== "work" || WS.id !== roomId || WS.pane !== "deploy") return;
+    const heading = panel.firstChild;
+    const explanation = panel.children[1];
+    panel.replaceChildren(heading, explanation);
+
+    for (const member of members) {
+      const card = el("section", "room-deploy-member");
+      const title = el("div", "room-deploy-member-head");
+      title.append(roomDeployText("h3", null, member.name));
+      const project = projectByName(member.name);
+      if (project) {
+        const open = el("button", "btn", "Open project Deploy");
+        open.onclick = () => window.open(projectHash(routeKey(project), "deploy"), "_blank");
+        title.append(open);
+      }
+      card.append(title);
+      if (member.status !== "managed") {
+        card.append(roomDeployText("p", "work-row-warn", member.status === "missing"
+          ? "Project is no longer available on this machine."
+          : member.reason || "No managed deployment manifest."));
+      } else {
+        if (!member.committed || member.sourceInputsDirty) {
+          card.append(roomDeployText("p", "work-row-warn", "Deployment inputs are not committed at HEAD. Review the checkout before planning a release."));
+        }
+        const environments = member.environments || [];
+        for (const environment of environments) {
+          const row = el("div", "room-deploy-environment");
+          row.append(roomDeployText("strong", null, `${environment.id} · ${environment.risk}`));
+          const dependencies = environment.dependencies || [];
+          row.append(roomDeployText("span", "hint", dependencies.length
+            ? `Needs ${dependencies.map((dependency) => dependency.ownerProjectName || dependency.ownerProjectId).join(", ")} before this project.`
+            : "No cross-project dependency declared for this environment."));
+          card.append(row);
+        }
+        if (!environments.some((environment) => environment.id === "production")) {
+          card.append(roomDeployText("p", "work-row-warn", "No managed production environment is defined."));
+        }
+      }
+      panel.append(card);
+    }
+
+    const findings = el("section", "room-deploy-findings");
+    findings.append(roomDeployText("h3", null, "Recorded dependency findings"));
+    if (!edges.length) {
+      findings.append(roomDeployText("p", "hint", "No unresolved finding is recorded. A fresh readiness check is still required before any release."));
+    }
+    for (const edge of edges) {
+      findings.append(roomDeployText("p", edge.state === "unknown" ? "room-deploy-unknown" : "work-row-warn",
+        `${edge.dependentProjectName} · ${edge.dependentEnvironmentId} needs ${edge.ownerProjectName || edge.ownerProjectId}: ${edge.state === "unknown" ? "not observed" : edge.state}. ${edge.detail}`));
+    }
+    panel.append(findings);
+  } catch (error) {
+    if (WS.kind !== "work" || WS.id !== roomId || WS.pane !== "deploy") return;
+    panel.replaceChildren(
+      header,
+      roomDeployText("p", "work-row-warn", error.message || "Could not read deployment state"),
+    );
+  }
+}
+
 function deploymentReadyToApprove() {
   const state = WS.managedDeploy;
   const plan = state.plan;
   const readiness = state.readiness;
   if (state.loading || state.preparationRunId || !plan || plan.blocked || !plan.id || !plan.digest) return false;
+  if (plan.operation !== "rollback" && deploymentReleaseComplete()) return false;
   if (state.run && !DEPLOYMENT_TERMINAL_STATES.has(state.run.state)) return false;
   if (state.planEnvironment !== state.environment || !(Number(plan.expiresAt) > Date.now())) return false;
   if (plan.operation !== "rollback" && (!readiness?.ready || state.readinessEnvironment !== state.environment
@@ -4910,6 +5141,14 @@ function renderDeploymentReadiness() {
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
   renderActivityTimes($("#dep-readiness-times"), [["Checked", readiness?.checkedAt]]);
   for (const [index, item] of rows.entries()) {
+    // App-managed pins, target files and credentials are reviewed as one complete bundle.
+    if (item.status !== "ready" && item.action === "review-controller") {
+      const setup = depText("button", "dep-mini-btn primary", "Review controller setup / update");
+      setup.type = "button";
+      setup.onclick = () => showMe(() => deploymentControllerSetupTarget(item.slot || "github"));
+      $("#dep-readiness").children[index]?.append(setup);
+      continue;
+    }
     // The release controller's GitHub Environment is filled from here, with the CI key PSM enrolled.
     if (item.status !== "ready" && item.code === "executor-not-ready" && /controller-credentials/.test(item.id) && /Publish the CI release key/.test(item.detail || "")) {
       const publish = depText("button", "dep-mini-btn primary", "Publish to GitHub");
@@ -5012,6 +5251,15 @@ function renderDeploymentReadiness() {
       $("#dep-readiness").children[index]?.append(build);
     }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
+    if (item.code === "source-dirty") {
+      const prepare = depText("button", "dep-mini-btn", "Commit and prepare build");
+      prepare.type = "button";
+      prepare.disabled = state.loading || !!state.preparation?.active;
+      prepare.title = "Use the preparation AI to commit the intended changes, then build the committed source";
+      prepare.onclick = () => { void checkDeploymentReadiness(true); };
+      $("#dep-readiness").children[index]?.append(prepare);
+      continue;
+    }
     const button = depText("button", "dep-mini-btn", item.action === "connect" ? "Set up connection" : item.action === "review-capabilities" ? "Review permissions" : "Review changes");
     button.type = "button";
     button.onclick = () => item.action === "connect"
@@ -5038,11 +5286,15 @@ function renderDeploymentReadiness() {
   const expired = readiness && Number(readiness.expiresAt) <= Date.now();
   const { busy, preparing, resumable, showPreparation } = deploymentReadinessControls(state, readiness, preparationSuperseded(state));
   const heldRun = state.run?.state === "recovery-required";
-  $("#dep-status").textContent = preparing ? state.preparation.message
+  const liveActivity = state.preparation?.id && state.preparationActivity?.jobId === state.preparation.id && state.preparationActivity.busy
+    ? state.preparationActivity.text : null;
+  const unverifiedRelease = deploymentEnvironment()?.activeRelease?.verified === false;
+  $("#dep-status").textContent = preparing ? `${state.preparation.message}${liveActivity ? ` · ${liveActivity}` : ""}`
     : state.preparationRunId ? "Preparing the release. Readiness will be checked again when it finishes."
     : state.loading ? "Checking deployment readiness…"
     : state.error ? "The check could not finish. Resolve the error and check again."
-    : deploymentUpToDate() && (!readiness || expired || !outstanding.length) ? "Deployed and up to date. Check readiness again after you commit something new."
+    : deploymentReleaseComplete() && (!readiness || expired || !outstanding.length) ? "Deployed and up to date. Check readiness again after you commit something new."
+    : unverifiedRelease && state.run?.state === "failed" ? "The release is selected on the target, but public verification failed. Fix the public route, then review a fresh verification plan."
     : expired ? "Readiness has expired. Check again before deploying."
     : heldRun && readiness?.ready ? "Release inputs are ready, but the previous deployment is held. Resolve that run before deploying."
     : readiness?.ready ? "Ready to deploy. Review the plan below, then deploy."
@@ -5054,7 +5306,7 @@ function renderDeploymentReadiness() {
   // The button is no longer offered only for the steps psm can run unattended:
   // preparation repairs what it can and asks for the rest, so anything short of
   // ready is something it has a next move on.
-  $("#dep-make-ready").hidden = !showPreparation;
+  $("#dep-make-ready").hidden = !showPreparation || deploymentReleaseComplete();
   $("#dep-make-ready").disabled = state.loading || preparing;
   $("#dep-make-ready").textContent = resumable
     ? "Resume preparation"
@@ -5079,8 +5331,13 @@ function renderDeploymentReadiness() {
     ? "Stop preparation to change the AI it uses"
     : "The provider, model, and reasoning effort that fix what psm cannot fix alone";
   $("#dep-approve").disabled = busy;
+  const complete = deploymentReleaseComplete() && state.plan?.operation !== "rollback";
+  $("#dep-approve").hidden = complete;
+  $("#dep-confirm").hidden = complete;
+  $("#dep-plan-section").hidden = !state.plan || complete;
   $("#dep-confirm").disabled = !deploymentReadyToApprove();
-  $("#dep-confirm").textContent = state.plan?.operation === "rollback" ? "Confirm & roll back" : "Confirm & deploy";
+  $("#dep-confirm").textContent = state.plan?.operation === "rollback" ? "Confirm & roll back"
+    : unverifiedRelease ? "Confirm & verify release" : "Confirm & deploy";
   $("#dep-error").hidden = !state.error;
   $("#dep-error").textContent = state.error || "";
   // An error that names the next step offers it, even when the readiness it came from was cleared.
@@ -5116,6 +5373,19 @@ function deploymentControllerSetupTarget(slot = "github") {
     || $("#dep-connections-section");
 }
 
+function deploymentFailureDetail(run) {
+  const failedStep = (run?.steps || []).find((step) => step.state === "failed")?.result?.data?.detail;
+  if (typeof failedStep === "string" && failedStep) return failedStep;
+  const events = run?.events || [];
+  const failedCheck = [...events].reverse().find((event) => event.type === "action-check-failed");
+  const probes = failedCheck?.data?.result?.data?.probes;
+  if (Array.isArray(probes)) {
+    const probe = probes.find((item) => item.state !== "passed" && typeof item.detail === "string");
+    if (probe) return `${probe.id || "Verification"}: ${probe.detail}`;
+  }
+  return failedCheck?.message || run?.recoveryReason || run?.state || "";
+}
+
 /** Everything the operator has to do on this page now, in the order it must happen. */
 function deploymentTodoItems() {
   const state = WS.managedDeploy;
@@ -5136,11 +5406,11 @@ function deploymentTodoItems() {
       target: () => button, fallback: () => $("#dep-run-reason"),
     });
   } else if (run && ["failed", "interrupted", "stale-plan"].includes(run.state)) {
-    const failed = (run.steps || []).find((step) => step.state === "failed")?.result?.data?.detail;
+    const failed = deploymentFailureDetail(run);
     const retry = shownDeployControl("#dep-run-retry");
     items.push(retry
-      ? { title: "The build failed: press “Retry preparation”", detail: typeof failed === "string" ? failed : run.recoveryReason || "", target: () => shownDeployControl("#dep-run-retry") }
-      : { kind: "read", title: `Read why the last ${run.kind === "prepare" ? "build" : "deployment"} stopped`, detail: typeof failed === "string" ? failed : run.recoveryReason || run.state,
+      ? { title: "The build failed: press “Retry preparation”", detail: failed, target: () => shownDeployControl("#dep-run-retry") }
+      : { kind: "read", title: `Read why the last ${run.kind === "prepare" ? "build" : "deployment"} stopped`, detail: failed,
         target: () => $("#dep-events .dep-event[data-level='error']"), fallback: () => $("#dep-run-section") });
   }
 
@@ -5164,7 +5434,8 @@ function deploymentTodoItems() {
       const slot = String(blocker.id || "").replace(/^connection:/, "");
       items.push({ title: `Choose a ${slot} connection`, detail: blocker.message, target: () => deploymentConnectionRow(slot)?.querySelector(".dep-connection-select") || deploymentConnectionRow(slot), fallback: () => $("#dep-connections-section") });
     } else if (blocker.code === "source-dirty") {
-      items.push({ title: "Commit the deployment inputs", detail: blocker.message, action: () => switchPane("changes"), actionLabel: "Open Changes" });
+      if (outstanding.some(({ item }) => item.code === "source-dirty")) continue;
+      items.push({ title: "Commit and prepare build", detail: blocker.message, action: () => checkDeploymentReadiness(true), actionLabel: "Commit and prepare build" });
     } else {
       items.push({ title: blocker.title || "Resolve this blocker", detail: blocker.message });
     }
@@ -5193,7 +5464,7 @@ function deploymentTodoItems() {
       items.push({ title: `Review, then press ${named(approve, "Approve")}`, detail: job.message || "", target: () => shownDeployControl("#dep-prep-approve") });
     } else if (grants) {
       items.push({ title: "Grant what preparation asked for: press “Open Capabilities”", detail: job.message || "", target: () => shownDeployControl("#dep-prep-capabilities") });
-    } else if (job.state !== "succeeded" && !job.active && shownDeployControl("#dep-make-ready")?.textContent === "Resume preparation") {
+    } else if (job.state !== "succeeded" && !job.active && shownDeployControl("#dep-make-ready")?.textContent === "Resume preparation" && !outstanding.some(({ item }) => item.code === "source-dirty")) {
       items.push({ title: "Press “Resume preparation”", detail: job.failure || job.message || "", target: () => shownDeployControl("#dep-make-ready") });
     } else if (job.state === "blocked") {
       items.push({ kind: "read", title: $("#dep-prep-title").textContent || "Preparation needs you", detail: job.failure || job.message || "", target: () => $("#dep-prep-failure:not([hidden])") || $("#dep-prep-message") });
@@ -5212,8 +5483,15 @@ function deploymentTodoItems() {
     if (makeReady && automatic.length && !automatic.some(({ row }) => row?.querySelector(".dep-mini-btn"))) {
       items.push({ title: `Press ${named(makeReady, "Make ready to deploy")}`, detail: `psm can do ${automatic.length === 1 ? "this step" : `these ${automatic.length} steps`} itself: ${automatic.map(({ item }) => item.title).join(", ")}.`, target: () => shownDeployControl("#dep-make-ready") });
     }
+    let controllerSetupListed = false;
     for (const entry of outstanding) {
       const { item, row } = entry;
+      if (item.action === "review-controller") {
+        if (!controllerSetupListed) items.push({ title: "Review the release controller setup", detail: "PSM will verify the workflow, target file and release credentials together. No manual file creation is needed.",
+          target: () => deploymentControllerSetupTarget(item.slot || "github") });
+        controllerSetupListed = true;
+        continue;
+      }
       // Live already runs the committed source: an unchanged version is the expected state, not a step.
       if (upToDate && item.code === "version-not-increased") continue;
       if (item.automatic && makeReady && !row?.querySelector(".dep-mini-btn")) continue;
@@ -5231,6 +5509,7 @@ function deploymentTodoItems() {
   // Deploying is the last step: it is not offered while anything above it is still open.
   if (items.some((item) => item.kind !== "read")) return items;
   const plan = state.plan;
+  if (plan?.operation !== "rollback" && deploymentReleaseComplete()) return items;
   const held = run?.state === "recovery-required";
   if (readiness?.ready && !expired && !held && !busy && !plan) {
     items.push({ title: "Press “Review plan”", detail: "Everything is ready. psm will show the exact changes before anything happens.", target: () => $("#dep-approve") });
@@ -5257,7 +5536,7 @@ function scheduleDeploymentTodo() {
     const live = environment?.activeRelease;
     renderTodoList($("#dep-todo-list"), $("#dep-todo-count"), deploymentTodoItems(),
       running ? "Nothing needs you right now. The deployment is running."
-        : deploymentUpToDate(environment) ? `Nothing needs you right now. ${environment.hostname || environment.id} runs ${live.version || "the active release"} (${String(live.commit).slice(0, 10)}), the latest committed source.`
+        : deploymentReleaseComplete(environment) ? `Nothing needs you right now. ${environment.hostname || environment.id} runs ${live.version || "the active release"} (${String(live.commit).slice(0, 10)}), the latest committed source.`
         : WS.managedDeploy.loading ? "Checking what this environment needs…"
         : "Nothing needs you right now.");
   });
@@ -5384,12 +5663,92 @@ function renderManagedSummary(environment) {
   const source = environment.source || {};
   const active = environment.activeRelease || null;
   const watch = environment.watch || {};
+  const changedSource = source.inputsDirty === true || source.committed === false;
+  if (changedSource) {
+    // Older local agents do not send proposedVersion yet. Show the same patch
+    // floor without changing the real package version or the committed source.
+    const parse = (value) => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(value || ""))?.slice(1).map(BigInt);
+    const committed = parse(source.version);
+    const floor = committed && [committed[0], committed[1], committed[2] + 1n];
+    const candidate = parse(source.workingTreeVersion);
+    let workingAhead = false;
+    if (candidate && floor) {
+      for (let index = 0; index < 3; index++) {
+        if (candidate[index] === floor[index]) continue;
+        workingAhead = candidate[index] > floor[index];
+        break;
+      }
+    }
+    const proposed = source.proposedVersion || (workingAhead ? source.workingTreeVersion : floor?.join("."));
+    const working = source.workingTreeVersion ? `Working package ${source.workingTreeVersion} · ` : "";
+    summary.append(depCard("Proposed next version", proposed || "Version unavailable", `${working}provisional · preparation selects patch, minor or major from the changes`, true));
+  }
+  const committedCard = depCard(source.committed === false ? "Source preview" : "Committed source", source.version || "Version unavailable", [source.branch, source.commit?.slice?.(0, 10)].filter(Boolean).join(" · "), !changedSource);
+  const activeUnverified = active?.verified === false;
+  const activeCard = depCard(activeUnverified ? "Selected on target · unverified" : "Active release", active?.version || "No PSM release yet", activeUnverified
+    ? `${active.commit?.slice(0, 10) || "Unknown commit"} · Public release verification failed`
+    : active?.commit ? active.commit.slice(0, 10) : "No verified managed deployment");
+  if (activeUnverified) activeCard.title = "The target reported this release active, but PSM has no successful verification receipt. Review the failed run and verify with a fresh plan after fixing the target.";
+  if (!active) activeCard.title = "The site may already be reachable, but PSM has no verified release receipt for this target.";
+  const watchCard = depCard("Public reachability", watch.effectiveState || "not-monitored", watch.observedAt ? `Observed ${relTime(watch.observedAt)}${!active || activeUnverified ? " · Release unverified" : watch.evidence?.failureDomain === "same-host" ? " · Same server" : ""}` : "No fresh observation");
+  if (!active || activeUnverified) watchCard.title = "An HTTP response shows the site is reachable; it does not prove which version is running.";
+  const monitoringLink = depText("button", "mon-link", "View monitoring →");
+  monitoringLink.type = "button";
+  monitoringLink.onclick = () => { WS.managedDeploy.monitoringEnvironment = environment.id; switchPane("monitoring"); };
+  watchCard.children[1].append(document.createTextNode(" · "), monitoringLink);
   summary.append(
-    depCard("Source", source.version || "No artifact", [source.branch, source.commit?.slice?.(0, 10)].filter(Boolean).join(" · "), true),
-    depCard("Active release", active?.version || "Not observed", active?.commit ? active.commit.slice(0, 10) : "No managed receipt"),
-    depCard("Public Watch", watch.effectiveState || "not-monitored", watch.observedAt ? `Observed ${relTime(watch.observedAt)}` : "No fresh observation"),
+    committedCard,
+    activeCard,
+    watchCard,
     depCard("Target", environment.target?.targetId || "Not resolved", environment.target?.hostname || environment.hostname || ""),
   );
+}
+
+function renderWatchMonitoring(environment) {
+  const section = $("#dep-watch-section");
+  if (!section) return;
+  const declared = (environment.connections || []).some((c) => c.kind === "external-monitor@1");
+  section.hidden = !declared;
+  if (!declared) return;
+  const watch = environment.watch || {};
+  const evidence = watch.evidence || {};
+  $("#dep-watch-refresh").disabled = !!WS.managedDeploy.watchLoading;
+  $("#dep-watch-status").textContent = [watch.effectiveState || "unknown", watch.detail,
+    watch.observedAt ? `Observed ${relTime(watch.observedAt)}` : "No observation",
+    evidence.durationMs != null ? `${evidence.durationMs} ms` : "",
+    evidence.tlsExpiresAt ? `TLS expires ${new Date(evidence.tlsExpiresAt).toLocaleDateString()}` : "",
+    evidence.failureDomain === "same-host" ? "Monitor runs on the app server; independent host coverage is not configured." : "",
+  ].filter(Boolean).join(" · ");
+  depRows($("#dep-watch-incidents"), (evidence.incidents || []).map((incident) => ({
+    state: incident.resolved ? "ready" : "blocked", title: incident.resolved ? "Recovered incident" : "Open incident",
+    detail: `${new Date(incident.opened).toLocaleString()} · ${incident.detail}${incident.resolved ? ` · Recovered ${new Date(incident.resolved).toLocaleString()}` : ""}`,
+  })), "No recorded incidents.");
+}
+
+async function refreshDeploymentWatch() {
+  const environment = deploymentEnvironment();
+  const scope = deploymentRequestScope();
+  if (!environment || scope.state.watchLoading || !(environment.connections || []).some((c) => c.kind === "external-monitor@1")) return;
+  const environmentId = environment.id;
+  scope.state.watchLoading = true;
+  renderWatchMonitoring(environment);
+  try {
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(environmentId)}/watch`);
+    if (!response.ok) throw Error("Monitoring refresh failed");
+    const result = await response.json();
+    if (!deploymentRequestIsCurrent(scope) || scope.state.environment !== environmentId) return;
+    environment.watch = result.environment.watch;
+    if (environment.watch?.effectiveState !== "healthy") invalidateDeploymentReadiness(scope.state);
+    renderManagedSummary(environment);
+  } catch {
+    if (deploymentRequestIsCurrent(scope) && scope.state.environment === environmentId) {
+      environment.watch = {...environment.watch, effectiveState: "unknown", detail: "Monitoring refresh is unavailable"};
+      renderManagedSummary(environment);
+    }
+  } finally {
+    scope.state.watchLoading = false;
+    if (deploymentRequestIsCurrent(scope)) renderWatchMonitoring(deploymentEnvironment());
+  }
 }
 
 function renderManagedConnections(environment) {
@@ -5525,7 +5884,7 @@ function renderDeploymentPlan(plan) {
   WS.managedDeploy.plan = plan || null;
   WS.managedDeploy.planEnvironment = plan ? WS.managedDeploy.environment : null;
   const section = $("#dep-plan-section");
-  section.hidden = !plan;
+  section.hidden = !plan || (plan.operation !== "rollback" && deploymentReleaseComplete());
   if (!plan) { $("#dep-confirm").disabled = true; return; }
   $("#dep-plan-digest").textContent = plan.digest ? plan.digest.slice(0, 22) + "…" : "preview";
   $("#dep-plan-meta").textContent = plan.expiresAt
@@ -5656,7 +6015,7 @@ function renderDeploymentRun(run) {
     line.append(
       eventTimeNode(event.at, "dep-event-time"),
       depText("span", "dep-event-phase", event.phase || "run"),
-      depText("span", "dep-event-message", event.message || event.type || "event"),
+      depText("span", "dep-event-message", event.type === "action-check-failed" ? `${event.message || "Verification failed"} · ${deploymentFailureDetail({ events: [event] })}` : event.message || event.type || "event"),
     );
     lines.push({ at: event.at, line });
   }
@@ -5863,12 +6222,13 @@ function renderManagedDeploy() {
   }
   renderDeploymentArtifacts(environment);
   renderManagedSummary(environment);
+  renderWatchMonitoring(environment);
   renderManagedConnections(environment);
   renderServiceSecrets(environment);
   renderManagedReleases(environment);
   renderDeploymentPlan(WS.managedDeploy.plan);
   renderDeploymentRun(WS.managedDeploy.run || environment.latestRun || null);
-  $("#dep-prepare").disabled = WS.managedDeploy.loading || !environment.canPrepare;
+  $("#dep-prepare").disabled = WS.managedDeploy.loading || !!WS.managedDeploy.preparation?.active || (!environment.canPrepare && !environment.source?.inputsDirty);
   renderDeploymentPreparation();
   renderDeploymentReadiness();
 }
@@ -5879,11 +6239,12 @@ async function loadManagedDeploy({ quiet = false } = {}) {
   const state = scope.state;
   const hadData = !!state.data;
   if (!quiet) state.loading = true;
+  $("#ws-deploy-load-error").hidden = true;
   try {
     const projectBase = deploymentBase(scope.projectKey);
     const [response, artifactsResponse] = await Promise.all([
       agentApi(projectBase),
-      agentApi(`${projectBase.slice(0, -"/deployments".length)}/deployment-artifacts`),
+      agentApi(`${projectBase.slice(0, -"/deployments".length)}/deployment-artifacts`).catch(() => null),
     ]);
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
@@ -5891,7 +6252,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
     }
     const data = await response.json();
     if (!data.managed) throw new Error("no managed manifest");
-    const artifactBody = artifactsResponse.ok ? await artifactsResponse.json().catch(() => ({})) : {};
+    const artifactBody = artifactsResponse?.ok ? await artifactsResponse.json().catch(() => ({})) : {};
     if (!deploymentRequestIsCurrent(scope)) return;
     const previousEnvironment = state.environment;
     const previousSource = deploymentEnvironment()?.source;
@@ -5921,6 +6282,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
       state.run = environment.latestRun;
     }
     state.loading = false;
+    state.deployLoadRetries = 0;
     if (WS.depEs) {
       WS.depEs.close();
       WS.depEs = null;
@@ -5928,6 +6290,7 @@ async function loadManagedDeploy({ quiet = false } = {}) {
     // Show the last answer instead of checking every provider again on each visit.
     if (!state.readiness || state.readinessEnvironment !== state.environment) await restoreDeploymentReadiness(scope);
     renderManagedDeploy();
+    void refreshDeploymentWatch();
     loadDeploymentConnectionSetup();
     scheduleDeploymentPreparationPoll(0);
     const run = state.run;
@@ -5935,14 +6298,31 @@ async function loadManagedDeploy({ quiet = false } = {}) {
   } catch (error) {
     if (!deploymentRequestIsCurrent(scope)) return;
     state.loading = false;
-    $("#ws-deploy-managed").hidden = true;
     // No manifest yet, or no PSM id yet: offer the managed setup first.
     const settingUp = error?.code === "manifest-missing" || error?.code === "project-not-found";
-    $("#ws-deploy-setup").hidden = !settingUp;
-    if (settingUp) void renderDeploymentSetup(scope);
-    $("#ws-deploy-legacy").hidden = false;
-    renderDeployControls();
-    connectDeployLogs();
+    if (settingUp) {
+      $("#ws-deploy-managed").hidden = true;
+      $("#ws-deploy-setup").hidden = false;
+      $("#ws-deploy-legacy").hidden = false;
+      void renderDeploymentSetup(scope);
+      renderDeployControls();
+      connectDeployLogs();
+      return;
+    }
+    $("#ws-deploy-setup").hidden = true;
+    $("#ws-deploy-legacy").hidden = true;
+    if (hadData) {
+      try { renderManagedDeploy(); }
+      catch { $("#ws-deploy-managed").hidden = true; }
+    } else $("#ws-deploy-managed").hidden = true;
+    $("#dep-load-error-message").textContent = `Could not load managed deployment: ${error?.message || "request failed"}.`;
+    $("#ws-deploy-load-error").hidden = false;
+    if (!hadData && !state.deployLoadRetries) {
+      state.deployLoadRetries = 1;
+      setTimeout(() => {
+        if (deploymentRequestIsCurrent(scope) && WS.pane === "deploy") void loadManagedDeploy({ quiet: true });
+      }, 3000);
+    }
   }
 }
 
@@ -6109,17 +6489,71 @@ function scheduleDeploymentPoll() {
     if (run && !DEPLOYMENT_TERMINAL_STATES.has(run.state)) scheduleDeploymentPoll();
     else {
       const prepared = state.preparationRunId === run?.id;
+      const completedRunId = run?.id;
+      const completedSuccessfully = run?.state === "succeeded";
       state.preparationRunId = null;
       await loadManagedDeploy({ quiet: true });
       if (prepared && deploymentRequestIsCurrent({ ...scope, runId: state.run?.id })) await checkDeploymentReadiness();
+      if (prepared && completedSuccessfully && deploymentRequestIsCurrent(scope) && WS.pane === "deploy") {
+        requestAnimationFrame(() => {
+          if (state.run?.id !== completedRunId || !deploymentRequestIsCurrent(scope)) return;
+          focusDeploymentDecision();
+        });
+      }
     }
   }, 1500);
+}
+
+async function loadMonitoringPane() {
+  if (WS.kind !== "project") return;
+  const scope = deploymentRequestScope();
+  const state = scope.state;
+  if (state.monitoringLoading) return;
+  state.monitoringLoading = true;
+  $("#mon-refresh").disabled = true;
+  $("#mon-environment").disabled = true;
+  if (!state.monitoringOpened) { $("#mon-dashboard").replaceChildren(); state.monitoringOpened = true; }
+  $("#mon-message").textContent = "Refreshing monitoring…";
+  try {
+    if (!state.data) {
+      const response = await agentApi(deploymentBase(scope.projectKey));
+      if (!response.ok) throw Error("This project has no managed monitoring configuration.");
+      const data = await response.json();
+      if (!deploymentRequestIsCurrent(scope)) return;
+      state.data = data;
+    }
+    const environments = state.data.environments || [];
+    if (!environments.some(e => e.id === state.monitoringEnvironment)) state.monitoringEnvironment = state.environment || environments.find(e => e.id === "staging")?.id || environments[0]?.id;
+    const select = $("#mon-environment");
+    select.replaceChildren(...environments.map(e => { const option = document.createElement("option"); option.value = e.id; option.textContent = e.id; return option; }));
+    select.value = state.monitoringEnvironment;
+    const id = state.monitoringEnvironment;
+    const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(id)}/watch`);
+    if (!response.ok) throw Error("Monitoring is unavailable. Check the monitoring connection in Deploy.");
+    const result = await response.json();
+    if (!deploymentRequestIsCurrent(scope) || state.monitoringEnvironment !== id) return;
+    const environment = environments.find(e => e.id === id);
+    environment.watch = result.environment.watch;
+    window.PsmMonitoring.render($("#mon-dashboard"), environment, Number($("#mon-period").value));
+    $("#mon-message").textContent = `${environment.hostname || scope.projectKey} · ${environment.watch.detail || "Configure a monitor in Deploy to start collecting data."}`;
+  } catch (error) {
+    if (deploymentRequestIsCurrent(scope)) {
+      $("#mon-message").textContent = error.message;
+      $("#mon-dashboard").replaceChildren();
+    }
+  } finally {
+    state.monitoringLoading = false;
+    if (deploymentRequestIsCurrent(scope)) { $("#mon-refresh").disabled = false; $("#mon-environment").disabled = false; }
+  }
 }
 
 function openDeployPane() {
   $("#ws-deploy-managed").hidden = true;
   $("#ws-deploy-setup").hidden = true;
   $("#ws-deploy-legacy").hidden = true;
+  $("#ws-deploy-load-error").hidden = true;
+  $("#ws-room-deploy").hidden = WS.kind !== "work";
+  if (WS.kind === "work") return renderRoomDeploy();
   loadManagedDeploy();
 }
 
@@ -6175,35 +6609,10 @@ function selectDeployTarget(target) {
 }
 
 async function prepareDeploymentArtifact() {
-  const environment = deploymentEnvironment();
-  if (!environment) return;
-  const scope = deploymentRequestScope({ environment: true, artifact: true });
-  const state = scope.state;
-  invalidateDeploymentReadiness(state);
-  state.loading = true;
-  state.error = null;
-  renderManagedDeploy();
-  try {
-    const response = await agentApi(`/api/projects/${encodeURIComponent(scope.projectKey)}/deployment-artifacts/prepare`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ environment: environment.id, unitId: environment.units?.[0]?.id }),
-    });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body.error || "Artifact preparation could not start");
-    if (!deploymentRequestIsCurrent(scope)) return;
-    state.run = body.run;
-    state.preparationRunId = body.run?.id;
-    renderDeploymentRun(body.run);
-    scheduleDeploymentPoll();
-  } catch (error) {
-    if (deploymentRequestIsCurrent(scope)) state.error = error.message || "Artifact preparation failed";
-  } finally {
-    if (deploymentRequestIsCurrent(scope)) {
-      state.loading = false;
-      renderManagedDeploy();
-    }
-  }
+  // Every build entry point uses the coordinator: commit source if needed,
+  // review publication, and only then build the immutable committed revision.
+  if (!deploymentEnvironment()) return;
+  await checkDeploymentReadiness(true);
 }
 
 async function restoreDeploymentReadiness(scope) {
@@ -6284,7 +6693,8 @@ async function checkDeploymentReadiness(makeReady = false) {
     if (deploymentRequestIsCurrent(scope)) {
       state.loading = false;
       renderManagedDeploy();
-      loadDeploymentConnectionSetup();
+      void refreshDeploymentWatch();
+    loadDeploymentConnectionSetup();
     }
   }
 }
@@ -6342,6 +6752,34 @@ function preparationStep(job) {
   return job ? `${job.state}:${job.phase}` : "";
 }
 
+function focusDeploymentDecision() {
+  const confirm = shownDeployControl("#dep-confirm");
+  return showMe(confirm && !confirm.disabled ? confirm
+    : shownDeployControl("#dep-plan-section") || shownDeployControl("#dep-approve"));
+}
+
+/** Follow a preparation handoff once, after its review or question has rendered. */
+function focusPreparationNextStep(scope, job, moved) {
+  if (!job || !deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
+  const state = scope.state;
+  let selector = null;
+  if (job.state === "awaiting-approval") {
+    if ((job.phase === "publish" && state.preparationPublication) || state.preparationPlan) selector = "#dep-preparation";
+  } else if (job.state === "waiting-input") selector = "#dep-prep-open";
+  else if (job.state === "blocked" && moved) selector = "#dep-preparation";
+  else if (job.state === "succeeded" && moved) selector = "decision";
+  if (!selector) return;
+  const reviewId = state.preparationPublication?.id || state.preparationPlan?.id || "";
+  const key = `${job.id}:${job.state}:${job.phase}:${reviewId}`;
+  if (state.preparationFocusedStep === key) return;
+  requestAnimationFrame(() => {
+    if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy"
+      || state.preparation?.id !== job.id || preparationStep(state.preparation) !== preparationStep(job)) return;
+    const focused = selector === "decision" ? focusDeploymentDecision() : showMe(shownDeployControl(selector));
+    if (focused) state.preparationFocusedStep = key;
+  });
+}
+
 function scheduleDeploymentPreparationPoll(delay = 2000) {
   const state = WS.managedDeploy;
   clearPreparationPoll(state);
@@ -6367,11 +6805,23 @@ async function pollDeploymentPreparation(scope) {
   }
   if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
   const job = body.preparation || null;
+  let activity = null;
+  if (job?.active && job.phase === "repair" && job.workroomId) {
+    try {
+      const response = await agentApi(`/api/work-sessions/${encodeURIComponent(job.workroomId)}/ai/state`);
+      if (response.ok) {
+        const ai = await response.json();
+        activity = { jobId: job.id, text: ai.activity, updatedAt: ai.lastActive, busy: ai.busy || ai.queueDepth > 0 };
+      }
+    } catch { /* The preparation status remains useful without live AI activity. */ }
+  }
+  if (!deploymentRequestIsCurrent(scope) || WS.pane !== "deploy") return;
   // Only a step that changes while the page watches it calls for a new check;
   // the first answer after opening the page is where it already was.
   const moved = state.preparationObserved && preparationStep(job) !== state.preparationSignature;
   state.preparationObserved = true;
   state.preparation = job;
+  state.preparationActivity = activity;
   state.preparationPlan = body.plan || null;
   state.preparationPublication = body.publication || null;
   state.preparationSignature = preparationStep(job);
@@ -6383,6 +6833,7 @@ async function pollDeploymentPreparation(scope) {
   if (job?.active) scheduleDeploymentPreparationPoll();
   else if (job?.state === "blocked" && (job.blockedBy === "capabilities" || job.blockedBy === "checkout")) scheduleDeploymentPreparationPoll(3000);
   if (moved) await checkDeploymentReadiness();
+  focusPreparationNextStep(scope, job, moved);
 }
 
 async function stopDeploymentPreparation() {
@@ -6425,8 +6876,11 @@ async function approvePreparationInfrastructure() {
     const body = await submitPlanApproval(plan, (plan.acknowledgements || []).map((item) => item.id));
     if (!deploymentRequestIsCurrent(scope)) return;
     renderDeploymentRun(body.run);
+    state.preparationRunId = body.run?.id || null;
     scheduleDeploymentPoll();
     scheduleDeploymentPreparationPoll(500);
+    toast("Infrastructure plan approved. Following the deployment run now.");
+    requestAnimationFrame(() => { if (deploymentRequestIsCurrent(scope)) showMe($("#dep-run-section")); });
   } catch (error) {
     if (deploymentRequestIsCurrent(scope)) {
       state.error = error.message || "The infrastructure plan could not be approved";
@@ -6437,19 +6891,47 @@ async function approvePreparationInfrastructure() {
   }
 }
 
+function deploymentApprovalNeedsSignIn(policy) {
+  if (AUTH.localApprovalWithoutSignIn === true) return false;
+  return ["authenticated-local-operator", "authenticated-operator"].includes(policy?.approval);
+}
+
+async function ensureDeploymentApprovalSession(policy, purpose) {
+  if (!deploymentApprovalNeedsSignIn(policy)) return true;
+  if (!AUTH.user) await loadSession();
+  if (AUTH.user || !deploymentApprovalNeedsSignIn(policy)) return true;
+  openAuth(`Sign in with your Werewolf account to ${purpose}. Your review stays pending; return here afterward to approve it.`);
+  return false;
+}
+
+function deploymentApprovalError(message, purpose) {
+  if (!/approval requires an authenticated operator/.test(message || "")) return new Error(message);
+  AUTH.user = null;
+  renderAccount();
+  openAuth(`Sign in with your Werewolf account to ${purpose}. Your review stays pending.`);
+  return new Error("Sign in with your Werewolf account, then approve the pending review.");
+}
+
 async function approvePreparationPublication() {
   const scope = deploymentRequestScope({ environment: true });
   const publication = scope.state.preparationPublication;
-  if (!publication || !window.confirm(`Publish ${publication.commit} to ${publication.repository}:${publication.branch}?\n\nThis may trigger GitHub workflows.`)) return;
+  if (!publication) return;
+  if (!await ensureDeploymentApprovalSession(publication.policy, "approve source publication") || !deploymentRequestIsCurrent(scope)) return;
+  if (!await confirmInApp({
+    title: "Approve source publication",
+    message: "Publish this exact source commit to GitHub? This may trigger workflows. Preparation continues after PSM verifies publication.",
+    facts: [["Repository", publication.repository], ["Branch", publication.branch], ["Commit", publication.commit]],
+    accept: "Publish source",
+  }) || !deploymentRequestIsCurrent(scope)) return;
   $("#dep-prep-approve").disabled = true;
   try {
     const base = `/api/source-publications/${encodeURIComponent(publication.id)}`;
     const intentResponse = await agentApi(`${base}/approval-intents`, { method: "POST" });
     const intent = await intentResponse.json();
-    if (!intentResponse.ok) throw new Error(intent.error || "Publication review failed");
+    if (!intentResponse.ok) throw deploymentApprovalError(intent.error || "Publication review failed", "approve source publication");
     const response = await agentApi(`${base}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: publication.digest, intent: intent.intent }) });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error || "Publication failed");
+    if (!response.ok) throw deploymentApprovalError(body.error || "Publication failed", "approve source publication");
   } catch (error) { if (deploymentRequestIsCurrent(scope)) scope.state.error = error.message; }
   finally { if (deploymentRequestIsCurrent(scope)) { scheduleDeploymentPreparationPoll(100); renderManagedDeploy(); } }
 }
@@ -6467,6 +6949,18 @@ function deploymentUpToDate(environment = deploymentEnvironment()) {
   const commit = source.commit || "";
   return active.length >= 7 && commit.length >= 7 && (active.startsWith(commit) || commit.startsWith(active))
     && source.committed !== false && !source.inputsDirty;
+}
+
+/** Suppress repeat release prompts without hiding rollback or verification recovery. */
+function deploymentReleaseComplete(environment = deploymentEnvironment()) {
+  if (!deploymentUpToDate(environment)) return false;
+  const state = WS.managedDeploy;
+  const active = environment.activeRelease;
+  if (state.artifactId && active.psmArtifactId !== state.artifactId) return false;
+  const releases = [state.run, environment.latestRun]
+    .filter((run) => run && ["deploy", "release"].includes(run.operation))
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  return active.verified !== false && (!releases.length || releases[0].state === "succeeded");
 }
 
 function preparationSuperseded(state) {
@@ -6489,7 +6983,7 @@ function renderDeploymentPreparation() {
   const state = WS.managedDeploy;
   const job = preparationSuperseded(state) ? null : state.preparation;
   const section = $("#dep-preparation");
-  section.hidden = !job;
+  section.hidden = !job || (job.state === "succeeded" && deploymentReleaseComplete());
   if (!job) return;
   section.dataset.state = job.state;
   renderActivityTimes($("#dep-prep-times"), [["Started", job.createdAt], ["Updated", job.updatedAt]]);
@@ -6511,6 +7005,13 @@ function renderDeploymentPreparation() {
     : waitingForCheckout
       ? `${job.message || ""} Preparation resumes on its own once it is fixed.`
       : job.message || "";
+  const activity = state.preparationActivity;
+  const activityLine = $("#dep-prep-activity");
+  activityLine.hidden = !(job.active && job.phase === "repair" && activity?.jobId === job.id && activity.busy && activity.text);
+  if (!activityLine.hidden) {
+    const updated = activity.updatedAt ? new Date(activity.updatedAt).toLocaleTimeString() : null;
+    activityLine.textContent = `${activity.text}${updated ? ` · Last activity ${updated}` : ""}`;
+  }
   $("#dep-prep-capabilities").hidden = !waitingForGrants;
   $("#dep-prep-failure").hidden = !job.failure;
   $("#dep-prep-failure").textContent = job.failure || "";
@@ -6549,10 +7050,13 @@ function renderDeploymentPreparation() {
     card.append(depText("div", "dep-publication-label", "Files changed"));
     card.append(depText("pre", "dep-publication-changes", publication.changes));
     card.append(depText("p", "dep-publication-note", "Publishes these commits and may trigger GitHub workflows. The deployment build continues after publication is verified."));
+    if (deploymentApprovalNeedsSignIn(publication.policy) && !AUTH.user)
+      card.append(depText("p", "dep-publication-note", "Sign in with your Werewolf account to approve this publication. The review stays pending until you approve it."));
     panel.append(card);
     $("#dep-prep-approve").hidden = false;
     $("#dep-prep-approve").disabled = publication.state !== "pending" || publication.expiresAt <= Date.now();
-    $("#dep-prep-approve").textContent = "Approve source publication";
+    $("#dep-prep-approve").textContent = deploymentApprovalNeedsSignIn(publication.policy) && !AUTH.user
+      ? "Sign in to approve source publication" : "Approve source publication";
   }
   $("#dep-prep-open").hidden = !job.workroomId;
   // Waiting on grants or the checkout is armed, not idle: fixing either restarts it, so it can be stopped.
@@ -6599,9 +7103,11 @@ async function discoverDeploymentPlan(operation = "deploy", releaseId = null) {
  * rather than each assembling the pair themselves.
  */
 async function submitPlanApproval(plan, acknowledgementIds) {
+  if (!await ensureDeploymentApprovalSession(plan.policy, "approve this deployment"))
+    throw new Error("Sign in with your Werewolf account, then approve the pending review.");
   const intentResponse = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approval-intents`, { method: "POST" });
   const intentBody = await intentResponse.json().catch(() => ({}));
-  if (!intentResponse.ok) throw new Error(intentBody.error || "Could not create an approval intent");
+  if (!intentResponse.ok) throw deploymentApprovalError(intentBody.error || "Could not create an approval intent", "approve this deployment");
   const response = await agentApi(`/api/deployment-plans/${encodeURIComponent(plan.id)}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -6613,7 +7119,7 @@ async function submitPlanApproval(plan, acknowledgementIds) {
     }),
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || "The plan could not be approved");
+  if (!response.ok) throw deploymentApprovalError(body.error || "The plan could not be approved", "approve this deployment");
   return body;
 }
 
@@ -6723,6 +7229,7 @@ async function wsRun() {
   if (!WS.name) return;
   const command = $("#ws-cmd").value.trim();
   if (!command) return toast("Set a run command first");
+  if (WS.logKind !== "run") connectLogs(WS.name);
   setWsStatus("running");
   const r = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/run`, {
     method: "POST",
@@ -6749,6 +7256,128 @@ async function wsStop() {
   pollProcs();
 }
 
+function customKind(entry) { return `custom:${entry.id}`; }
+
+function customButton(label, action, disabled = false) {
+  const button = el("button", "btn btn-small");
+  button.type = "button";
+  button.textContent = label;
+  button.disabled = disabled;
+  button.onclick = action;
+  return button;
+}
+
+function renderCustomCommands() {
+  const list = $("#ws-custom-list");
+  list.replaceChildren();
+  const project = projectByName(WS.name);
+  for (const entry of project?.customCommands || []) {
+    const row = el("div", "ws-custom-row");
+    const name = el("span", "ws-custom-name");
+    name.textContent = entry.name;
+    const detail = el("span", "ws-custom-detail");
+    detail.textContent = `${entry.directory} · ${entry.command}`;
+    const status = STATE.procs[`${WS.name}::${customKind(entry)}`]?.status || "idle";
+    const badge = el("span", "ws-status");
+    badge.dataset.state = status;
+    badge.textContent = status;
+    const actions = el("span", "ws-custom-actions");
+    actions.append(
+      customButton("▶ Run", () => runCustomCommand(entry), status === "running"),
+      customButton("■ Stop", () => stopCustomCommand(entry), status !== "running"),
+      customButton("Logs", () => { connectLogs(WS.name, customKind(entry)); switchPane("logs"); }),
+      customButton("Edit", () => openCustomCommandForm(entry), status === "running"),
+      customButton("Remove", () => removeCustomCommand(entry), status === "running"),
+    );
+    row.append(name, detail, badge, actions);
+    list.append(row);
+  }
+}
+
+function openCustomCommandForm(entry = null) {
+  const form = $("#ws-custom-form");
+  const picker = $("#ws-custom-directory");
+  picker.replaceChildren();
+  for (const project of STATE.projects) {
+    const option = document.createElement("option");
+    option.value = project.name;
+    option.textContent = `${project.name} · ${project.path}`;
+    picker.append(option);
+  }
+  form.dataset.editId = entry?.id || "";
+  $("#ws-custom-name").value = entry?.name || "";
+  picker.value = entry?.directory || WS.name;
+  $("#ws-custom-command").value = entry?.command || "";
+  form.hidden = false;
+  $("#ws-custom-name").focus();
+}
+
+async function saveCustomCommands(commands) {
+  const name = WS.name;
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(name)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ customCommands: commands }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || "Could not save custom commands");
+    const project = projectByName(name);
+    if (project) project.customCommands = commands;
+    renderCustomCommands();
+    return true;
+  } catch (error) {
+    toast(error.message || "Could not save custom commands");
+    return false;
+  }
+}
+
+async function runCustomCommand(entry) {
+  const name = WS.name;
+  const kind = customKind(entry);
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(name)}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      return toast(body.error || "Command could not start");
+    }
+    if (WS.name === name) {
+      connectLogs(name, kind);
+      switchPane("logs");
+    }
+    pollProcs();
+  } catch (error) {
+    toast(error.message || "Command could not start");
+  }
+}
+
+async function stopCustomCommand(entry) {
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(WS.name)}/stop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: customKind(entry) }),
+    });
+    if (!response.ok) return toast("Command could not stop");
+    pollProcs();
+    setTimeout(pollProcs, 500);
+    setTimeout(pollProcs, 4500);
+  } catch (error) {
+    toast(error.message || "Command could not stop");
+  }
+}
+
+async function removeCustomCommand(entry) {
+  const project = projectByName(WS.name);
+  if (await saveCustomCommands((project?.customCommands || []).filter((saved) => saved.id !== entry.id))) {
+    if (WS.logKind === customKind(entry)) connectLogs(WS.name);
+  }
+}
+
 async function pollProcs() {
   try {
     const r = await agentApi("/api/procs");
@@ -6761,6 +7390,7 @@ async function pollProcs() {
     c.classList.toggle("is-running", isRunning(c.dataset.name));
   }
   renderWorkingButton();
+  if (WS.name && !WS.chatOnly) renderCustomCommands();
 }
 
 $("#ws-working").onclick = toggleWorking;
@@ -6768,8 +7398,26 @@ $("#ws-close").onclick = () => closeWorkspace();
 $("#ws-backdrop").onclick = () => closeWorkspace();
 $("#ws-run").onclick = wsRun;
 $("#ws-stop").onclick = wsStop;
+$("#ws-custom-add").onclick = () => openCustomCommandForm();
+$("#ws-custom-cancel").onclick = () => { $("#ws-custom-form").hidden = true; };
+$("#ws-custom-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const project = projectByName(WS.name);
+  if (!project) return;
+  const id = $("#ws-custom-form").dataset.editId || crypto.randomUUID();
+  const entry = {
+    id,
+    name: $("#ws-custom-name").value.trim(),
+    directory: $("#ws-custom-directory").value,
+    command: $("#ws-custom-command").value.trim(),
+  };
+  const commands = (project.customCommands || []).some((saved) => saved.id === id)
+    ? project.customCommands.map((saved) => saved.id === id ? entry : saved)
+    : [...(project.customCommands || []), entry];
+  if (await saveCustomCommands(commands)) $("#ws-custom-form").hidden = true;
+};
 $("#ws-clear").onclick = () => clearConsole();
-$("#ws-download").onclick = () => downloadLog();
+$("#ws-download").onclick = () => downloadLog(WS.logKind || "run");
 $("#ws-tabs").onclick = (e) => {
   const t = e.target.closest(".ws-tab");
   if (t) switchPane(t.dataset.pane);
@@ -6832,7 +7480,6 @@ for (const set of AI_CONTROLS) {
   $(set.model).onfocus = refreshAiModels;
   $(set.effort).onfocus = refreshAiModels;
   $(set.effort).onchange = (e) => applyEffort(e.target.value);
-  $(set.full).onchange = (e) => applyFullAccess(e.target.checked);
 }
 $("#web-usage").onclick = openUsage;
 $("#ws-send").onclick = sendAi;
@@ -6926,8 +7573,24 @@ $("#dep-releases").onclick = (e) => {
   const button = e.target.closest("[data-rollback-release]");
   if (button) discoverDeploymentPlan("rollback", button.dataset.rollbackRelease);
 };
+$("#dep-watch-refresh").addEventListener("click", () => void refreshDeploymentWatch());
+setInterval(() => { if (WS.pane === "deploy" && WS.kind === "project") void refreshDeploymentWatch(); }, 60000);
+
+$("#mon-refresh").onclick = () => void loadMonitoringPane();
+$("#mon-period").onchange = () => { const e = WS.managedDeploy.data?.environments?.find(e => e.id === WS.managedDeploy.monitoringEnvironment); if(e) window.PsmMonitoring.render($("#mon-dashboard"),e,Number($("#mon-period").value)); };
+$("#mon-environment").onchange = () => { WS.managedDeploy.monitoringEnvironment = $("#mon-environment").value; void loadMonitoringPane(); };
+setInterval(() => { if (WS.pane === "monitoring" && WS.kind === "project") void loadMonitoringPane(); }, 60000);
 $("#dep-prepare").onclick = prepareDeploymentArtifact;
-$("#dep-discover").onclick = async () => { await discoverDeploymentPlan(); focusDeploymentPlan(); };
+const deploymentControlsSizer = typeof ResizeObserver === "function"
+  ? new ResizeObserver(([entry]) => {
+    $("#ws-deploy-managed").style.setProperty("--dep-controls-height", `${entry.target.getBoundingClientRect().height + 12}px`);
+  }) : null;
+deploymentControlsSizer?.observe(document.querySelector(".dep-controls"));
+$("#dep-discover").onclick = async () => {
+  await checkDeploymentReadiness();
+  const section = $(WS.managedDeploy.readiness?.ready ? "#dep-plan-section" : "#dep-readiness");
+  if (section && !section.hidden) section.scrollIntoView({ behavior: "smooth", block: "start" });
+};
 $("#dep-make-ready").onclick = () => checkDeploymentReadiness(true);
 $("#dep-artifact").onchange = (event) => {
   WS.managedDeploy.artifactId = event.target.value || null;
@@ -6960,6 +7623,7 @@ $("#dep-prep-open").onclick = () => {
   const roomId = WS.managedDeploy.preparation?.workroomId;
   if (roomId) openWorkroom(roomId, false, "ai");
 };
+$("#dep-load-retry").onclick = () => { void loadManagedDeploy(); };
 $("#dep-approve").onclick = reviewDeploymentPlan;
 $("#dep-confirm").onclick = approveDeploymentPlan;
 $("#dep-run-copy").onclick = () => copyDeploymentRunLog();
@@ -7093,7 +7757,42 @@ function openModal(id) {
   $("#modal-backdrop").hidden = false;
   $(id).hidden = false;
 }
+let confirmInAppResolve = null;
+let confirmInAppFocus = null;
+function finishInAppConfirmation(accepted) {
+  const resolve = confirmInAppResolve;
+  if (!resolve) return;
+  confirmInAppResolve = null;
+  const answer = accepted && !$("#confirm-input").hidden ? $("#confirm-input").value.trim() : accepted;
+  $("#confirm-modal").hidden = true;
+  $("#confirm-backdrop").hidden = true;
+  if (confirmInAppFocus?.isConnected) confirmInAppFocus.focus({ preventScroll: true });
+  confirmInAppFocus = null;
+  resolve(answer);
+}
+function confirmInApp({ title, message, facts = [], accept, input = false }) {
+  if (confirmInAppResolve) finishInAppConfirmation(false);
+  confirmInAppFocus = document.activeElement;
+  $("#confirm-title").textContent = title;
+  $("#confirm-message").textContent = message;
+  const list = $("#confirm-facts");
+  list.replaceChildren();
+  for (const [label, value] of facts) list.append(depText("dt", "", label), depText("dd", "", value));
+  $("#confirm-input").hidden = !input;
+  $("#confirm-input").value = "";
+  $("#confirm-accept").textContent = accept;
+  $("#confirm-backdrop").hidden = false;
+  $("#confirm-modal").hidden = false;
+  (input ? $("#confirm-input") : $("#confirm-cancel")).focus();
+  return new Promise((resolve) => { confirmInAppResolve = resolve; });
+}
+window.psmConfirm = (message, title = "Please confirm") => confirmInApp({ title, message, accept: "Confirm" });
+window.psmPrompt = async (message, title = "Enter a value") => {
+  const answer = await confirmInApp({ title, message, accept: "Continue", input: true });
+  return typeof answer === "string" && answer ? answer : null;
+};
 function closeModals() {
+  finishInAppConfirmation(false);
   $("#modal-backdrop").hidden = true;
   $("#procs-modal").hidden = true;
   $("#links-modal").hidden = true;
@@ -7122,6 +7821,7 @@ function closeModals() {
  * Either way the page never holds a refresh credential, which is the property
  * that matters. `SERVED_BY_AGENT` is the switch, and detectHost() sets it.
  * ---------------------------------------------------------------------- */
+let AUTH_APPROVAL_REASON = "";
 let AUTH = { user: null, required: false, checked: false, sso: { available: false } };
 
 /**
@@ -7169,6 +7869,7 @@ async function loadSession({ justSignedIn = false } = {}) {
       // Otherwise the cookie is the only evidence, and refreshing is how we find
       // out. `restore()` no-ops when there was never a session.
       AUTH.user = (await PsmAuth.restore()) ? AUTH.user || PsmAuth.cachedUser() || { id: "me" } : null;
+      AUTH.localApprovalWithoutSignIn = false;
       AUTH.required = false; // the board degrades to "pair an agent", not a wall
       // Whether dapp will accept this page is only knowable by asking dapp, and
       // beginSignIn() asks before it redirects. Offer the button; it explains
@@ -7183,12 +7884,14 @@ async function loadSession({ justSignedIn = false } = {}) {
       });
       const data = await r.json();
       AUTH.user = data.user || null;
+      AUTH.localApprovalWithoutSignIn = data.localApprovalWithoutSignIn === true;
       AUTH.required = !!data.required;
       AUTH.sso = data.sso || { available: true };
       PsmAuth.configure({ servedByAgent: true, ...(data.dapp || {}) });
     }
   } catch {
     AUTH.user = null;
+    AUTH.localApprovalWithoutSignIn = false;
   }
   AUTH.checked = true;
   renderAccount();
@@ -7214,6 +7917,10 @@ function renderAccount() {
   // Signing in or out changes which business workspaces are real (never the
   // personal one); re-ask the agent rather than trusting what was listed before.
   if (AUTH.checked) window.PsmWorkspaces?.refresh();
+  if (WS.pane === "deploy" && WS.managedDeploy?.data) {
+    if (AUTH.user && /Sign in with your Werewolf account|approval requires an authenticated operator/.test(WS.managedDeploy.error || "")) WS.managedDeploy.error = null;
+    renderManagedDeploy();
+  }
 }
 
 /** Hosted psm cannot show anything until someone is signed in. */
@@ -7221,7 +7928,8 @@ function authGateRequired() {
   return AUTH.required && !AUTH.user;
 }
 
-function openAuth() {
+function openAuth(reason = "") {
+  AUTH_APPROVAL_REASON = reason;
   setAuthError("");
   $("#auth-page").hidden = false;
   document.body.classList.add("auth-open");
@@ -7235,9 +7943,9 @@ function closeAuth() {
 }
 
 function renderAuthMode() {
-  $("#auth-sub").textContent = AUTH.required
+  $("#auth-sub").textContent = AUTH_APPROVAL_REASON || (AUTH.required
     ? "Sign in with your Werewolf account to use psm."
-    : "Optional here — psm works signed out. Signing in enables cloud sync and backups.";
+    : "PSM works signed out. Sign in for cloud sync, backups, and approvals that require an authenticated operator.");
 
   // The handoff is offered only where dapp will accept this instance's callback;
   // elsewhere the panel explains what has to be registered.
@@ -8319,6 +9027,7 @@ $("#skills-refresh").onclick = () => loadSkills();
 $("#skills-scope").onchange = () => loadSkills();
 $("#ws-chat-open").onclick = () => openWorkspaceChat();
 $("#work-open").onclick = () => openWorkModal();
+$("#ws-work-together").onclick = () => openWorkModal({ projects: [WS.name], engine: WS.engine });
 $("#work-close").onclick = () => closeWorkModal();
 $("#work-backdrop").onclick = () => closeWorkModal();
 $("#work-form").onsubmit = createWorkroom;
@@ -8331,6 +9040,10 @@ $("#rules-cancel").onclick = closeModals;
 $("#rules-scope").onchange = (e) => selectRulesScope(e.target.value);
 $("#rules-save").onclick = saveRules;
 $("#modal-backdrop").onclick = closeModals;
+$("#confirm-backdrop").onclick = () => finishInAppConfirmation(false);
+$("#confirm-cancel").onclick = () => finishInAppConfirmation(false);
+$("#confirm-accept").onclick = () => finishInAppConfirmation(true);
+$("#confirm-input").onkeydown = (event) => { if (event.key === "Enter") finishInAppConfirmation(true); };
 
 $("#rescan").onclick = async () => {
   toast("Rescanning…");
@@ -8374,7 +9087,8 @@ $("#d-model").onfocus = () => {
 };
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!$("#question-modal").hidden) closeQuestion(true);
+  if (!$("#confirm-modal").hidden) finishInAppConfirmation(false);
+  else if (!$("#question-modal").hidden) closeQuestion(true);
   else if (!$("#modal-backdrop").hidden) closeModals();
   else closeDrawer();
 });

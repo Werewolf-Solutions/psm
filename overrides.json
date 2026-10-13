@@ -8,11 +8,12 @@
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
     "next": "Continue AI builder workspace links so generated sites stay connected to their separate repos/projects.",
     "runCommand": "npm run dev",
-    "port": 5173,
-    "aiFullAccess": false,
+    "port": 5174,
     "aiEngine": "claude",
     "aiModel": "opus",
-    "aiEffort": "medium"
+    "aiEffort": "medium",
+    "workingOn": true,
+    "workingOnAt": 1791561317168
   },
   "nfc-pay": {
     "category": "Flagship & platform",
@@ -32,7 +33,6 @@
     "next": "Complete the private Homelab Mode rollout: join the server to Tailscale, bring up the main-PC Ollama model, then exercise a governed service restart end to end.",
     "runCommand": "go run ./cmd/daedalus-core",
     "aiEngine": "codex",
-    "aiFullAccess": false,
     "port": 5174,
     "attachments": [
       {
@@ -80,7 +80,11 @@
     "next": "Exercise the web and universal recorders against real apps, then add a permissioned native companion for semantic macOS/Windows/Linux accessibility events where browser screen capture is insufficient.",
     "runCommand": "npm start",
     "port": 4400,
-    "aiFullAccess": true
+    "aiModel": "opus",
+    "aiEffort": "medium",
+    "pinned": true,
+    "workingOn": true,
+    "workingOnAt": 1791288963230
   },
   "AI-social-media-autopilot": {
     "category": "AI & automation",
@@ -98,15 +102,26 @@
   },
   "handymanservices": {
     "category": "Client & business websites",
-    "status": "paused",
+    "status": "active",
     "stack": "React, TypeScript, Tailwind",
     "description": "A professional, SEO/GEO-optimised website for a handyman business in Birmingham, UK.",
     "next": "Finalise copy/SEO/GEO + cookie & privacy; wire main fields to real business data from the API.",
     "runCommand": "npm run dev",
+    "customCommands": [
+      {
+        "id": "21c82971-b8e3-4fa9-aee4-efcc1aa11223",
+        "name": "Werewolf API",
+        "directory": "werewolf-dapp",
+        "command": "npm run server"
+      }
+    ],
     "port": 5173,
     "aiEngine": "codex",
     "aiModel": "gpt-6-sol",
-    "aiEffort": "medium"
+    "aiEffort": "medium",
+    "pinned": true,
+    "workingOn": true,
+    "workingOnAt": 1791297240151
   },
   "manu-ncc-website": {
     "category": "Client & business websites",
@@ -328,7 +343,6 @@
     "description": "A simple screenshot tool",
     "status": "utility",
     "pinned": false,
-    "aiFullAccess": true,
     "aiEngine": "codex"
   },
   "psm": {
@@ -337,7 +351,6 @@
     "pinned": true,
     "description": "Workspace cockpit and project glue — scans every project, runs work sessions, tracks reusable capabilities, and helps brainstorm new ideas against the existing workspace before scaffolding.",
     "next": "Finish the pinned deployment-control release workflow and Todo target enrollment, then prove one managed staging release. Todo DNS/GitHub/SSH connections exist; the host key is repaired. See docs/roadmaps/ecosystem-integration.md.",
-    "aiFullAccess": false,
     "aiEngine": "codex",
     "attachments": [
       {
@@ -354,7 +367,6 @@
     "workingOnAt": 1790859590180
   },
   "__workspace__": {
-    "aiFullAccess": true,
     "aiEngine": "claude",
     "aiModel": "sonnet",
     "aiEffort": "medium"
@@ -368,7 +380,6 @@
     "runCommand": "npm run dev",
     "port": 5176,
     "aiEngine": "claude",
-    "aiFullAccess": true,
     "attachments": [
       {
         "capabilityRef": "workspace:feedback-hub",
@@ -395,15 +406,22 @@
   "todo-app": {
     "status": "active",
     "pinned": true,
-    "aiFullAccess": false,
     "runCommand": "npm run dev",
+    "customCommands": [
+      {
+        "id": "c420af45-7a71-41d7-9448-56611acd3eea",
+        "name": "Werewolf API",
+        "directory": "werewolf-dapp",
+        "command": "npm run server"
+      }
+    ],
     "port": 5200,
     "aiEngine": "codex",
-    "aiModel": "gpt-5.6-sol",
-    "aiEffort": "high",
     "next": "Deploy staging at todo.werewolf.solutions through PSM: re-enroll its host root, finish the release controller, publish the validated 0.5.2 source, then verify browser sign-in and rollback. Resolve business sharing before external rollout.",
     "workingOn": true,
-    "workingOnAt": 1790263696551
+    "workingOnAt": 1790263696551,
+    "aiModel": "gpt-6.1-sol",
+    "aiEffort": "medium"
   },
   "proteus": {
     "category": "AI & automation",
@@ -414,7 +432,6 @@
     "description": "Proteus — a local-first, AI-assisted desktop video editor for assembling footage, understanding scenario changes, and applying reviewable automatic edits.",
     "next": "Build the offline import-to-export vertical slice: project persistence, folder scan, proxies, Assemble All, manual timeline preview, save/reopen, and MP4 export.",
     "runCommand": "npm run dev",
-    "aiFullAccess": true,
     "aiEngine": "codex",
     "aiModel": "gpt-5.6-sol",
     "aiEffort": "high",
@@ -422,7 +439,36 @@
   },
   "ai-mesh": {
     "status": "active",
+    "pinned": true
+  },
+  "ai-tradesman-assistant": {
+    "description": "AI assistant for busy tradespeople: customer WhatsApp messages (and missed calls) get an AI-drafted reply or quote that the tradesperson approves in a mobile app. Thin client; the backend lives in werewolf-dapp.",
+    "attachments": [
+      {
+        "capabilityRef": "workspace:control-room-spec",
+        "kind": "doc",
+        "source": "workspace",
+        "mode": "copy",
+        "manifestDigest": "sha256:0c021e8ee9ca4b9de59245ea5b8ce72d7b887816454620c92135da23e66db208",
+        "attachedAt": 1790955341764
+      },
+      {
+        "capabilityRef": "workspace:feedback-hub",
+        "kind": "mcp",
+        "source": "workspace",
+        "mode": "reference",
+        "manifestDigest": "sha256:0679b884e77b000904ce3e308e49b0e34d20c53507cc5df2cca85b1d9f340018",
+        "attachedAt": 1790955349110
+      }
+    ],
+    "category": "AI & automation",
+    "status": "active",
+    "stack": "React, Vite, TypeScript, WhatsApp, AI",
+    "next": "M0: start Meta WhatsApp Business verification, confirm the pilot number, and read werewolf-dapp conventions; then M1 (webhook + inbox). See docs/plan.md.",
+    "runCommand": "npm run dev",
+    "port": 5177,
     "pinned": true,
-    "aiFullAccess": false
+    "aiModel": "opus",
+    "aiEffort": "medium"
   }
 }

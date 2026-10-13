@@ -4,9 +4,12 @@ Execution order and resume state: [PSM delivery index](README.md).
 
 Feature specification, 2026-09-23. Part of
 [agent access and software operations](agent-access-and-operations.md).
-This is the proposed product workflow, not a claim that hosted execution or the
-onboarding UI is implemented. The server-specific Todo bootstrap is reference
-material; users must not need that runbook to use this feature.
+This records the product workflow. Local onboarding acceptance was subsequently
+recorded on September 24; hosted acceptance and cross-owner delegation remain
+separate gates. See the [acceptance evidence register](acceptance-evidence.md).
+The server-specific Todo bootstrap is reference material; users must not need
+that runbook to use this feature. P12 adds policy-authorized automatic releases
+after onboarding; initial account consent is separate from release approval.
 
 ## Product contract
 

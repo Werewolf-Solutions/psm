@@ -7,6 +7,7 @@
     <!-- Absolute, not "./": the SPA fallback serves this file at /auth/callback too,
          where a relative path would resolve to /auth/styles.css and 404. -->
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/privacy.js"></script>
   </head>
   <body>
     <!-- Sign in / sign up. Gates the whole app in hosted mode; in local modes it
@@ -51,7 +52,7 @@
         <ol class="connect-steps">
           <li>
             <span>Start the agent in your workspace:</span>
-            <code class="connect-cmd" id="connect-cmd">npm run agent</code>
+            <code class="connect-cmd" id="connect-cmd" data-stream-private>npm run agent</code>
           </li>
           <li>
             <span>It prints a pairing token. The cockpit shows it too, under
@@ -61,11 +62,11 @@
 
         <label class="auth-field">
           <span>Agent address</span>
-          <input id="connect-base" type="text" spellcheck="false" placeholder="http://127.0.0.1:4317" />
+          <input id="connect-base" type="text" spellcheck="false" placeholder="http://127.0.0.1:4317" data-stream-private />
         </label>
         <label class="auth-field">
           <span>Pairing token</span>
-          <input id="connect-token" type="password" spellcheck="false" placeholder="paste it here" />
+          <input id="connect-token" type="password" spellcheck="false" placeholder="paste it here" data-stream-private />
         </label>
 
         <p class="connect-error" id="connect-error" hidden></p>
@@ -88,8 +89,10 @@
         <input id="search" type="search" placeholder="Search projects, stacks, statuses…" />
       </div>
       <div class="actions">
-        <select id="workspace-select" class="btn workspace-select" aria-label="Workspace" title="Personal workspace — private to you"><option value="personal">Personal</option></select>
-        <button id="account-chip" class="btn account-chip" title="Your Werewolf account">Sign&nbsp;in</button>
+        <label class="workspace-label" for="workspace-select">Project space</label>
+        <select id="workspace-select" class="btn workspace-select" aria-label="Project space" title="Personal project space — private to you" data-stream-private><option value="personal">Personal</option></select>
+        <button id="stream-privacy" class="btn" aria-pressed="false">Stream privacy: off</button>
+        <button id="account-chip" class="btn account-chip" title="Your Werewolf account" data-stream-private>Sign&nbsp;in</button>
         <button id="cloud-open" class="btn" title="PSM Pro account, sync, and encrypted backups">☁&nbsp;Cloud</button>
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
         <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
@@ -105,7 +108,7 @@
       </div>
     </header>
 
-    <nav class="quick-switch" id="quick-switch" aria-label="Open workspaces"></nav>
+    <nav class="quick-switch" id="quick-switch" aria-label="Open projects and workrooms"></nav>
 
     <div id="home-page">
       <section class="stats" id="stats"></section>
@@ -130,10 +133,10 @@
       <div class="drawer-body">
         <div class="auto-block" id="d-auto"></div>
         <label>Status
-          <select id="d-status"></select>
+          <select id="d-status" data-stream-private></select>
         </label>
         <label>Priority
-          <select id="d-priority">
+          <select id="d-priority" data-stream-private>
             <option value="">— none —</option>
             <option value="high">high</option>
             <option value="medium">medium</option>
@@ -147,40 +150,37 @@
           <input type="checkbox" id="d-working" /> Working on now
         </label>
         <label>Description
-          <textarea id="d-description" rows="3" placeholder="Override the auto description…"></textarea>
+          <textarea id="d-description" rows="3" placeholder="Override the auto description…" data-stream-private></textarea>
         </label>
         <label>Next step
-          <textarea id="d-next" rows="2" placeholder="What's the next action?"></textarea>
+          <textarea id="d-next" rows="2" placeholder="What's the next action?" data-stream-private></textarea>
         </label>
         <label>Run command
-          <input id="d-run" type="text" placeholder="e.g. npm run dev" />
+          <input id="d-run" type="text" placeholder="e.g. npm run dev" data-stream-private />
         </label>
         <label>Web port
           <input id="d-port" type="number" min="1" max="65535" placeholder="e.g. 3000" />
         </label>
         <label>Deploy → staging
-          <input id="d-deploy-staging" type="text" placeholder="e.g. npm run deploy:staging" />
+          <input id="d-deploy-staging" type="text" placeholder="e.g. npm run deploy:staging" data-stream-private />
         </label>
         <label>Deploy → production
-          <input id="d-deploy-production" type="text" placeholder="e.g. npm run deploy" />
+          <input id="d-deploy-production" type="text" placeholder="e.g. npm run deploy" data-stream-private />
         </label>
         <label>AI engine
-          <select id="d-engine">
+          <select id="d-engine" data-stream-private>
             <option value="">— default (Claude Code) —</option>
             <option value="claude">Claude Code</option>
             <option value="codex">Codex</option>
           </select>
         </label>
         <label>AI model
-          <select id="d-model" aria-label="AI model"><option value="">Provider default</option></select>
+          <select id="d-model" aria-label="AI model" data-stream-private><option value="">Provider default</option></select>
         </label>
         <label>AI effort
-          <select id="d-effort">
+          <select id="d-effort" data-stream-private>
             <option value="">— default for selected model —</option>
           </select>
-        </label>
-        <label class="check">
-          <input type="checkbox" id="d-full" /> Access managed in Capabilities → Agent permissions
         </label>
         <!-- Other repositories this project's AI may work in. Chosen by project,
              never by path: psm looks the paths up itself before every turn. -->
@@ -190,7 +190,7 @@
           <p class="hint" id="d-scope-summary"></p>
         </div>
         <label>Category
-          <input id="d-category" type="text" placeholder="e.g. Flagship & platform" />
+          <input id="d-category" type="text" placeholder="e.g. Flagship & platform" data-stream-private />
         </label>
         <p class="hint">Blank fields fall back to auto-detected values.</p>
       </div>
@@ -212,23 +212,24 @@
         <div class="work-open-list" id="work-open-list"></div>
         <form class="work-form" id="work-form">
           <h3>New workroom</h3>
+          <p class="hint" id="work-context" hidden></p>
           <label>Name
-            <input id="work-title" type="text" placeholder="e.g. Todo ↔ Werewolf API" />
+            <input id="work-title" type="text" placeholder="e.g. Todo ↔ Werewolf API" data-stream-private />
           </label>
           <label>What are you doing?
-            <textarea id="work-objective" rows="2" placeholder="The change you want made across these projects…"></textarea>
+            <textarea id="work-objective" rows="2" placeholder="The change you want made across these projects…" data-stream-private></textarea>
           </label>
           <span class="work-label">Projects (pick two or more — the first ticked is where the AI starts)</span>
           <div class="work-picker" id="work-picker"></div>
           <label>AI engine
-            <select id="work-engine">
+            <select id="work-engine" data-stream-private>
               <option value="claude">Claude Code</option>
               <option value="codex">Codex</option>
             </select>
           </label>
           <p class="hint" id="work-summary"></p>
           <div class="modal-foot">
-            <button class="btn btn-primary" type="submit" id="work-create">Open workroom</button>
+            <button class="btn btn-primary" type="submit" id="work-create">Create &amp; start workroom</button>
           </div>
         </form>
       </div>
@@ -243,17 +244,28 @@
           <span class="ws-status" id="ws-status">idle</span>
         </div>
         <div class="ws-head-actions">
-          <select id="ws-workspace" class="btn workspace-select" aria-label="This project's workspace" title="Which workspace this project belongs to. Moving it does not change file or deployment access." hidden></select>
+          <select data-stream-private id="ws-workspace" class="btn workspace-select" aria-label="This project's space" title="Which personal or business space lists this project. This does not move files or change deployment access." hidden></select>
           <button class="btn" id="ws-working" title="Manually show or hide this project in Working on">Mark working</button>
           <button class="btn" id="ws-close" aria-label="Return home">← Home</button>
         </div>
       </header>
       <div class="ws-runbar" id="ws-runbar">
-        <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" />
+        <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" data-stream-private />
         <button class="btn btn-primary" id="ws-run">▶ Run</button>
         <button class="btn" id="ws-stop">■ Stop</button>
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
         <button class="btn" id="ws-download" title="Download the whole log since this run started">⤓ Log</button>
+      </div>
+      <div class="ws-custom-commands" id="ws-custom-commands" data-stream-private>
+        <div class="ws-custom-head"><span>Custom commands</span><button class="btn" id="ws-custom-add" type="button">+ Add command</button></div>
+        <div id="ws-custom-list"></div>
+        <form id="ws-custom-form" class="ws-custom-form" hidden>
+          <label>Name <input id="ws-custom-name" type="text" maxlength="80" placeholder="Werewolf API" required /></label>
+          <label>Directory <select id="ws-custom-directory" required></select></label>
+          <label>Command <input id="ws-custom-command" type="text" maxlength="2000" placeholder="npm run server" spellcheck="false" required /></label>
+          <button class="btn btn-primary" type="submit">Save command</button>
+          <button class="btn" id="ws-custom-cancel" type="button">Cancel</button>
+        </form>
       </div>
       <!-- Which projects this workroom spans. Hidden for an ordinary project. -->
       <div class="ws-members" id="ws-members" hidden></div>
@@ -269,6 +281,7 @@
         <button class="ws-tab" data-pane="ai">AI</button>
         <button class="ws-tab" data-pane="session">Session</button>
         <button class="ws-tab" data-pane="deploy">Deploy</button>
+        <button class="ws-tab" data-pane="monitoring">Monitoring</button>
       </div>
       <div class="ws-panes">
         <!-- This project's own notes: bugs and todos, features, ideas. Written
@@ -280,7 +293,7 @@
               <button type="button" class="note-kind" data-kind="feature">✨ New feature</button>
               <button type="button" class="note-kind" data-kind="idea">💡 Idea / thought</button>
             </div>
-            <textarea id="note-text" rows="3" placeholder="What did you just notice? ⌘/Ctrl+Enter to save."></textarea>
+            <textarea id="note-text" rows="3" placeholder="What did you just notice? ⌘/Ctrl+Enter to save." data-stream-private></textarea>
             <div class="note-compose-actions">
               <span class="note-count" id="note-count"></span>
               <button class="btn btn-primary" type="submit" id="note-save">Add note</button>
@@ -293,7 +306,7 @@
             <button type="button" class="note-filter" data-filter="idea">💡 Ideas</button>
             <button type="button" class="note-filter" data-filter="done">✓ Done</button>
           </div>
-          <div class="note-body" id="note-body"></div>
+          <div class="note-body" id="note-body" data-stream-private></div>
         </div>
 
         <!-- git state, one block per repository. In a workroom that is every
@@ -304,7 +317,7 @@
             <span class="changes-summary" id="changes-summary"></span>
             <button class="btn" id="changes-refresh">Refresh</button>
           </div>
-          <div class="changes-body" id="changes-body"></div>
+          <div class="changes-body" id="changes-body" data-stream-private></div>
         </div>
 
         <div class="ws-plan" id="ws-plan" data-pane="plan" hidden>
@@ -315,7 +328,7 @@
                 <span class="plan-status" id="plan-status">none</span>
                 <span class="plan-revision" id="plan-revision"></span>
               </div>
-              <p id="plan-notes"></p>
+              <p id="plan-notes" data-stream-private></p>
             </div>
             <div class="plan-actions">
               <button class="btn" id="plan-new-session">＋ New planner session</button>
@@ -325,8 +338,8 @@
               <button class="btn btn-primary" id="plan-confirm" hidden>Confirm &amp; start working</button>
             </div>
           </div>
-          <div class="plan-review" id="plan-review" hidden></div>
-          <div class="plan-editor" id="plan-editor"></div>
+          <div class="plan-review" id="plan-review" hidden data-stream-private></div>
+          <div class="plan-editor" id="plan-editor" data-stream-private></div>
           <section class="planner-session" id="planner-session">
             <header class="planner-session-head">
               <div>
@@ -334,7 +347,7 @@
                   <h3>Planning room</h3>
                   <span class="planner-loop-status" id="planner-loop-status">idle</span>
                 </div>
-                <p id="planner-loop-message">Start a read-only planner session. A second model reviews each revision before confirmation.</p>
+                <p id="planner-loop-message" data-stream-private>Start a read-only planner session. A second model reviews each revision before confirmation.</p>
               </div>
               <button class="btn" id="planner-cancel" hidden>Stop planning</button>
             </header>
@@ -343,14 +356,14 @@
               <button class="planner-agent-tab on" data-planner-role="planner">Planner</button>
               <button class="planner-agent-tab" data-planner-role="reviewer">Reviewer</button>
             </div>
-            <div class="planner-transcript" id="planner-transcript">
+            <div class="planner-transcript" id="planner-transcript" data-stream-private>
               <div class="planner-empty">The planning transcript will appear here.</div>
             </div>
             <div class="planner-activity" id="planner-activity" hidden>
-              <span class="spinner"></span><span id="planner-activity-text">Planning…</span>
+              <span class="spinner"></span><span id="planner-activity-text" data-stream-private>Planning…</span>
             </div>
             <div class="planner-composer">
-              <textarea id="planner-message" rows="3" placeholder="Describe the work to plan, or send feedback on the current plan…"></textarea>
+              <textarea id="planner-message" rows="3" placeholder="Describe the work to plan, or send feedback on the current plan…" data-stream-private></textarea>
               <button class="btn btn-primary" id="planner-send">Start planning</button>
             </div>
             <p class="planner-safety">Planner and reviewer sessions are technically read-only. Confirmation starts a fresh normal project-agent session with implementation permissions.</p>
@@ -358,7 +371,7 @@
         </div>
         <div class="ws-capabilities" id="ws-capabilities" data-pane="capabilities" hidden>
           <section id="agent-permissions" class="agent-permissions" aria-label="Agent permissions"></section>
-          <section id="cap-deployment-connections" class="agent-permissions" aria-label="Deployment connections"></section>
+          <section id="cap-deployment-connections" class="agent-permissions" aria-label="Deployment connections" data-stream-private></section>
           <div class="cap-toolbar">
             <div>
               <h2>Attached tools</h2>
@@ -379,7 +392,7 @@
                 </div>
                 <button class="icon-btn" id="cap-preview-close" aria-label="Close preview">✕</button>
               </div>
-              <div id="cap-preview-body"></div>
+              <div id="cap-preview-body" data-stream-private></div>
               <div class="cap-preview-actions">
                 <button class="btn" id="cap-preview-cancel">Cancel</button>
                 <button class="btn btn-primary" id="cap-preview-confirm">Confirm</button>
@@ -387,7 +400,10 @@
             </aside>
           </div>
         </div>
-        <div class="ws-console" id="ws-console" data-pane="logs"></div>
+        <div class="ws-logs" data-pane="logs">
+          <div id="ws-log-title" class="ws-log-title">Run logs</div>
+          <div class="ws-console" id="ws-console" data-stream-private></div>
+        </div>
         <div class="ws-ai" data-pane="ai" hidden>
           <div class="ws-aibar">
             <select id="ws-engine" title="Which AI engine to use">
@@ -399,22 +415,20 @@
               <option value="">Default effort</option>
             </select>
             <span class="ws-model-current" id="ws-model-current" title="Model used by the current AI session">model: default</span>
-            <label class="ws-full" title="Workspace chat only: run the AI with its sandbox off. It can run any command as you, on every project and file you can reach. Project agents never use this.">
-              <input type="checkbox" id="ws-full" /> Unrestricted
-            </label>
             <button class="ai-scope" id="ws-scope" hidden title="Which repositories this AI may edit"></button>
             <button id="usage-open" class="btn" title="View usage for the selected provider and model">Usage</button>
             <span class="ws-ai-status" id="ws-ai-status"></span>
           </div>
-          <div class="ai-limit" id="ws-ai-limit" hidden></div>
-          <div class="ai-recap" id="ws-ai-recap" hidden></div>
-          <div class="ws-transcript" id="ws-transcript"></div>
+          <div class="ai-limit" id="ws-ai-limit" hidden data-stream-private></div>
+          <div class="ai-recap" id="ws-ai-recap" hidden data-stream-private></div>
+          <div class="ws-transcript" id="ws-transcript" data-stream-private></div>
           <div class="ai-activity" id="ws-ai-activity" hidden>
-            <span class="spinner"></span><span id="ws-ai-activity-text">Thinking…</span>
+            <span class="spinner"></span><span id="ws-ai-activity-text" data-stream-private>Thinking…</span>
           </div>
           <div class="ws-composer">
-            <textarea id="ws-msg" rows="2" placeholder="Ask the project's AI to make a change…  (Enter to send, Shift+Enter for newline)"></textarea>
+            <textarea id="ws-msg" rows="2" placeholder="Ask the project's AI to make a change…  (Enter to send, Shift+Enter for newline)" data-stream-private></textarea>
             <button class="btn btn-primary" id="ws-question-answer" hidden>Review question</button>
+            <button class="btn" id="ws-work-together" hidden title="Start a shared session with another project">Work together</button>
             <button class="btn btn-primary" id="ws-send">Send</button>
             <button class="btn" id="ws-cancel" hidden>Stop</button>
           </div>
@@ -430,9 +444,9 @@
               <button class="btn" id="ws-session-refresh" title="Refresh session state">Refresh</button>
             </div>
           </div>
-          <div class="session-grid" id="ws-session-summary"></div>
-          <div class="session-current" id="ws-session-current"></div>
-          <div class="session-log" id="ws-session-log"></div>
+          <div class="session-grid" id="ws-session-summary" data-stream-private></div>
+          <div class="session-current" id="ws-session-current" data-stream-private></div>
+          <div class="session-log" id="ws-session-log" data-stream-private></div>
         </div>
         <div class="ws-web" id="ws-web" data-pane="web" hidden>
           <div class="ws-webbar">
@@ -454,9 +468,6 @@
               <option value="">Default effort</option>
             </select>
             <span class="ws-model-current" id="web-model-current" title="Model used by the current AI session">model: default</span>
-            <label class="ws-full" title="Workspace chat only: run the AI with its sandbox off. It can run any command as you, on every project and file you can reach. Project agents never use this.">
-              <input type="checkbox" id="web-full" /> Unrestricted
-            </label>
             <button class="ai-scope" id="web-scope" hidden title="Which repositories this AI may edit"></button>
             <button id="web-usage" class="btn" title="View usage for the selected provider and model">Usage</button>
             <span class="dev-spacer"></span>
@@ -464,18 +475,28 @@
             <button class="btn btn-primary" id="web-apply" disabled>Make changes</button>
           </div>
           <div class="ws-webmain">
-            <div class="ws-webframe" id="ws-webframe"></div>
+            <div class="ws-webframe" id="ws-webframe" data-stream-private></div>
             <aside class="dev-notes" id="web-notes" hidden>
               <div class="notes-head">
                 <h3>Change notes</h3>
                 <button class="btn" id="web-notes-clear" title="Remove every note">Clear</button>
               </div>
-              <div class="notes-list" id="web-notes-list"></div>
+              <div class="notes-list" id="web-notes-list" data-stream-private></div>
               <p class="notes-hint" id="web-notes-hint">Click anything in the preview, then say what should change.</p>
             </aside>
           </div>
         </div>
+        <div class="ws-monitoring" data-pane="monitoring" hidden>
+          <header class="mon-toolbar"><h2>Monitoring</h2><label>Environment <select id="mon-environment"></select></label><label>Period <select id="mon-period"><option value="24">Last 24 hours</option><option value="168">Last 7 days</option></select></label><button class="btn" id="mon-refresh">Refresh</button></header>
+          <p id="mon-message" class="mon-note">Loading monitoring…</p>
+          <div id="mon-dashboard"></div>
+        </div>
         <div class="ws-deploy" data-pane="deploy" hidden>
+          <div class="room-deploy" id="ws-room-deploy" hidden></div>
+          <div class="dep-load-error" id="ws-deploy-load-error" role="alert" hidden>
+            <span id="dep-load-error-message"></span>
+            <button class="btn" id="dep-load-retry" type="button">Retry</button>
+          </div>
           <div class="dep-managed" id="ws-deploy-managed" hidden>
             <header class="dep-head">
               <div>
@@ -487,37 +508,40 @@
             </header>
             <div class="dep-envs" id="dep-envs"></div>
             <p class="dep-destination" id="dep-destination"></p>
+            <div class="dep-controls">
+              <section class="dep-summary" id="dep-summary" aria-label="Release summary"></section>
+              <div class="dep-toolbar">
+                <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
+                <button class="btn" id="dep-discover">Check readiness</button>
+                <div class="dep-prep-ai" id="dep-prep-ai-wrap" hidden>
+                  <span>Preparation AI</span>
+                  <select id="dep-prep-ai" aria-label="Preparation provider">
+                    <option value="claude">Claude Code</option>
+                    <option value="codex">Codex</option>
+                  </select>
+                  <select id="dep-prep-model" aria-label="Preparation model">
+                    <option value="">Provider default</option>
+                  </select>
+                  <select id="dep-prep-effort" aria-label="Preparation reasoning effort" title="Reasoning effort for the selected model">
+                    <option value="">Default effort</option>
+                  </select>
+                </div>
+                <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
+                <button class="btn btn-primary" id="dep-approve">Review plan</button>
+              </div>
+            </div>
             <section class="todo-panel" id="dep-todo" aria-labelledby="dep-todo-title">
               <div class="todo-head"><h3 id="dep-todo-title">To do</h3><span id="dep-todo-count"></span></div>
               <ol class="todo-list" id="dep-todo-list"></ol>
             </section>
-            <div class="dep-toolbar">
-              <div class="dep-toolbar-copy" id="dep-status" role="status">Check readiness to see what this environment needs.</div>
-              <button class="btn" id="dep-discover">Check readiness</button>
-              <div class="dep-prep-ai" id="dep-prep-ai-wrap" hidden>
-                <span>Preparation AI</span>
-                <select id="dep-prep-ai" aria-label="Preparation provider">
-                  <option value="claude">Claude Code</option>
-                  <option value="codex">Codex</option>
-                </select>
-                <select id="dep-prep-model" aria-label="Preparation model">
-                  <option value="">Provider default</option>
-                </select>
-                <select id="dep-prep-effort" aria-label="Preparation reasoning effort" title="Reasoning effort for the selected model">
-                  <option value="">Default effort</option>
-                </select>
-              </div>
-              <button class="btn" id="dep-make-ready" hidden>Make ready to deploy</button>
-              <button class="btn btn-primary" id="dep-approve">Review plan</button>
-            </div>
             <div class="dep-error" id="dep-error" role="alert" hidden></div>
             <section class="dep-section dep-run-top" id="dep-run-section" hidden>
-              <div class="dep-section-head"><h3 id="dep-run-title">Deployment run</h3><code class="dep-run-id" id="dep-run-id"></code><span id="dep-run-state"></span></div>
+              <div class="dep-section-head"><h3 id="dep-run-title">Deployment run</h3><code class="dep-run-id" id="dep-run-id" data-stream-private></code><span id="dep-run-state"></span></div>
               <div class="activity-times" id="dep-run-times"></div>
-              <p class="dep-run-reason" id="dep-run-reason" hidden></p>
+              <p class="dep-run-reason" id="dep-run-reason" hidden data-stream-private></p>
               <div class="dep-phases" id="dep-phases"></div>
               <div class="dep-run-progress" id="dep-run-progress" role="status" aria-live="polite" hidden></div>
-              <div class="dep-events" id="dep-events"></div>
+              <div class="dep-events" id="dep-events" data-stream-private></div>
               <div class="dep-run-actions">
                 <button class="btn" id="dep-run-copy">Copy run diagnostics</button>
                 <button class="btn" id="dep-run-copy-full">Copy full run log</button>
@@ -535,6 +559,7 @@
                 <span class="dep-prep-state" id="dep-prep-state"></span>
               </div>
               <p class="dep-prep-message" id="dep-prep-message"></p>
+              <p class="dep-prep-activity" id="dep-prep-activity" hidden></p>
               <div class="activity-times" id="dep-prep-times"></div>
               <p class="dep-prep-failure" id="dep-prep-failure" hidden></p>
               <div class="dep-plan" id="dep-prep-plan" hidden></div>
@@ -563,7 +588,7 @@
               <div class="dep-toolbar">
               <label class="dep-artifact-picker" for="dep-artifact">
                 <span>Artifact</span>
-                <select id="dep-artifact" disabled>
+                <select id="dep-artifact" disabled data-stream-private>
                   <option value="">No prepared artifacts</option>
                 </select>
               </label>
@@ -571,20 +596,24 @@
               </div>
             </details>
             <div class="dep-content">
-              <section class="dep-summary" id="dep-summary"></section>
               <section class="dep-section">
                 <div class="dep-section-head"><h3>Readiness</h3><span id="dep-readiness-count"></span></div>
                 <div class="activity-times" id="dep-readiness-times"></div>
                 <div class="dep-list" id="dep-readiness"></div>
               </section>
+              <section class="dep-section" id="dep-watch-section" hidden>
+                <div class="dep-section-head"><h3>Werewolf monitoring</h3><button class="btn" id="dep-watch-refresh">Refresh monitoring</button></div>
+                <div class="activity-times" id="dep-watch-status"></div>
+                <div class="dep-list" id="dep-watch-incidents"></div>
+              </section>
               <section class="dep-section" id="dep-connections-section">
                 <div class="dep-section-head"><h3>Deployment connections</h3><span>credentials stay on this machine</span></div>
                 <div class="dep-connections" id="dep-connections"></div>
-                <div id="dep-connection-setup"></div>
+                <div id="dep-connection-setup" data-stream-private></div>
               </section>
               <section class="dep-section" id="dep-secrets-section" hidden>
                 <div class="dep-section-head"><h3>Runtime secrets</h3><span id="dep-secrets-count">stored on this machine, written only to the server</span></div>
-                <div class="dep-list" id="dep-secrets"></div>
+                <div class="dep-list" id="dep-secrets" data-stream-private></div>
               </section>
               <section class="dep-section">
                 <div class="dep-section-head"><h3>Retained releases</h3><span>rollback never rebuilds</span></div>
@@ -609,14 +638,14 @@
                 <button class="ws-target on" data-target="staging">Staging</button>
                 <button class="ws-target" data-target="production">Production</button>
               </div>
-              <code class="ws-depcmd" id="ws-depcmd">—</code>
+              <code class="ws-depcmd" id="ws-depcmd" data-stream-private>—</code>
               <span class="ws-dep-status" id="ws-dep-status"></span>
               <button class="btn" id="ws-dep-ai" title="Ask the AI to walk you through deploying">Guide me with AI</button>
               <button class="btn" id="ws-dep-download" title="Download the whole log for this deploy">⤓ Log</button>
               <button class="btn" id="ws-dep-stop" hidden>■ Stop</button>
               <button class="btn btn-primary" id="ws-dep-run">Run unmanaged deploy</button>
             </div>
-            <div class="ws-console" id="ws-depconsole"></div>
+            <div class="ws-console" id="ws-depconsole" data-stream-private></div>
           </div>
         </div>
       </div>
@@ -628,12 +657,12 @@
       <div class="modal-head question-head">
         <div>
           <div class="question-project" id="question-project">AI question</div>
-          <h2 id="question-title">AI needs your input</h2>
+          <h2 id="question-title" data-stream-private>AI needs your input</h2>
         </div>
         <button class="icon-btn" id="question-close" aria-label="Answer later">✕</button>
       </div>
       <form class="question-form" id="question-form">
-        <div class="modal-body question-body" id="question-body"></div>
+        <div class="modal-body question-body" id="question-body" data-stream-private></div>
         <div class="modal-foot">
           <button class="btn" type="button" id="question-later">Later</button>
           <button class="btn btn-primary" type="submit" id="question-submit">Answer</button>
@@ -643,6 +672,20 @@
 
     <!-- shared modal backdrop -->
     <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+    <div class="modal-backdrop" id="confirm-backdrop" hidden></div>
+
+    <section class="modal" id="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" hidden>
+      <div class="modal-head"><h2 id="confirm-title"></h2></div>
+      <div class="modal-body" data-stream-private>
+        <p id="confirm-message"></p>
+        <dl class="dep-publication-facts" id="confirm-facts"></dl>
+        <input id="confirm-input" type="text" aria-label="Response" data-stream-private hidden />
+      </div>
+      <div class="modal-foot">
+        <button class="btn" type="button" id="confirm-cancel">Cancel</button>
+        <button class="btn btn-primary" type="button" id="confirm-accept"></button>
+      </div>
+    </section>
 
     <section class="modal modal-wide" id="questions-modal" role="dialog" aria-modal="true" aria-labelledby="questions-title" hidden>
       <div class="modal-head">
@@ -652,7 +695,7 @@
       <div class="modal-body questions-body">
         <p class="questions-hint">Pending questions from your sessions. Open one when you’re ready; closing it leaves it here for later.</p>
         <p id="questions-error" class="questions-error" role="status" hidden></p>
-        <div id="questions-list"></div>
+        <div id="questions-list" data-stream-private></div>
       </div>
     </section>
 
@@ -669,7 +712,7 @@
           <button class="icon-btn" id="usage-close" aria-label="Close">✕</button>
         </div>
       </div>
-      <div class="modal-body usage-body" id="usage-body">
+      <div class="modal-body usage-body" id="usage-body" data-stream-private>
         <div class="usage-empty">Reading provider usage...</div>
       </div>
     </section>
@@ -687,7 +730,7 @@
           <button class="icon-btn" id="procs-close" aria-label="Close">✕</button>
         </div>
       </div>
-      <div class="modal-body procs-body" id="procs-body"></div>
+      <div class="modal-body procs-body" id="procs-body" data-stream-private></div>
     </section>
 
     <!-- linked folders: what psm looks at -->
@@ -699,7 +742,7 @@
         </div>
         <button class="icon-btn" id="machines-close" aria-label="Close">✕</button>
       </div>
-      <div class="modal-body machines-body" id="machines-body"></div>
+      <div class="modal-body machines-body" id="machines-body" data-stream-private></div>
     </section>
 
     <section class="modal modal-wide links-modal" id="links-modal" role="dialog" aria-modal="true" aria-labelledby="links-title" hidden>
@@ -712,7 +755,7 @@
       </div>
       <div class="modal-body links-body">
         <!-- agent mode only: what a hosted psm needs in order to drive this machine -->
-        <div class="pairing" id="pairing" hidden>
+        <div class="pairing" id="pairing" hidden data-stream-private>
           <div class="pairing-head">
             <h3>Pair the hosted cockpit</h3>
             <span class="pairing-origin" id="pairing-origin"></span>
@@ -722,14 +765,14 @@
             otherwise, and anyone who has it can run commands here.
           </p>
           <div class="pairing-row">
-            <code class="pairing-token" id="pairing-token">••••••••</code>
+            <code class="pairing-token" id="pairing-token" data-stream-private>••••••••</code>
             <button class="btn" id="pairing-reveal">Reveal</button>
             <button class="btn" id="pairing-copy">Copy</button>
             <button class="btn" id="pairing-rotate" title="Invalidate the old token everywhere">Rotate</button>
           </div>
         </div>
 
-        <div class="links-list" id="links-list"></div>
+        <div class="links-list" id="links-list" data-stream-private></div>
 
         <div class="link-add">
           <h3>Link a folder</h3>
@@ -744,15 +787,15 @@
             </button>
           </div>
           <div class="link-path-row">
-            <input id="link-path" type="text" spellcheck="false" placeholder="/home/you/projects" />
+            <input id="link-path" type="text" spellcheck="false" placeholder="/home/you/projects" data-stream-private />
             <button class="btn" id="link-browse" title="Browse the machine running psm">Browse…</button>
             <button class="btn btn-primary" id="link-add">Link</button>
           </div>
           <p class="link-error" id="link-error" hidden></p>
-          <div class="link-browser" id="link-browser" hidden>
+          <div class="link-browser" id="link-browser" hidden data-stream-private>
             <div class="link-browser-bar">
               <button class="btn" id="link-up" title="Parent folder">↑</button>
-              <code class="link-browser-path" id="link-browser-path">—</code>
+              <code class="link-browser-path" id="link-browser-path" data-stream-private>—</code>
               <button class="btn" id="link-browser-use">Use this folder</button>
               <button class="icon-btn" id="link-browser-close" aria-label="Close browser">✕</button>
             </div>
@@ -774,7 +817,7 @@
           <button class="icon-btn" id="cloud-close" aria-label="Close">✕</button>
         </div>
       </div>
-      <div class="modal-body cloud-body" id="cloud-body">
+      <div class="modal-body cloud-body" id="cloud-body" data-stream-private>
         <div class="cloud-empty">Loading PSM Cloud…</div>
       </div>
     </section>
@@ -787,10 +830,10 @@
       </div>
       <div class="modal-body">
         <label>Name
-          <input id="new-name" type="text" placeholder="my-project" spellcheck="false" />
+          <input id="new-name" type="text" placeholder="my-project" spellcheck="false" data-stream-private />
         </label>
         <label>Description
-          <textarea id="new-desc" rows="2" placeholder="One line on what it is (optional)"></textarea>
+          <textarea id="new-desc" rows="2" placeholder="One line on what it is (optional)" data-stream-private></textarea>
         </label>
         <label class="check"><input type="checkbox" id="new-git" checked /> Initialize a git repo</label>
         <label class="check"><input type="checkbox" id="new-rules" checked /> Write the house rules into CLAUDE.md / AGENTS.md</label>
@@ -820,42 +863,42 @@
       <div class="modal-body cap-custom-form">
         <div class="cap-custom-grid">
           <label>ID
-            <input id="cap-custom-id" type="text" placeholder="my-mcp" spellcheck="false" />
+            <input id="cap-custom-id" type="text" placeholder="my-mcp" spellcheck="false" data-stream-private />
           </label>
           <label>Transport
-            <select id="cap-custom-transport">
+            <select id="cap-custom-transport" data-stream-private>
               <option value="stdio">Local executable (stdio)</option>
               <option value="http">HTTP endpoint</option>
             </select>
           </label>
         </div>
         <label>Title
-          <input id="cap-custom-title" type="text" placeholder="My MCP server" />
+          <input id="cap-custom-title" type="text" placeholder="My MCP server" data-stream-private />
         </label>
         <label>Summary
-          <textarea id="cap-custom-summary" rows="2" placeholder="What this capability exposes"></textarea>
+          <textarea id="cap-custom-summary" rows="2" placeholder="What this capability exposes" data-stream-private></textarea>
         </label>
         <div id="cap-custom-stdio">
           <label>Executable
-            <input id="cap-custom-command" type="text" placeholder="node" spellcheck="false" />
+            <input id="cap-custom-command" type="text" placeholder="node" spellcheck="false" data-stream-private />
           </label>
           <label>Arguments — JSON array
-            <textarea id="cap-custom-args" rows="3" spellcheck="false" placeholder='["/absolute/path/server.js"]'></textarea>
+            <textarea id="cap-custom-args" rows="3" spellcheck="false" placeholder='["/absolute/path/server.js"]' data-stream-private></textarea>
           </label>
         </div>
         <div id="cap-custom-http" hidden>
           <label>HTTP URL
-            <input id="cap-custom-url" type="url" placeholder="https://example.com/mcp" spellcheck="false" />
+            <input id="cap-custom-url" type="url" placeholder="https://example.com/mcp" spellcheck="false" data-stream-private />
           </label>
           <label>Bearer token environment variable (optional)
-            <input id="cap-custom-bearer" type="text" placeholder="MY_MCP_TOKEN" spellcheck="false" />
+            <input id="cap-custom-bearer" type="text" placeholder="MY_MCP_TOKEN" spellcheck="false" data-stream-private />
           </label>
         </div>
         <label>Required environment variable names — comma separated
-          <input id="cap-custom-env" type="text" placeholder="TOKEN_NAME, ACCOUNT_ID" spellcheck="false" />
+          <input id="cap-custom-env" type="text" placeholder="TOKEN_NAME, ACCOUNT_ID" spellcheck="false" data-stream-private />
         </label>
         <label>Usage guidance
-          <textarea id="cap-custom-usage" rows="3" placeholder="When should the AI use this capability?"></textarea>
+          <textarea id="cap-custom-usage" rows="3" placeholder="When should the AI use this capability?" data-stream-private></textarea>
         </label>
         <p class="cap-secret-warning">Do not paste secret values. Only variable names are accepted and stored.</p>
       </div>
@@ -877,16 +920,16 @@
       <div class="modal-body">
         <div class="rules-scope">
           <label>Scope
-            <select id="rules-scope">
+            <select id="rules-scope" data-stream-private>
               <option value="__global__">Workspace baseline (all projects)</option>
             </select>
           </label>
         </div>
         <p class="hint" id="rules-hint">Applied to every project's AI system prompt. Markdown.</p>
-        <textarea id="rules-text" class="rules-text" spellcheck="false"></textarea>
+        <textarea id="rules-text" class="rules-text" spellcheck="false" data-stream-private></textarea>
         <fieldset class="practices" id="rules-practices" hidden>
           <legend>Engineering practices for this project</legend>
-          <p class="hint">Toggling a practice updates <code>.psm/profile.json</code>, scaffolds any missing starter files, and refreshes the managed CLAUDE.md / AGENTS.md region.</p>
+          <p class="hint">Toggling a practice updates <code data-stream-private>.psm/profile.json</code>, scaffolds any missing starter files, and refreshes the managed CLAUDE.md / AGENTS.md region.</p>
           <div id="rules-practices-list" class="practice-list"></div>
         </fieldset>
       </div>
@@ -901,14 +944,14 @@
       <div class="modal-head">
         <div>
           <h2>Skills used by the agents</h2>
-          <p class="hint">Mined from Claude Code transcripts (<code>~/.claude/projects</code>). Shows which skills have actually been invoked, how often, and where.</p>
+          <p class="hint">Mined from Claude Code transcripts (<code data-stream-private>~/.claude/projects</code>). Shows which skills have actually been invoked, how often, and where.</p>
         </div>
         <button class="icon-btn" id="skills-close" aria-label="Close">✕</button>
       </div>
       <div class="modal-body">
         <div class="skills-scope">
           <label>Scope
-            <select id="skills-scope">
+            <select id="skills-scope" data-stream-private>
               <option value="">Whole workspace</option>
             </select>
           </label>
@@ -936,6 +979,7 @@
     <script src="/agent-permissions.js"></script>
     <script src="/machines.js"></script>
     <script src="/workspaces.js"></script>
+    <script src="/monitoring.js"></script>
     <script src="/app.js"></script>
     <script src="/cloud.js"></script>
   </body>

@@ -6,6 +6,11 @@ on psm, todo-app and werewolf-dapp. Other projects were classified from the
 workspace inventory and their top-level structure; they have not all been
 audited for production readiness.
 
+This is a historical assessment. Its missing-work and setup findings describe
+September 21, not current release status. Use the [delivery index](README.md)
+and [acceptance evidence register](acceptance-evidence.md) for subsequent Todo,
+GitHub App and service-release results and the current development sequence.
+
 ## Recommended direction
 
 Use werewolf-dapp as the customer entry point and authority for accounts,
@@ -270,3 +275,13 @@ PSM's [generated inventory](../../PROJECTS.md) remains the project rundown.
 
 This is a reviewed integration plan and local staging preparation, not a claim
 that the app catalog, business workspaces, OIDC migration or deployment are done.
+
+## Company-owned service direction, October 6, 2026
+
+The operator wants all company applications and supporting services owned by
+Werewolf Solutions, aiming for zero external service accounts. Start with
+[Werewolf Watch](../deploy/WEREWOLF-WATCH.md), replacing required Better Stack
+signup. Inventory remaining external accounts (including source/build hosting,
+DNS/cloud control and notifications), define company-owned replacements and
+measurable migration/recovery acceptance before removing each dependency.
+Do not call this goal achieved while GitHub/DigitalOcean integrations remain.

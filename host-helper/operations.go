@@ -624,6 +624,17 @@ func observeProxy(target TargetConfig, raw json.RawMessage) (any, error) {
 	if !bytes.Equal(actual, expected) {
 		state = "update"
 	}
+	enabled, conflicts, err := enabledIngressSites(target)
+	if err != nil {
+		return nil, err
+	}
+	if len(conflicts) > 0 {
+		return map[string]any{"state": "conflict", "hostname": target.Hostname, "owned": true,
+			"detail": "another enabled nginx site declares this hostname: " + strings.Join(conflicts, ", ")}, nil
+	}
+	if !enabled && state == "in-sync" {
+		state = "update"
+	}
 	digest := sha256.Sum256(actual)
 	return map[string]any{"state": state, "hostname": target.Hostname, "owned": true, "configDigest": "sha256:" + hex.EncodeToString(digest[:])}, nil
 }

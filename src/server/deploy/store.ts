@@ -947,6 +947,11 @@ export class DeploymentStore {
     }, true);
   }
 
+  /** Commit compatible shared-controller pins together, or leave all pins unchanged. */
+  updateConnections(inputs: Array<Parameters<DeploymentStore["updateConnection"]>[0]>): DeploymentConnection[] {
+    return transaction(this.database, () => inputs.map((input) => this.updateConnection(input)), true);
+  }
+
   updateConnection(input: {
     connectionId: string;
     expectedMetadataRevision: number;
@@ -2105,6 +2110,14 @@ export class DeploymentStore {
       .prepare(`${RELEASE_SELECT} WHERE target_id = ? AND deactivated_at IS NULL AND tombstoned_at IS NULL`)
       .get(targetId) as ReleaseRow | undefined;
     return row ? releaseFromRow(row) : null;
+  }
+
+  listActiveUnverifiedReleases(): DeploymentRelease[] {
+    const rows = this.database.prepare(
+      `${RELEASE_SELECT} WHERE deactivated_at IS NULL AND tombstoned_at IS NULL
+       AND json_extract(receipt, '$.verified') = 0`,
+    ).all() as unknown as ReleaseRow[];
+    return rows.map(releaseFromRow);
   }
 
   listReleases(targetId: string): DeploymentRelease[] {

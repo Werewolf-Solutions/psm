@@ -9,6 +9,7 @@
  * the stable idempotency key, never by blindly repeating the request.
  */
 import { randomUUID } from "node:crypto";
+import type { DeploymentPlanDocument } from "./planner.ts";
 
 import {
   DeploymentConflictError,
@@ -357,6 +358,7 @@ export class DeploymentRunner {
   /** Resume durable work after a process restart. Recovery-required is manual. */
   start(): StartupRecovery[] {
     if (this.stopping) throw new DeploymentRunnerStoppedError("runner is stopping");
+    this.reconcileCompletedReleaseVerifications();
     const recovered: StartupRecovery[] = [];
     for (const run of this.store.listStartupWork()) {
       if (run.runKind === "prepare") {
@@ -1008,6 +1010,75 @@ export class DeploymentRunner {
     }
   }
 
+  /** A release verified in place has no controller submit to replace its old receipt. */
+  private reconcileCompletedReleaseVerifications(): void {
+    const reconciled = new Set<string>();
+    for (const release of this.store.listActiveUnverifiedReleases()) {
+      for (const run of this.store.listRuns(release.projectId, release.environmentId)) {
+        if (run.state !== "succeeded" || run.operation !== "deploy" || !run.planId
+          || run.planRevision === null || run.finishedAt === null || run.finishedAt < release.activatedAt
+          || reconciled.has(run.runId)) continue;
+        const plan = this.store.getPlan(run.planId, run.planRevision);
+        if (plan.artifactId !== release.artifactId) continue;
+        const document = plan.document as unknown as DeploymentPlanDocument;
+        const environment = document.manifest?.environments?.find((item) => item.id === release.environmentId);
+        if (!environment?.units.some((unit) => unit.id === release.unitId
+          && unit.target.targetId === release.targetId)) continue;
+        const checks = plan.actions.filter((action) => action.phase === "verify" || action.phase === "watch");
+        if (!checks.some((action) => action.phase === "verify")
+          || !checks.some((action) => action.phase === "watch")) continue;
+        const passed = new Set<string>();
+        let cursor = 0;
+        for (;;) {
+          const events = this.store.listEvents(run.runId, cursor);
+          for (const event of events) {
+            if (event.type === "action-checked" && event.data && typeof event.data === "object"
+              && !Array.isArray(event.data) && typeof event.data.actionId === "string") {
+              passed.add(event.data.actionId);
+            }
+          }
+          if (events.length < 500) break;
+          cursor = events[events.length - 1].sequence;
+        }
+        if (!checks.every((action) => passed.has(action.actionId))) continue;
+        this.recordVerifiedActiveReleases(run.runId, plan);
+        reconciled.add(run.runId);
+        break;
+      }
+    }
+  }
+
+  /** A release verified in place has no controller submit to replace its old receipt. */
+  private recordVerifiedActiveReleases(runId: string, plan: DeploymentPlan): void {
+    const document = plan.document as unknown as DeploymentPlanDocument;
+    if (document.operation !== "deploy" || !document.artifact) return;
+    const environment = document.manifest.environments.find((item) => item.id === document.environmentId);
+    if (!environment) throw new DeploymentRunnerError("verified deployment environment is missing from the approved plan");
+    const artifact = document.artifact;
+    const pending = environment.units.map((unit) => {
+      const active = this.store.getActiveRelease(unit.target.targetId);
+      if (!active) throw new DeploymentRunnerError(`verified target ${unit.target.targetId} has no active release`);
+      const receipt = active.receipt && typeof active.receipt === "object" && !Array.isArray(active.receipt)
+        ? active.receipt as Record<string, JsonValue> : {};
+      if (active.artifactId !== artifact.artifactId || active.projectId !== document.projectId
+        || active.environmentId !== document.environmentId || active.unitId !== unit.id
+        || receipt.commit !== artifact.commitSha || receipt.version !== artifact.version
+        || receipt.payloadDigest !== artifact.payloadDigest || receipt.releaseId !== active.releaseId) {
+        throw new DeploymentRunnerError(`verified target ${unit.target.targetId} does not match the approved artifact`);
+      }
+      return { active, receipt };
+    }).filter(({ receipt }) => receipt.verified === false);
+    for (const { active, receipt } of pending) {
+      const updated = this.store.verifyActiveRelease({
+        releaseId: active.releaseId,
+        targetId: active.targetId,
+        activationRunId: runId,
+        receipt: { ...receipt, verified: true, verifiedByRunId: runId, verifiedAt: this.now() },
+      });
+      if (!updated) throw new DeploymentRunnerError(`verified target ${active.targetId} changed before its receipt was recorded`);
+    }
+  }
+
   private terminal(runId: string, state: Extract<DeploymentRunState,
     "succeeded" | "failed" | "cancelled" | "interrupted" | "stale-plan" | "rolled-back">,
     reason: string,
@@ -1105,7 +1176,9 @@ export class DeploymentRunner {
         return this.terminal(runId, "rolled-back", "Rollback completed and was observed");
       }
       if (cancelled) return this.terminal(runId, "cancelled", "Cancellation completed and the resulting state was observed");
-      return this.terminal(runId, "succeeded", "Deployment completed and was observed");
+      const completed = this.terminal(runId, "succeeded", "Deployment completed and was observed");
+      this.recordVerifiedActiveReleases(runId, authority.plan);
+      return completed;
     } catch (error) {
       const current = this.store.getRun(runId);
       if (TERMINAL_RUN_STATES.has(current.state)) return current;

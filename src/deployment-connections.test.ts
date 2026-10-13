@@ -103,7 +103,7 @@ test("DNS and monitoring forms use declared scope and the runtime's secret and p
   const dns = validated(build("digitalocean-api@1", { zones: ["example.com"] }));
   assert.deepEqual(dns.constraints.allowedZones, ["example.com"]);
   assert.deepEqual(dns.requiredSecretSlots, ["apiToken"]);
-  const monitor = validated(build("external-monitor@1", { monitorIds: ["1234"] }));
+  const monitor = validated(build("external-monitor@1", { monitorIds: ["1234"] }, {provider:"better-stack@1"}));
   assert.deepEqual(monitor.constraints.allowedMonitorIds, ["1234"]);
   assert.equal(monitor.publicMetadata?.provider, "better-stack@1");
   assert.equal(ui().setupForm({ kind: "custom@1" }, environment), null);
@@ -224,4 +224,14 @@ test("choosing a private key file satisfies the credential form without a typed 
   assert.equal(secret.querySelectorAll("button")[0].disabled, false);
   await submit(secret);
   assert.deepEqual(calls.at(-2)?.body, { slot: "privateKey", value: "dummy-private-key" });
+});
+
+test('Werewolf monitoring defaults to a pinned SSH reader and needs no API token', () => {
+  const profile=build('external-monitor@1',{monitorIds:['todo-staging-web']},{...hostValues,user:'psm-watch-read'});
+  validated(profile);
+  assert.equal(profile.publicMetadata.provider,'werewolf-watch@1');
+  assert.deepEqual(profile.requiredSecretSlots,['privateKey']);
+  assert.equal(profile.constraints.ssh.user,'psm-watch-read');
+  assert.deepEqual(profile.constraints.allowedMonitorIds,['todo-staging-web']);
+  assert.throws(()=>build('external-monitor@1',{monitorIds:['todo-staging-web']}),/requires host/);
 });

@@ -13,6 +13,11 @@ AI that edits its code, preview its web page, attach workspace capabilities, and
 it — the multi-terminal workflow, in one place. It also regenerates `PROJECTS.md` on
 demand.
 
+Each workspace also has **Custom commands**. Select **Add command**, give it a name,
+choose a linked project's directory, and enter the command to run there. Each saved
+command has its own Run, Stop and Logs controls; it does not replace the project's
+main Run command. For example, Todo can run `npm run server` in `werewolf-dapp`.
+
 The [ecosystem integration assessment](docs/roadmaps/ecosystem-integration.md)
 maps PSM, Todo and Werewolf's current boundaries and the path to repeatable app
 rollouts. The first deployment target is Todo staging at `todo.werewolf.solutions`;
@@ -222,6 +227,13 @@ agents have actually used.
 
 ## The dashboard
 
+- **Stream privacy** — header toggle that covers sensitive PSM content with `***`.
+  It remembers its state across reloads and covers live updates, account details,
+  connection fields, paths/addresses, logs, conversations, plans, code diffs and
+  embedded previews. Toggle it off to view or edit covered content. Actual values
+  stay unchanged. This masks the PSM display; copied data, exports, other browser
+  tabs/windows, developer tools and external sign-in pages are outside its scope.
+
 - **⚡ Running** — what is running on this machine, not just what psm started. Lists every
   process holding a listening TCP port plus anything that looks like a dev server,
   attributed to a linked project by its working directory, with the port, uptime and
@@ -283,7 +295,7 @@ strict identity and provenance checks (mixed formats are rejected).
     should change. Each pick records the element's selector, opening tag, visible text, and
     page, and drops a numbered pin on it; the notes rail collects the batch. **Make changes**
     sends them all to the AI as one prompt and switches to the AI tab to watch the turn. The
-    same engine/model/effort/full-access/usage controls as the AI tab sit in dev mode's own
+    same engine/model/effort/usage controls as the AI tab sit in dev mode's own
     bar, so a round of notes can be aimed without leaving the preview. Notes survive reloads
     and reopening the project; `Esc` (or **Add note**) stops picking so the preview clicks
     through to the app again. Dev mode routes the preview through a loopback proxy that
@@ -292,10 +304,13 @@ strict identity and provenance checks (mixed formats are rejected).
 - **AI** — chat with **Claude Code** (default) or **Codex**, running inside the project
   directory so it makes real edits. Model choices are fetched fresh from the installed,
   authenticated CLI whenever the picker opens, and the effort picker follows each model's
-  advertised levels. Full-access toggle (run commands, not just edit), per-project
-  engine/model/effort/access memory, and the shared house rules as its system prompt.
+  advertised levels. Per-project engine/model/effort memory and the shared house
+  rules apply to each session. CLI sessions keep their sandbox enabled.
   - **Persistent sessions** — the conversation survives closing/reopening and server
-    restarts; it resumes the real session, so you never re-explain where you were.
+    restarts. Managed Claude and Codex resume their own provider sessions while scope
+    and permissions remain compatible. Codex selection or tool-catalog changes start
+    fresh with recent conversation context. See [managed Codex continuity](docs/roadmaps/managed-codex-continuity.md)
+    for fallback and local provider-history retention.
   - **Figures, not ASCII art** — psm's interaction protocol asks the AI to answer a
     "show me how this fits together" question with a ` ```psm-figure ` block instead of
     box art in a text fence, and the transcript renders each one as a real HTML surface
@@ -419,7 +434,7 @@ schemas/             the published JSON Schema for `.psm/deployments.json`
 - **Auto** (never hand-edited): last activity, git branch/tag, detected stack, README/pkg
   description, first open TODO line, run command, web port.
 - **Overrides** (`overrides.json`, hand- or UI-edited): status, priority, pinned, curated
-  description, next step, category, run/deploy commands, port, AI engine/model/effort & full-access,
+  description, next step, category, run/deploy commands, port, AI engine/model/effort,
   manual Working on flag, archived flag + note. Any blank override field falls back to the auto value.
 - **Identity** (`<project>/.psm/identity.json`): a stable `prj_…` id, shown on the project card and
   copyable from it. The folder name is only a human handle — it changes when you rename or move a
@@ -518,8 +533,7 @@ version still needs a version bump.
 - Folders with no git use newest file mtime for "last activity" (shown as `·mtime`).
 - Normal project-agent, planner, and reviewer sessions and recaps live in
   `.psm-sessions.json` (gitignored). Planner/reviewer commands are forced into Codex
-  `read-only` or Claude `plan` permission mode; the full-access project setting applies
-  only after confirmation hands work to the normal agent.
+  `read-only` or Claude `plan` permission mode. Normal agents use managed permissions.
 - Structured plans live in `.psm-plans/`; attachment ownership lives in
   `.psm-attachments-state.json`; custom manifests live in `.psm-catalog.json` (all gitignored).
 - What you *write* — the per-project notes pane: bugs and todos, features, ideas — is kept in
@@ -533,9 +547,8 @@ version still needs a version bump.
   starting psm.
 - The AI panes shell out to the `claude` / `codex` CLIs; they must be installed and
   authenticated. Their live APIs supply the current model and supported-effort catalogs;
-  discovery failures are shown without inventing model or effort choices. Full-access mode runs the
-  AI with elevated permissions in that project — it's off by default and opt-in per
-  project.
+  discovery failures are shown without inventing model or effort choices. Workspace
+  chat runs in the CLI sandbox; project and workroom agents use managed permissions.
 
 ## Provider maintenance
 
@@ -551,3 +564,9 @@ business workspaces appear only for a signed-in Werewolf account that the API sa
 (`src/server/workspaces.ts`). A project's workspace is recorded against its stable
 `.psm/identity.json` id, not its directory, and moving it never changes file, agent-pairing or
 deployment access. See [docs/roadmaps/workspace-implementation-status.md](docs/roadmaps/workspace-implementation-status.md).
+
+### Company-owned public monitoring
+
+[Werewolf Watch](docs/deploy/WEREWOLF-WATCH.md) checks deployed HTTPS services
+independently of PSM and shows health, TLS expiry and incidents in Deploy.
+No external monitoring account is required.

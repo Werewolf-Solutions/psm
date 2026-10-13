@@ -20,6 +20,7 @@ const {
   buildCommand,
   permittedFullAccess,
   planningSessionKey,
+  parseWorkroomProposal,
   resolveExtraDirs,
   restoreCachedRecap,
   resultIsLimit,
@@ -32,6 +33,19 @@ const {
   subscribeAi,
 } = await import("./ai.ts");
 type TurnSpec = Parameters<typeof buildCommand>[0];
+
+test("a workroom handoff keeps the source project first and needs a concrete objective", () => {
+  assert.deepEqual(
+    parseWorkroomProposal("todo-app", {
+      projects: ["other-app", "todo-app", "other-app"],
+      title: "Shared change",
+      objective: "Update the API and its caller",
+    }),
+    { projects: ["todo-app", "other-app"], title: "Shared change", objective: "Update the API and its caller" },
+  );
+  assert.throws(() => parseWorkroomProposal("todo-app", { projects: ["todo-app"], objective: "One project" }));
+  assert.throws(() => parseWorkroomProposal("todo-app", { projects: ["other-app"], objective: "" }));
+});
 
 test("reconnecting with stale picker values does not switch the active provider", () => {
   const name = `stream-selection-${Date.now()}`;
@@ -77,40 +91,11 @@ function repo(name: string): string {
 
 /* ---------- how much authority one turn runs with ---------- */
 
-test("a request cannot grant itself access the project does not have", () => {
-  assert.equal(
-    permittedFullAccess(false, true),
-    false,
-    "a POST asking for full access on a sandboxed project must not get it — " +
-      "that flag is --dangerously-bypass-approvals-and-sandbox",
-  );
-});
-
-test("a request can ask for less than the project allows", () => {
-  assert.equal(
-    permittedFullAccess(true, false),
-    false,
-    "turning the toggle off has to take effect on the next send, before its PATCH lands",
-  );
-});
-
-test("saying nothing means the project's saved setting", () => {
-  assert.equal(permittedFullAccess(true, undefined), true);
-  assert.equal(permittedFullAccess(false, undefined), false);
-});
-
-test("only an explicit false is a downgrade — nothing else is an upgrade", () => {
-  for (const requested of [null, 0, "", "false", "no", NaN, {}]) {
-    assert.equal(
-      permittedFullAccess(false, requested),
-      false,
-      `${JSON.stringify(requested)} must not raise a sandboxed project's authority`,
-    );
-    assert.equal(
-      permittedFullAccess(true, requested),
-      true,
-      `${JSON.stringify(requested)} is not the explicit opt-out, so the saved setting stands`,
-    );
+test("legacy full access values and requests cannot disable the sandbox", () => {
+  for (const saved of [false, true]) {
+    for (const requested of [undefined, false, true, null, 0, "true", {}]) {
+      assert.equal(permittedFullAccess(saved, requested), false);
+    }
   }
 });
 
@@ -281,20 +266,20 @@ test("a planner may read the other repository but not write anywhere", () => {
   assert.ok(args.includes("--add-dir"), "it still has to be able to read the other side");
 });
 
-test("sandbox-off is only ever workspace chat, and never with a wider scope", () => {
-  // Decided 2026-09-24 (P02): project and workroom agents never run unrestricted,
-  // even if the managed broker were unavailable and the CLI path were reached.
+test("every CLI scope remains sandboxed even when passed a legacy full-access value", () => {
   const wide = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", true);
   assert.equal(wide.args[wide.args.indexOf("--permission-mode") + 1], "acceptEdits");
   assert.ok(wide.args.includes("--add-dir"));
   const project = buildCommand(spec(), "go", true);
   assert.equal(project.args[project.args.indexOf("--permission-mode") + 1], "acceptEdits");
   const codexRoom = buildCommand(spec({ engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
-  assert.ok(!codexRoom.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(codexRoom.args[codexRoom.args.indexOf("-s") + 1], "workspace-write");
   const workspace = buildCommand(spec({ name: WORKSPACE_NAME }), "go", true);
-  assert.equal(workspace.args[workspace.args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.equal(workspace.args[workspace.args.indexOf("--permission-mode") + 1], "acceptEdits");
   const workspaceWide = buildCommand(spec({ name: WORKSPACE_NAME, engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
-  assert.ok(!workspaceWide.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.equal(workspaceWide.args[workspaceWide.args.indexOf("-s") + 1], "workspace-write");
+  const workspaceCodex = buildCommand(spec({ name: WORKSPACE_NAME, engine: "codex" }), "go", true);
+  assert.equal(workspaceCodex.args[workspaceCodex.args.indexOf("-s") + 1], "workspace-write");
 });
 
 test("the scope the AI is told matches the scope it is given", () => {

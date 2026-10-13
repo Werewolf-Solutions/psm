@@ -1,0 +1,39 @@
+{
+  "version": "0.3.38",
+  "feature": "Stream privacy header toggle",
+  "liveUiVerified": true,
+  "persistsAcrossReloads": true,
+  "mask": "***",
+  "actualApplicationValuesUnchanged": true,
+  "coverage": [
+    "account and business workspace identity",
+    "credentials and connection fields",
+    "local paths, addresses and sensitive link targets",
+    "logs, AI/planner transcripts, notes and code diffs",
+    "planning and source review details",
+    "embedded previews",
+    "tooltips, input values, live updates and free-form errors",
+    "monitoring host identity while keeping graphs visible"
+  ],
+  "limits": "Presentation masking inside PSM only. Copies, exports, other windows/tabs, external auth pages and developer tools can still expose original data.",
+  "verification": {
+    "repositoryTestsPassed": 806,
+    "repositoryTestsSkipped": 5,
+    "repositoryTestsFailed": 0,
+    "typecheck": "passed",
+    "firefoxDummyDataChecksPassed": 12,
+    "checks": [
+      "literal stars overlay",
+      "private conversation invisible",
+      "real field value preserved",
+      "field masked and inert",
+      "account tooltip masked",
+      "live content covered",
+      "live tooltip masked",
+      "latest tooltip restored",
+      "field and conversation restored",
+      "title masked",
+      "stored preference active"
+    ]
+  }
+}

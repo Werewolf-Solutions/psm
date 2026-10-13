@@ -169,3 +169,49 @@ test("project scripts need script.run, must exist in package.json, and run offli
   await assert.rejects(granted.script("deploy"), /no script named deploy. Available: test, build, type:check/);
   await assert.rejects(granted.script("build; rm -rf /"), /name of a script/);
 });
+
+test("large photos survive snapshots while oversized source gets an actionable rejection", async (t) => {
+  const h = fixture(t);
+  fs.writeFileSync(path.join(h.directory, "work.jpg"), Buffer.alloc(10 * 1024 * 1024, 7));
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async args => {
+    if (args[0] === "run") {
+      const source = args.find(arg => arg.endsWith("target=/source,readonly"))!.split("source=")[1].split(",target=")[0];
+      assert.equal(fs.statSync(path.join(source, "work.jpg")).size, 10 * 1024 * 1024);
+    }
+    return "passed";
+  });
+  t.after(() => runner.close());
+  await runner.tests();
+  fs.writeFileSync(path.join(h.directory, "huge.ts"), Buffer.alloc(9 * 1024 * 1024));
+  await assert.rejects(runner.tests(), /huge.ts.*9437184 bytes.*8388608 bytes.*Verification has not run/);
+  fs.unlinkSync(path.join(h.directory, "huge.ts"));
+  fs.writeFileSync(path.join(h.directory, "work.jpg"), Buffer.alloc(33 * 1024 * 1024));
+  await assert.rejects(runner.tests(), /work.jpg.*33554432 bytes/);
+});
+
+test("nested installs coexist and their builds record verification only on success", async (t) => {
+  const h = fixture(t);
+  h.store.change(h.project, "script.run", true, h.store.snapshot(h.project).revision, "operator");
+  fs.mkdirSync(path.join(h.directory, "client"));
+  fs.writeFileSync(path.join(h.directory, "client/package.json"), JSON.stringify({ scripts: { build: "node build.js" } }));
+  fs.copyFileSync(path.join(h.directory, "package-lock.json"), path.join(h.directory, "client/package-lock.json"));
+  const repo = new RepositoryTools(h.store.snapshot(h.project), h.store);
+  let fail = false;
+  const calls: string[][] = [];
+  const runner = new ManagedTaskRunner(repo, h.store, h.abort.signal, async args => {
+    calls.push(args);
+    if (fail && args[0] === "run") throw new Error("Unterminated template");
+    return "passed";
+  }, async () => Buffer.from("verified tarball"));
+  t.after(() => runner.close());
+  await runner.install(); await runner.install("client");
+  await runner.script("build", "client");
+  assert.equal(repo.verificationStatus().verified, true);
+  const bootstrap = calls.filter(args => args[0] === "run").at(-1)!.at(-1)!;
+  assert.match(bootstrap, /"cwd":"\."/);
+  assert.match(bootstrap, /"cwd":"client"/);
+  fail = true;
+  await assert.rejects(runner.script("build", "client"), /Unterminated template/);
+  assert.equal(repo.verificationStatus().verified, false);
+  await assert.rejects(runner.install("../outside"), /repository-relative|protected/);
+});

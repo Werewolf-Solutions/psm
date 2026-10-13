@@ -109,6 +109,17 @@ test("a second attempt continues the same room instead of opening another", asyn
   assert.equal(kit.sent.length, 2);
 });
 
+test("resuming with a deleted room creates a replacement with the selected AI", async () => {
+  const kit = host({ ai: (room) => room === "deleted-room" ? null : { engine: "claude", model: "opus", effort: "medium" } });
+  const repairer = new WorkroomPreparationRepairer(kit.host);
+  assert.equal(repairer.exists("deleted-room"), false);
+  const room = await repairer.start(job({ workroomId: "deleted-room", engine: "claude", model: "opus", effort: "medium" }), checked([]));
+  assert.equal(room, "room-1");
+  assert.equal(kit.opened.length, 1);
+  assert.deepEqual(kit.opened[0].ai, { engine: "claude", model: "opus", effort: "medium" });
+  assert.equal(kit.sent.length, 1);
+});
+
 test("an unanswered question is not talked over", async () => {
   const kit = host();
   const repairer = new WorkroomPreparationRepairer(kit.host);

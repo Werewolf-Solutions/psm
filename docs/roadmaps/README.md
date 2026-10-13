@@ -1,7 +1,8 @@
 # PSM delivery index — start here
 
-Updated 2026-10-01. This is the single execution order for the PSM plans in this
-repository. Detailed specifications remain in their linked documents. Follow
+Planning reconciled 2026-10-05. This is the single delivery index for the PSM plans
+in this repository. Stable phase IDs identify scope; development priority and
+prerequisites are listed separately. Detailed specifications remain linked. Follow
 this index to avoid restarting completed work, following obsolete architecture,
 or treating every document as a separate project needing another kickoff.
 
@@ -9,12 +10,12 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P07a — Button-only GitHub setup (in progress)**, while completing P07's remaining acceptance. P07's local managed release is verified; P03's live hosted gate remains blocked. |
-| Execution state | PSM `dev`, package 0.3.21. Todo managed static release succeeded; Handymanservices managed Node-service staging verification succeeded as `run_29d57729336843e6` on 2026-10-01. The PSM fixes are committed locally. |
-| Latest product decision | Every cockpit project should have a managed setup entry point. Static and Node-service recipes are implemented; zero-downtime Node switching remains P08 work. Hosted runners remain the SaaS target. |
+| Next phase | **P05 rendered browser tooling**, alongside P07/P07a remaining release acceptance. P02 local restriction editing and P05 managed Codex continuity are implemented with recorded checks. P03's live hosted gate remains blocked. |
+| Execution state | Working-tree version 0.3.33: workspace restrictions, managed Codex continuity and October 6 deployment source/version clarity and preparation recovery and reconciliation completion and completed-release UI and Werewolf-owned public monitoring with uptime/resource graphs and a Monitoring tab, alongside existing uncommitted changes. Todo staging 0.6.5 is active (October 6); Handymanservices staging 1.0.1 remains active. Current local checks are tracked separately in the [evidence register](acceptance-evidence.md). |
+| Latest product decision | After thorough acceptance, enable automatic staging deployment, then automatic production deployment under explicit environment policies. Each release is gated by tests, compatibility, target health and recovery evidence. P11 adds configurable engineering workflows and harnesses. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); successful managed release recorded 2026-09-29. |
-| First complete outcome | From hosted PSM with the laptop disconnected, connect the machine, grant scoped access, deploy Todo staging and verify the result. |
-| Resume action | Complete Todo's remaining P07/P07a acceptance and a retained-release rollback rehearsal. For P08, test a newer Handymanservices release and rollback, then implement a health-checked switch without a restart gap. Complete browser/workspace and hosted acceptance. |
+| First complete outcome | Connect a target, configure authority, deploy and verify staging through PSM; then prove automatic staging and production releases under the accepted policy. Hosted PSM is an execution option with its own P03 acceptance. |
+| Resume action | Close P07/P07a local acceptance and P08a.2 retained rollback; complete browser/workspace checks, then P08a.3 switching and P08d monitoring. Develop P12 contract gates and promotion in parallel. Prove staging automation before production automation. |
 
 ### What the current evidence means
 
@@ -40,11 +41,12 @@ or treating every document as a separate project needing another kickoff.
   Handymanservices staging. This does not close P08's rollback and zero-downtime work.
 - **Still open:** P07 rollback, browser and hosted acceptance; P07a's fresh-account
   button-only GitHub flow; P08 server/worker/database operations. P03 still gates
-  the laptop-disconnected hosted case.
-- **Delivery state:** PSM 0.3.21 source is committed locally on `dev`; this
-  documentation records the first Handymanservices deployment. Todo's earlier
+  the hosted execution case; CI-based automation has its own P12 acceptance.
+- **Historical delivery state (October 1):** PSM 0.3.21 source was recorded as
+  committed locally on `dev`. The October 5 checkout provenance is in the evidence
+  register; no newer test or deployment result is inferred. Todo's earlier
   release evidence remains in [Todo staging](../deploy/TODO-STAGING.md).
-- **Latest tests:** 2026-10-01 typecheck and full PSM suite passed: **740 passed,
+- **Latest recorded acceptance checkpoint:** 2026-10-01 typecheck and full PSM suite passed: **740 passed,
   5 skipped, 0 failed**. Authenticated browser behavior and Watch remain untested.
 
 The server-specific script remains a preflight/reference alongside the implemented
@@ -104,55 +106,95 @@ request a password in chat. Production deployment, purchases and live data
 changes are not implied by aggregating these plans.
 
 Status vocabulary: **next**, **pending**, **in progress**, **blocked**, **verified**.
-Only verified acceptance closes a phase. Historical “implemented” or passing
-mock tests alone cannot close a live-deployment or hosted-isolation gate.
+Record implementation, local, target and hosted acceptance separately in the
+[evidence register](acceptance-evidence.md). Only a milestone whose required
+acceptance passed is verified. A phase with any required gate open stays in
+progress; passing mocks cannot close target or hosted acceptance.
 
 ## Ordered delivery queue
 
-Phase IDs below are the execution order. Numbers inside source documents are
-local to those documents; they are not additional competing sequences.
+Phase IDs below are stable scope identifiers. The development sequence below
+sets priority, and named prerequisites determine which work is eligible. Local
+implementation can proceed while its separate hosted acceptance is blocked.
 
 | ID / status | Deliverable | Depends on | Acceptance and source |
 | --- | --- | --- | --- |
 | **P00 · verified** | Establish the current baseline | — | First triage the uncommitted `dev` working tree (commit, split or discard with the user) so later evidence refers to a known revision. Inventory existing changes in PSM/Todo/Werewolf, identify implemented versus remaining work and reconcile conflicting deployment notes without modifying live state. Confirm which workloads share the first target host. Put every entry in [Open decisions](#open-decisions) in front of the user. Record actual checks and the next concrete code task. [Existing evidence](workspace-implementation-status.md), [ecosystem](ecosystem-integration.md), [first machine](../deploy/machines/todo-staging/README.md). |
 | **P01 · verified** | Machine inventory and reusable bootstrap | P00 | Machine/project/environment records, role identities, inspection, generated bootstrap, collision handling and repeatable enrollment work against test hosts. Keep mutations behind existing authority until P02/P03 integrate the new path. [Machine feature](machine-onboarding.md), [account model](agent-access-and-operations.md#first-milestone-prepare-deployment-machines). |
-| **P02 · verified** | Unified access policies and credential lifecycle | P01 | Scoped Allow/Ask/Deny rules, presets, durations, delegation, revision checks, revocation and credential leases apply to commands, integrations and deployment. Existing grants migrate without widening. Full access and custom restrictions describe actual enforcement. Starts by making access honest: the current button is renamed to describe its limited managed grants, and blockers report their cause (grant, tool, connection, provider restriction or runner). Full access is unavailable in a Workroom while a provider's bypass disables its sandbox (Codex's boundary is not canary-verified), and scope previews are generated from the argv actually spawned. [Access design](agent-access-and-operations.md#authority-and-execution-design), [existing permission implementation](agent-permissions.md). |
+| **P02 · in progress; local core accepted** | Unified access policies and credential lifecycle | P01; P03 for hosted delegation | Scoped rules, presets, revisions, revocation and leases have recorded local acceptance. Workspace restriction editing is implemented with automated checks in 0.3.26; rendered browser acceptance remains open. Person-to-person delegation and hosted policy management remain open. Scope and actual enforcement must agree. [Editor contract](workspace-policy-editor.md), [permission evidence](agent-permissions.md). |
 | **P03 · blocked (live)** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
-| **P04 · verified (local)** | Complete machine onboarding in the web app | P01–P03 | Connect → Choose access → Set up → Ready works for new/existing supported hosts. Automatic administrator setup or one generated copyable command, honest progress, retries, verification and connection binding; a second project reuses the machine without inheriting the first one's access. [Complete UX and acceptance](machine-onboarding.md). |
-| **P05 · verified (local)** | Practical agent tools, discovery and task continuity | P02–P04 | Authorized install/build/typecheck/test/preview/browser/command workflows complete from PSM. Discover missing connections and offer Grant and continue; preserve decisions across turns. Compare matched PSM/direct-provider tasks. Parts that do not need hosted runners — native provider session resume instead of history replay, standing-grant MCP calls under P02 policy, and the local-runner execution profile — may start after P02 while P03 is blocked. [Agent diagnosis and runtime](agent-access-and-operations.md), [provider checks](../provider-maintenance.md), [capability baseline](../attach-plan.md). |
-| **P06 · verified (code); staging rollout needs approval** | Close existing app/workspace release defects | P00; before P07 | Reverify and finish only outstanding auth, transfer concurrency/retry, viewer UI, membership and browser findings. Test with disposable users across two businesses; preserve personal/offline behavior and correct staging identity. Do not reapply already integrated worktree patches. [Completion plan](workspace-completion-plan.md), [focused regressions](workspace-focused-followup.md), [latest recorded evidence](workspace-implementation-status.md), [current SSO contract](../werewolf-psm-registration.md). |
-| **P07 · in progress; local release verified** | First complete hosted-to-staging deployment | P04–P06 | Todo run `run_a7ef155bd9f04884` succeeded with version 0.6.0 and four passed release probes. Remaining: staging login/workspace acceptance, retained-release rollback, applicable Watch checks, P07a product setup and laptop-disconnected execution after P03. [First acceptance case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [deployment engine](../deploy/DEPLOYMENT-SYSTEM.md), [controller](../deploy/controller/README.md), [staging observations](../deploy/TODO-STAGING.md). |
+| **P04 · in progress; local acceptance recorded** | Complete machine onboarding in the web app | P01 and P02 core; P03 for hosted acceptance | Local wizard and real-host verification are recorded. Remaining hosted HTTPS enrollment, expiry/regeneration and recovery/reuse acceptance are tracked separately. [Complete UX and acceptance](machine-onboarding.md), [evidence register](acceptance-evidence.md). |
+| **P05 · in progress; local slices accepted** | Practical agent tools, discovery and task continuity | P02 core; P04 for target commands; P03 for hosted execution | Script execution, discovery, Claude resume and the matched comparison have recorded acceptance. Managed Codex continuity now has protocol/lifecycle and real two-turn 0.160.0 evidence. Remaining: real agent browser inspection, private dependencies and hosted acceptance. [Continuity contract](managed-codex-continuity.md), [evidence register](acceptance-evidence.md), [provider checks](../provider-maintenance.md). |
+| **P06 · in progress; code/local browser evidence recorded** | Close existing app/workspace release defects | P00; required staging checks before automatic rollout | Accepted transfer/viewer fixes must be traced into the released candidate, then staged browser/workspace/isolation checks completed. Preserve prior fixes instead of replaying old briefs. [Completion plan](workspace-completion-plan.md), [evidence register](acceptance-evidence.md), [SSO contract](../werewolf-psm-registration.md). |
+| **P07 · in progress; static target release accepted** | Complete staging release path | P04 local; relevant P05/P06 slices; P03 for hosted slice | Todo run `run_a7ef155bd9f04884` passed four release probes. Remaining local gate: browser/workspace journey, retained rollback, required Watch and P07a repeatable setup. Hosted execution is a separate acceptance slice. [First case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [Todo evidence](../deploy/TODO-STAGING.md). |
 | **P07a · in progress** | Button-only GitHub setup | P07 first release | Connect GitHub through the App Manifest flow (Create → Install on GitHub), then only PSM buttons: PSM authenticates as its App, creates and pins the release controller from its reviewed bundle, updates and re-pins it, creates the Environment, and gives each release a one-hour `actions: read` source token instead of a stored artifact-reader App key. Acceptance: a fresh organisation deploys Todo staging with no hand-copied key, variable, push or hash. P07 closes only after this, since its acceptance requires the product flows. [Plan](github-button-setup.md). |
-| **P08 · in progress; first Node-service release verified on a host** | General application deployment and operations | P07, P07a | Handymanservices staging has a managed immutable frontend-plus-Express release, scoped systemd service, brokered secrets, nginx/TLS and successful public probes (`run_29d57729336843e6`). Next: newer-release and retained rollback acceptance, then a health-checked switch without a restart gap; P08 is not complete until zero-downtime releases work. Workers, databases, migrations, scale and backup/recovery remain separate acceptance. [Node-service recipe](../deploy/NODE-SERVICE-RECIPE.md), [project setup](../deploy/PROJECT-SETUP.md), [deployment spec](../deploy/DEPLOYMENT-SYSTEM.md). |
-| **P09 · pending** | Unattended maintenance and SaaS operations | P08 | Scheduled/monitor-triggered tasks honor standing grants, recover from interruption, avoid duplicate external mutations, and expose usage/retention limits. Prove restore and credential rotation; optional local/user-hosted runners share the protocol. [Runner requirements](agent-access-and-operations.md#runners-and-saas-operation), [machine lifecycle](machine-onboarding.md#ongoing-machine-management). |
-| **P10 · pending** | Complete project governance and agent usage visibility | P05, P09 | Audit the older governance plan against current rules/profile/skills features, then complete only missing applicability/readiness UI, rule provenance and actually observable usage reporting. No duplicate rules system or incompatible metadata migration. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
-| **M1 · pending** | Keep machines and apps current | P04 (machine inventory), P08 | PSM tracks what everything runs and when it stops being supported, and turns each gap into a To do item with a reviewed plan. **Inventory:** per machine the OS release and its end-of-support date, kernel, reboot-required, runtimes (system and nvm Node), PM2, nginx, certbot, Redis; per project the runtime major, outdated and vulnerable dependencies (`npm outdated`, `npm audit`) and its Node `engines`. End-of-life dates come from a pinned data source such as endoflife.date. **Plans:** dependency and runtime updates as reviewed commits with tests, released through the normal recipe; tool updates on hosts through the host helper; OS upgrades as a plan of their own (snapshot first; for a two-step jump such as 20.04→24.04, prefer building a fresh 24.04 machine, moving apps with managed releases and retiring the old one over an in-place upgrade). **First case:** `werewolf-alpha` on Ubuntu 20.04 (standard support ended May 2025) with system Node v14, which also unlocks the container path. Acceptance: one machine and one project brought current through PSM alone, with rollback evidence. |
-| **P11 · pending** | Capability marketplace and conversational scaffolding | P05, P10 | Resolve registry ownership/review/update policy and the new-project conversation contract; deliver the deferred capabilities after assessing current implementation. Preserve attach/detach ownership and scope-based tool policy. [Attach plan, deferred phases 3–4](../attach-plan.md#11-phases). |
+| **P08 · in progress; P08a.1 accepted** | Application deployment and operations | Named milestone prerequisites | P08a.1 service baseline, P08a.2 recovery, P08a.3 uninterrupted switching, P08b workers/jobs, P08c data/migrations/recovery, P08d observation, **P08e machine inventory and approved app/worker controls**. Later work depends on the relevant accepted milestone. [Milestone scope](application-operations.md), [machine operations plan](../deploy/MACHINE-OPERATIONS.md), [Node recipe](../deploy/NODE-SERVICE-RECIPE.md). |
+| **P09 · pending** | Unattended maintenance and SaaS operations | P02 policy; P08a.2/P08d for service maintenance; P03 for hosted jobs | Scheduled/monitor-triggered tasks honor standing grants, recover without duplicate mutations, and expose usage/retention limits. Data-changing tasks need the target's proven recovery path. P08b product schedules and P09 control tasks have separate acceptance. [Operations milestones](application-operations.md), [runner requirements](agent-access-and-operations.md#runners-and-saas-operation). |
+| **P10 · pending** | Complete project governance and agent usage visibility | P05 observable tools/context; P03 for hosted reporting | Audit the archived governance plan and finish missing applicability/readiness UI, rule provenance and measurable usage reporting. Local governance does not wait for all P09 maintenance features. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
+| **M1 · pending** | Keep machines and apps current | P04 local inventory; P08a.2 for app migration | Inventory OS support dates, kernel/reboot, runtimes and host tools; report project runtime constraints, outdated/vulnerable dependencies and a pinned end-of-life data source. Produce tested dependency/runtime commits, reviewed host-tool updates and snapshot/restore-backed OS migration plans. First case: the recorded Ubuntu 20.04/system Node v14 host; consider a fresh supported host plus app migration. Acceptance: one machine and one project updated through PSM with recovery evidence. Schedule this before container recipes needing a newer platform. [Operations boundaries](application-operations.md). |
+| **P11 · pending** | Engineering workflows, marketplace and scaffolding | P02 core and relevant P05 tools; P03 for hosted execution | P11a local bundles/components; P11b evaluation and Sandcastle adapter; P11c reviewed marketplace; P11d conversational scaffolding. P10 metadata is reused as available; its full completion is not a prerequisite for local imports. [Workflow milestones](engineering-workflows.md), [attach plan](../attach-plan.md#11-phases). |
+| **P12 · pending** | API lifecycle and automatic staging/production releases | Named recipe recovery/health gates; P03 only for hosted control | P12a contract/consumer gates; P12b tested promotion and policy; P12c automatic staging; P12d automatic production after staging acceptance. CI-based execution can proceed independently of hosted fleet provisioning. [Detailed milestones](release-and-api-lifecycle.md#p12--release-promotion-and-api-consumer-lifecycle). |
+| **P13 · pending** | Progressive and distributed production operations | P12d, P09 durable operations, target recovery | Progressive rollout, multiple regions/clusters, health gates and failure drills; separate mechanism, scale and control-plane resilience acceptance. [Detailed plan](release-and-api-lifecycle.md#p13--progressive-and-distributed-production-operations). |
 
-P01 starts machine work first as requested. P03 is an initial-release dependency,
-not a later optional hosted phase. P06 can be completed earlier if hosted
-provisioning is blocked; it must close before P07. The hosted-independent parts of
-P05 (see its row) are the other parallel track while P03 waits on a decision.
-P10/P11 do not delay the first useful SaaS deployment.
+### Development sequence and prerequisites
+
+Use this priority order for the release path. Start eligible independent work
+when another milestone is blocked; keep each acceptance gate visible.
+
+| Priority | Work | Gate before advancing |
+| --- | --- | --- |
+| 1 | Close relevant P02/P05 tooling and P06 candidate/browser gaps; finish P07a repeatable controller setup and P07 staging acceptance. | Trace fixes into the released source; prove sign-in/isolation, a second retained static release and rollback. |
+| 2 | Complete P08a.2 recovery, P08a.3 service switching and P08d operational health for the first service target. Start P08e read-only machine inventory and bounded controls for a PSM-managed unit; start P12a API contract/consumer checks alongside this. | Evidence for rollback, failed candidate handling, uninterrupted service switch and external monitoring; machine controls need their own installed grant and action verification. |
+| 3 | Deliver P12b policy/promotion, then P12c automatic staging and P12d automatic production. | Thorough testing and recipe-specific recovery; staging automation accepted before production automation. Persistent-data targets require their own restore/migration evidence. |
+| 4 | Expand accepted production recipes through P08b/P08c and P09 maintenance. | Representative worker/data recovery and durable maintenance acceptance; unrelated recipes do not block the first accepted service. |
+| 5 | Deliver P13 progressive/distributed rollout and measured scale/resilience milestones. | P12d and the target's accepted durable operation/recovery path. |
+
+Parallel tracks: P03 hosted infrastructure integrates hosted slices of P04/P05/P07
+and P12, and supplies P02 delegation. P03 is required for the first hosted SaaS
+outcome; an accepted GitHub/CI executor can deliver automatic releases while the
+hosted fleet decision is pending. M1 inventory starts after P04 local inventory;
+host/app upgrades use P08a.2 recovery and are scheduled before any recipe that
+needs the newer platform. P10 local governance and P11a/P11b workflow management
+start after relevant P05 tools; P11c registry and P11d scaffolding have separate
+decisions and acceptance. They do not delay the release automation path.
 
 ```mermaid
 flowchart LR
   P00[Baseline] --> P01[Machine bootstrap]
   P01 --> P02[Access policies]
-  P02 --> P03[Hosted runners]
-  P03 --> P04[Web onboarding]
-  P04 --> P05[Agent capabilities]
-  P02 -. hosted-independent parts .-> P05
+  P02 --> P03[Hosted execution]
+  P01 --> P04[Local machine onboarding]
+  P02 --> P04
+  P02 --> P05[Agent capabilities]
+  P03 -. hosted acceptance .-> P04
+  P03 -. hosted acceptance .-> P05
   P00 --> P06[App release fixes]
   P05 --> P07[Verified staging release]
   P06 --> P07
-  P07 --> P07a[Button-only GitHub setup]
-  P07a --> P08[General app operations]
-  P08 --> P09[Unattended maintenance]
-  P09 --> P10[Governance and visibility]
-  P05 --> P10
-  P10 --> P11[Marketplace and scaffolding]
+  P06 --> P07a[Repeatable GitHub setup]
+  P07a --> P07
+  P07 --> P08a1[Service baseline]
+  P08a1 --> P08a2[Service recovery]
+  P08a2 --> P08a3[Uninterrupted switching]
+  P08a1 --> P08d[Operational observation]
+  P04 --> P08e[Machine operations]
+  P02 --> P08e
+  P08a1 --> P08e
+  P08a2 --> P08bc[Workers and data recipes]
+  P08a2 --> P09[Unattended maintenance]
+  P08d --> P09
+  P05 --> P10[Governance and visibility]
+  P11[Engineering workflows and marketplace]
   P05 --> P11
+  P02 --> P11
+  P04 --> M1[Machine and app updates]
+  P08a2 --> M1
+  P07a --> P12[API lifecycle and release automation]
+  P08a3 --> P12
+  P08d --> P12
+  P03 -. hosted execution option .-> P12
+  P12 --> P13[Progressive and measured production scale]
+  P09 --> P13
 ```
 
 ## Open decisions
@@ -176,16 +218,27 @@ and move it to the resolved list below.
   shared droplet's dapp process handles live Stripe. Confirm each mutation there
   individually, even under a standing grant.
 
-The table below keeps the original questions for reference.
+The table below lists genuinely open implementation inputs. Earlier answers
+remain above as dated decisions, rather than being reopened by stale questions.
 
 | Decision | Gates | Current evidence |
 | --- | --- | --- |
-| Register PSM with production Werewolf: create the `psm-web` CloudApplication row and choose `PSM_BUSINESS_ID` (the business PSM bills under; needs Stripe Connect onboarding). | P03 workspace-authenticated APIs, P06/P07 hosted sign-in | Production answers `503 app_not_configured`; `PSM_BUSINESS_ID` is "a decision, not a lookup" ([registration](../werewolf-psm-registration.md)). |
+| Register or repair the single `psm` CloudApplication in production; choose its publisher `PSM_BUSINESS_ID` if the row must be created. | P03 hosted identity and relevant production sign-in | Prior observations found `app_not_configured`; recheck before mutation. Identity setup has no Stripe prerequisite. Billing provisioning is a separate operation. [Registration contract](../werewolf-psm-registration.md). |
 | Where the hosted runner fleet runs: provider, isolation technology (containers, microVMs) and monthly budget. | P03 | Only ruled out so far: the shared staging droplet and the loopback agent API. |
-| How hosted runners authenticate to model providers unattended (API accounts rather than local CLI logins) and the resulting cost model. | P03, P05 hosted parts | Local CLI logins and OS keyrings are not cloud credentials ([runners](agent-access-and-operations.md#runners-and-saas-operation)). |
-| Whether the first target host carries production workloads, and therefore how first mutations there are confirmed. | P01 live tests, P04, P07 | P00 confirms what runs on `werewolf-alpha`. Until then, treat its first mutations as production-adjacent: confirm each specific operation even when a standing grant covers it. |
+| Which provider-specific unattended authentication paths and compute budgets are supported first. | P03/P05 hosted acceptance | Bring-your-own model keys is already decided; supported provider paths need their own evidence. |
+| API support window, retirement criteria and owner for migration notices. | P12a/P12d breaking-change policy | Compatible updates need no forced client upgrade; breaking changes require declared support/migration policy before automatic rollout. |
+| Registry operator/review keys and the initial conversational scaffolding contract. | P11c/P11d | P11a/P11b local import/evaluation can proceed independently. |
+| First distributed provider/workload and measurable scale/recovery targets. | P13 adapter and scale acceptance | Google-scale complexity is the long-term ambition; a Google Cloud adapter is a separate explicitly selected implementation target. |
 
 ## Known decisions and conflicts already resolved
+
+- **Release automation (2026-10-05):** prove the workflow thoroughly, then enable
+  automatic staging and subsequently automatic production under explicit
+  environment policies. Human review is configurable; a local cockpit click is
+  not the target requirement for every release. Existing runtime guards remain
+  in place until the new executor/policy path passes acceptance.
+- **print-shop (2026-10-05):** intentionally stopped to free droplet capacity.
+  It is not an unresolved recovery incident or a release-path prerequisite.
 
 - **Hosting:** the current static web page/local-agent implementation is a
   baseline. The user selected PSM-hosted runners for the new SaaS. The old
@@ -199,14 +252,15 @@ The table below keeps the original questions for reference.
   where authorized. Do not continue advertising the present narrow tool list as
   unrestricted full access.
 - **Sign-in:** use the current one-web-application PKCE/Origin contract in
-  `werewolf-psm-registration.md`; do not rebuild the superseded native-client SSO.
+  `werewolf-psm-registration.md`: key `psm`, type `web`. Historical `psm-web`
+  registration references are superseded; identity and billing are separate.
 - **Evidence:** old notes disagree about whether host enrollment exists or the
   connection root is stale. Inability to read a root-owned contract does not prove
   absence. Inspect through authorized operations and compare observed revisions.
   The 2026-09-23 account/helper check did not prove target enrollment contents.
-- **Workspace work:** older plans say auth is blocked; later status sections
-  record local fixes. Reproduce current failures before doing more work. The
-  transfer lock-expiry race was still recorded as open; verify current code.
+- **Workspace work:** the September 24 P06 handoff records the transfer
+  lock-expiry fix and local browser evidence. Trace those fixes into each release
+  candidate and reverify staging; do not treat the older finding as unfixed code.
 - **Existing architecture:** retain product/service boundaries for this delivery.
   The separate API/DAO extraction proposal below is not a prerequisite.
 - **Instructions in older task briefs:** preserve applicable task-specific user
@@ -218,6 +272,10 @@ The table below keeps the original questions for reference.
 
 | Document | Role in this sequence |
 | --- | --- |
+| [Acceptance and evidence register](acceptance-evidence.md) | Consolidated dated results, open gates and current source provenance; update when each acceptance slice changes. |
+| [Application operations milestones](application-operations.md) | P08 service, worker, data and observation scope; named prerequisites for later phases. |
+| [Workspace restriction editor](workspace-policy-editor.md) | P02 local UI, management authority, revision fencing and acceptance boundaries. |
+| [Managed Codex continuity](managed-codex-continuity.md) | P05 retained managed threads, active-turn tool routing, failure/replay boundaries and native acceptance. |
 | [Agent access and operations](agent-access-and-operations.md) | Active overall product/architecture specification; P01–P09. |
 | [Machine onboarding](machine-onboarding.md) | Active reusable web feature; P01–P04 and P07. |
 | [Agent permissions](agent-permissions.md) | Implemented baseline and runtime limitations to audit/extend in P02/P05. |
@@ -233,7 +291,8 @@ The table below keeps the original questions for reference.
 | [Prepared Todo target](../deploy/host-targets/werewolf__todo-staging-web.json) | Example pending contract, not live truth or approved configuration; confirm guessed values and observed UIDs. |
 | [Release controller](../deploy/controller/README.md) | P07 controller/artifact/key prerequisites and contract. |
 | [Button-only GitHub setup](github-button-setup.md) | P07a plan: GitHub App via manifest, PSM-managed controller and pins, per-release source token. |
-| [Project deployment setup](../deploy/PROJECT-SETUP.md) | Implemented static onboarding, current limits and the handymanservices case for P08. |
+| [Release and API lifecycle](release-and-api-lifecycle.md) | P12–P13 plan: staging/production promotion, consumer compatibility, change requests and progressive multi-region production. |
+| [Project deployment setup](../deploy/PROJECT-SETUP.md) | Implemented static/Node onboarding, current limits and recorded Handymanservices acceptance. |
 | [Publishing a new app](../deploy/PUBLISHING-A-NEW-APP.md) | Historical/manual release reference; managed release is the acceptance path. |
 | [Deployment ADR index](../deploy/adrs/README.md) | Existing decisions: monitoring, keyring, Go helper, controller revisions and retention. Revisit explicitly where hosted execution needs a new implementation. |
 | [Host helper](../../host-helper/README.md) | Existing privileged executor contract and package/build instructions; P01/P04. |
@@ -242,7 +301,9 @@ The table below keeps the original questions for reference.
 | [Old SSO implementation prompt](../werewolf-sso-dapp-prompt.md) | Historical companion to the old SSO plan; do not execute against the current auth design. |
 | [Old hosted design](../hosted-psm-plan.md) | Superseded. Prior constraints/context only; no fresh implementation queue. |
 | [Attach/marketplace plan](../attach-plan.md) | Existing attach and plan-UI baseline; deferred marketplace/scaffolding in P11. |
+| [Engineering workflows](engineering-workflows.md) | P11 extension: evaluate engineering practices, manage bundles and individual components, and integrate Sandcastle through an execution adapter. |
 | [Capability catalog](../workspace-capabilities.json) | Current integration declarations; context for P05/P11, never authority to expand a service's access. |
+| [ai-mesh provider and execution](ai-mesh-provider.md) | Planned P05/P11 extension: trusted remote routines, bounded open-model implementation, and authorized machine-local subscription providers; P02 permissions, P12 release evidence and P03 only for hosted execution. |
 | [Provider maintenance](../provider-maintenance.md) | Current provider discovery/validation contract; P03/P05 and later upgrades. |
 | [Preserved governance plan](archive/project-governance.plan.json) | Snapshot of local structured plan revision 3; audit remaining work in P10. |
 | [Preserved API/DAO split](archive/api-dao-split.plan.json) | Separate deferred architecture proposal; see below. |
@@ -263,8 +324,13 @@ state or unchecked steps as approval to perform those changes.
 
 ## Evidence and handoff template
 
-Append one entry per completed increment; update the current-position table too.
+Append one entry per completed increment; update the current-position table and
+[acceptance register](acceptance-evidence.md) too. Preserve dated records below.
 Keep the source specifications stable unless a design decision actually changes.
+
+Historical handoffs retain their original wording. In particular, their
+`psm-web` identity references are superseded by the current registration contract:
+app key `psm`, type `web`, with billing registration handled separately.
 
 ```text
 Phase / step:
@@ -744,4 +810,44 @@ Changed: a finished controller whose release is active under a different target
   npm test 677 tests, 672 pass, 0 fail, 5 skipped.
 Next action: restart PSM; Check again on run_c9cd… (ends failed); Check readiness →
   Pin current contract; approve the fresh plan, which redeploys the same artifact.
+```
+
+### 2026-10-05 — P02 local workspace restriction editor
+
+```text
+Phase / step: P02 local workspace policy editing
+State: implementation and automated local checks complete; phase in progress
+Changed: policy store/router, Capabilities UI, provider authority key, local
+  workspace authorization wiring, tests and roadmap evidence. Package 0.3.26.
+Verification: npm run typecheck passed; npm test 760 tests, 755 passed, 0 failed,
+  5 skipped. Targeted store/API/role/UI/session checks: 29 passed.
+Delivery state: working tree; existing unrelated changes preserved; not published
+  or deployed. Tests use temporary databases and mocked cloud/provider responses.
+Remaining acceptance: rendered browser journey; hosted policy management;
+  person-to-person delegation requires P03 identity integration.
+Independent next work: P05 managed provider continuity and rendered-browser tooling;
+  P07/P07a release acceptance; P12a contracts can start alongside recipe recovery.
+Next action: close the P05 managed Codex continuity gap against its current adapter
+  and protocol tests, preserving broker permissions and workspace restriction fences.
+```
+
+### 2026-10-05 — P05 managed Codex continuity
+
+```text
+Phase / step: P05 managed Codex provider continuity
+State: implementation and local continuity acceptance complete; P05 in progress
+Changed: app-server adapter, managed provider/session state, typed pre-turn fallback,
+  protocol/lifecycle tests and documentation. Package 0.3.27.
+Verification: npm run typecheck passed; npm test 764 tests, 759 passed, 0 failed,
+  5 skipped. Installed Codex 0.160.0: two actual turns on the configured
+  gpt-6.1-sol model; brokered fixture read, file removal, second-process resume,
+  same-thread recall without tools. Test thread archived; scratch inputs removed.
+Evidence: docs/evidence/codex-managed-continuity-2026-10-05.json
+Delivery state: working tree; existing changes preserved; not published/deployed.
+Remaining acceptance: other provider/account combinations need their own checks;
+  P05 rendered-browser tooling, private dependencies and hosted authentication.
+Independent next work: P07/P07a release acceptance and P12a contract checks.
+Next action: implement P05 rendered-browser inspection through a scoped disposable
+  runner, with honest readiness and permission reporting; do not expose an
+  unrestricted operator browser or host shell as a managed project tool.
 ```

@@ -34,14 +34,12 @@ export interface AccessInputs {
   /** Git remotes configured in the checkout. */
   remotes: string[];
   /** Whether the disposable task runner (Docker + image) is usable. */
-  runner: { ok: boolean; detail: string };
+  runner: { ok: boolean; detail: string; browser?: { ok: boolean; detail: string } };
   attachedTools: number;
   servers: ServerEnvironment[];
 }
 
 const UNSUPPORTED: ReadonlyArray<[string, string, string]> = [
-  ["dev-server", "Run a development server and preview it", "Not an agent tool yet."],
-  ["browser", "Check pages in a browser", "Not an agent tool yet."],
   ["local-shell", "Run arbitrary commands on this computer", "Managed agents have no shell here by design. Use a connected server's command account instead."],
 ];
 
@@ -70,6 +68,7 @@ export function explainAccess(input: AccessInputs): AccessItem[] {
     decided("push", "Push branches", "git.push", { connectionId: input.remotes[0] ?? "origin" }, [[hasRemote, "needs-connection", "This checkout has no Git remote.", "Add a remote to the repository."]]),
     decided("tests", "Run tests", "test.run", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
     decided("build", "Build, typecheck and lint", "script.run", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
+    decided("browser", "Check rendered pages in Chromium", "script.run", {}, [[input.runner.browser?.ok ?? false, "needs-runner", input.runner.browser?.detail ?? "The browser verification image has not been checked.", "Build scripts/task-browser.Dockerfile as psm-task-browser:1.64.0 on the PSM host."]]),
     decided("install", "Install dependencies", "pkg.install", {}, [[input.runner.ok, "needs-runner", input.runner.detail, "Start Docker for the PSM user and preload the task image."]]),
     decided("attached-tools", "Use attached tools", "mcp.use", {}, [[input.attachedTools > 0, "needs-connection", "No tools are attached to this project.", "Attach a capability in Capabilities."]]),
   ];
@@ -118,19 +117,24 @@ export function configuredRemotes(checkout: string): string[] {
   } catch { return []; }
 }
 
-let runnerCache: { at: number; value: { ok: boolean; detail: string } } | null = null;
+type RunnerReadiness = { ok: boolean; detail: string; browser: { ok: boolean; detail: string } };
+let runnerCache: { at: number; key: string; value: RunnerReadiness } | null = null;
 
-/** Docker reachable and the task image present, cached for a minute. */
-export async function taskRunnerStatus(image = process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim"): Promise<{ ok: boolean; detail: string }> {
-  if (runnerCache && Date.now() - runnerCache.at < 60_000) return runnerCache.value;
-  const value = await new Promise<{ ok: boolean; detail: string }>((resolve) => {
-    execFile("docker", ["image", "inspect", "--format", "{{.Id}}", image], { timeout: 10_000 }, (error, _stdout, stderr) => {
-      if (!error) resolve({ ok: true, detail: `Docker and ${image} are available.` });
+/** Docker reachable and both task images present, cached for a minute. */
+export async function taskRunnerStatus(image = process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim"): Promise<RunnerReadiness> {
+  const browserImage = process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0";
+  const key = `${image}:${browserImage}`;
+  if (runnerCache?.key === key && Date.now() - runnerCache.at < 60_000) return runnerCache.value;
+  const inspect = (target: string) => new Promise<{ ok: boolean; detail: string }>(resolve => {
+    execFile("docker", ["image", "inspect", "--format", "{{.Id}}", target], { timeout: 10_000 }, (error, _stdout, stderr) => {
+      if (!error) resolve({ ok: true, detail: `Docker and ${target} are available.` });
       else if (/permission denied/i.test(stderr)) resolve({ ok: false, detail: "The PSM process cannot reach Docker. If you were just added to the docker group, restart PSM from a new session." });
-      else if (/No such image/i.test(stderr)) resolve({ ok: false, detail: `The task image ${image} is not preloaded.` });
+      else if (/No such image/i.test(stderr)) resolve({ ok: false, detail: `The task image ${target} is not preloaded.` });
       else resolve({ ok: false, detail: "Docker is not available to PSM." });
     });
   });
-  runnerCache = { at: Date.now(), value };
+  const [task, browser] = await Promise.all([inspect(image), inspect(browserImage)]);
+  const value = { ...task, browser };
+  runnerCache = { at: Date.now(), key, value };
   return value;
 }

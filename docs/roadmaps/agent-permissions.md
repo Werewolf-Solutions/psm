@@ -5,7 +5,18 @@
 A preparation workroom has effective permission to edit, stage and commit before
 it starts. Missing authority is a readiness blocker, never a failed repair
 attempt. Grants originate in the local cockpit, never in chat or repository
-configuration. Publication and infrastructure require separate operator reviews.
+configuration. The original implementation required separate operator reviews
+for publication and infrastructure; later policy support and the planned
+automation path are distinguished below.
+
+**Scope of this record (2026-10-05 reconciliation):** the checklist below records
+the original managed implementation; the P02 section records later standing
+policy support. Where the two describe different behavior, the dated P02 behavior
+supersedes the baseline. The [evidence register](acceptance-evidence.md) tracks
+local editor/browser acceptance, open delegation and P05 provider/browser gates. P12 extends exact-source and
+release authorisation to accepted automatic environment policies, so publication
+and infrastructure may use explicit covering policy instead of a fresh click.
+That future path is not claimed as implemented here.
 
 ## Implemented and verified
 
@@ -16,8 +27,9 @@ configuration. Publication and infrastructure require separate operator reviews.
 - [x] Route Claude project/workroom turns through the SDK repository broker.
   Disable built-in tools, filesystem settings and automatic external MCP loading.
 - [x] Route Codex project/workroom turns through app-server dynamic tools backed
-  by the same broker. Start fresh ephemeral threads, disable inherited executable
-  integrations, deny native approvals and restrict native filesystem/network access.
+  by the same broker. The original baseline used fresh ephemeral threads; the P05
+  increment below adds managed continuity. Inherited executable integrations and
+  native approvals remain disabled, with restricted native filesystem/network access.
 - [x] Check the current grant revision on every broker operation. Stop affected
   turns and clear queued work when grants change. Never resume legacy CLI sessions
   into managed execution.
@@ -85,19 +97,44 @@ configuration. Publication and infrastructure require separate operator reviews.
   project), each stating what it grants and what remains impossible. "Grant full access" is gone.
 - [x] Access explanation per task (ready / needs review / grant / connection / runner / provider
   restricted / unsupported) in Capabilities and as the agents' `access_status` tool.
-- [x] Workspace chat's sandbox-off toggle is labelled Unrestricted and confirmed; sandbox-off is
-  structurally limited to workspace chat and never combined with a multi-project scope.
-- Not yet: delegation between people (needs hosted workspace authentication, P03); editing
-  workspace-level rules in the UI (stored and enforced, currently set only through the database).
+- [x] Workspace chat's former Unrestricted toggle was retired; CLI sessions now keep
+  their sandbox enabled even when an old saved setting or request asks for full access.
+- Open at the September 24 checkpoint: delegation between people (needs hosted
+  workspace authentication, P03) and workspace-rule editing UI. The October 5
+  increment below implements the local editor; delegation remains open.
+
+## Workspace restriction editor (P02, 2026-10-05)
+
+- Implemented **Capabilities → Agent permissions → Workspace restrictions** for
+  the project's owning workspace. Add/remove standing or expiring Deny rules,
+  scoped by environment, connection, capability and tool, with audit history.
+- Expected revisions prevent stale edits. Local operator metadata is required;
+  business management authority is rechecked through Werewolf for each request.
+- New restrictions stop affected turns/queues and fence older broker snapshots
+  and retained provider sessions. Removing a restriction leaves project grants
+  intact and does not resume stopped work.
+- Automated enforcement, role, lifecycle and UI-handler checks are recorded in
+  the [evidence register](acceptance-evidence.md). Rendered browser and hosted
+  acceptance remain open. [Full editor contract](workspace-policy-editor.md).
+
+## Managed Codex continuity (P05, 2026-10-05)
+
+- Resume only PSM-managed threads with matching scope, restriction revisions,
+  selections and tool catalog. Each turn uses a fresh native directory and broker.
+- Missing history/catalog changes may fall back before turn start. Active-turn
+  errors, interrupted turns and authentication failures are not automatically replayed.
+- Real Codex 0.160.0 two-turn acceptance verified brokered reading and retained
+  context across process restart. [Contract and retention](managed-codex-continuity.md),
+  [native evidence](../evidence/codex-managed-continuity-2026-10-05.json).
 
 ## Host setup and validation
 
 These are runtime prerequisites, separate from the completed implementation:
 
 - Codex must be installed and authenticated as the PSM user. The adapter was
-  checked against app-server **0.154.0**: an actual thread-start accepted its
-  restricted policy and dynamic tools. Protocol tests exercise tool calls;
-  validation did not spend a model turn. See the official
+  initially checked against app-server **0.154.0** without a model turn;
+  managed continuity now has actual two-turn acceptance on **0.160.0**.
+  Protocol tests exercise broker calls and restricted resume. See the official
   [app-server documentation](https://learn.chatgpt.com/docs/app-server).
 - The PSM user needs access to a working Docker daemon and a preloaded Node/npm
   image. The default is `node:22-bookworm-slim`; the operator can set

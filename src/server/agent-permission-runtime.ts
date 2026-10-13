@@ -50,6 +50,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
   const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, input.policy.store, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))])]));
   const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, policy.store, signal.signal)]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
+  const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");
   const project = z.string().describe("Registered project ID from the session scope");
   const invoke = async (id: string, action: (repository: RepositoryTools) => unknown) => {
     try {
@@ -85,10 +86,11 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     ...(policy.explain ? [
       tool("access_status", "Explain what you can and cannot do in a project right now, and for each gap whether it needs a grant, a review, a connection or a runner, or is unsupported. Check this before telling the operator something is impossible.", { project }, ({ project }) => invoke(project, (repo) => policy.explain!(repo.snapshot))),
     ] : []),
+    tool("verification_status", "List package directories requiring a build or browser check before a code commit. If verification is blocked, report the task as unverified and incomplete.", { project }, ({ project }) => invoke(project, repo => repo.verificationStatus())),
     tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
-    tool("run_script", "Run a package.json script (build, typecheck, lint, …) offline in the disposable sandbox and return its output. Install dependencies first if it needs them.", { project, script: z.string() }, ({ project, script }) => invoke(project, () => tasks.get(project)!.script(script))),
-    tool("preview_check", "Start a package.json script that serves the app (dev or preview) in the offline sandbox, wait for its port, fetch the given paths from inside the sandbox and return status, content type and the start of each body. Install dependencies first.", { project, script: z.string(), port: z.number().int(), paths: z.array(z.string()).max(10).default(["/"]) }, ({ project, script, port, paths }) => invoke(project, () => tasks.get(project)!.preview(script, port, paths))),
-    tool("install_packages", "Install the public npm lockfile into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project }, ({ project }) => invoke(project, () => tasks.get(project)!.install())),
+    tool("run_script", "Run a package.json script (build, typecheck, lint, …) offline in the disposable sandbox and return its output. Install dependencies first if it needs them.", { project, script: z.string(), directory }, ({ project, script, directory }) => invoke(project, () => tasks.get(project)!.script(script, directory))),
+    tool("preview_check", "Load each app route in Chromium inside the offline sandbox. Fails on JavaScript errors, failed local requests, Vite error overlays or blank app content. Requires the preloaded PSM browser image. Install dependencies first. A listening dev server alone is not verification.", { project, script: z.string(), port: z.number().int(), paths: z.array(z.string()).max(10).default(["/"]), directory }, ({ project, script, port, paths, directory }) => invoke(project, () => tasks.get(project)!.preview(script, port, paths, directory))),
+    tool("install_packages", "Install the public npm lockfile for the selected package directory into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project, directory }, ({ project, directory }) => invoke(project, () => tasks.get(project)!.install(directory))),
     tool("files", "List ordinary project files.", { project }, ({ project }) => invoke(project, (repo) => repo.list())),
     tool("read", "Read one project text file.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.read(file))),
     tool("search", "Search project files for literal text.", { project, text: z.string() }, ({ project, text }) => invoke(project, (repo) => repo.search(text))),
@@ -97,7 +99,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     tool("delete", "Delete one ordinary file or empty directory.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.delete(file))),
     tool("git_read", "Inspect Git status, recent commit summaries, or the diff of a named file.", { project, operation: z.enum(["status", "log", "diff"]), file: z.string().optional() }, ({ project, operation, file }) => invoke(project, (repo) => repo.gitRead(operation, file))),
     tool("git_stage", "Stage explicit file paths. Preserves unrelated staged work by refusing if the index belongs to another turn. Does not execute filters.", { project, files: z.array(z.string()).min(1).max(100) }, ({ project, files }) => invoke(project, (repo) => repo.stage(files))),
-    tool("git_commit", "Commit this turn's staged changes locally. PSM increments root X.Y.Z's final component for code changes unless a newer version is already staged, and synchronizes root lockfiles. Docs-only commits need no increment. Hooks and signing are disabled. Does not publish.", { project, message: z.string() }, ({ project, message }) => invoke(project, (repo) => repo.commit(message))),
+    tool("git_commit", "Commit this turn's staged changes locally. Code commits require successful build scripts and frontend browser checks against current source; blocked checks mean the task remains unverified. Use verification_status to discover required checks. Choose releaseBump from the change: major for breaking changes, minor for compatible features, patch for fixes. Defaults to patch. PSM computes the root X.Y.Z version and synchronizes root lockfiles; an already staged higher version is preserved. Docs-only commits need no increment. Hooks and signing are disabled. Does not publish.", { project, message: z.string(), releaseBump: z.enum(["major", "minor", "patch"]).optional() }, ({ project, message, releaseBump }) => invoke(project, (repo) => repo.commit(message, releaseBump))),
     tool("git_branch", "Create a local branch at HEAD without switching.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.branch(name))),
     tool("git_branch_delete", "Delete a fully merged local branch.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.deleteBranch(name))),
     tool("git_switch", "Switch to an existing local branch.", { project, name: z.string() }, ({ project, name }) => invoke(project, (repo) => repo.switchBranch(name))),
@@ -114,12 +116,13 @@ export async function runManagedAgent(input: {
   policy: ManagedAgentPolicy; engine?: string; cwd: string; model: string | null; effort?: string | null;
   message: string; context: string; signal: AbortController;
   event: (event: unknown) => void;
-  /** A managed Claude session to resume; the caller checked its authority is unchanged. */
+  /** A managed provider session to resume; its authority was checked by the caller. */
   resume?: string | null;
+  resumeToolsDigest?: string | null;
 }): Promise<void> {
   const server = createManagedRepositoryServer(input.policy, input.signal);
   const scope = input.policy.snapshots.map(({ project, grants }) => `${project.name}: ${project.id}; grants: ${Object.entries(grants).filter(([, value]) => value?.granted).map(([name]) => name).join(", ") || "none"}`).join("\n");
-  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nUse the PSM tools. Grants are enforced outside the conversation. When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.`;
+  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nFor code changes, call verification_status, install each required package directory and its dependencies (including server packages used by root scripts), run required builds and use preview_check for frontend routes you changed. Successful dev-server startup does not prove the app works. Recheck after edits. If a check fails or cannot run, keep the work unverified and incomplete; report the concrete blocker, and do not claim completion. Code commits enforce these checks. Use the PSM tools. Grants are enforced outside the conversation. When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.`;
   if (input.engine === "codex") return runCodexManaged({ ...input, server, context });
   const stream = query({
     // SDK MCP servers require streaming input, including for a single user turn.

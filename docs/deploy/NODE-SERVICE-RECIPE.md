@@ -9,6 +9,10 @@ everything [`static-ssh-nginx@1`](DEPLOYMENT-SYSTEM.md#12-static-ssh-nginx1) pro
 plans, approvals, locks, GitHub prepare/release, host helper, DNS, TLS, To do list) and adds
 only what a process needs.
 
+P08a.1 is the recorded first target release; P08a.2 owns complete managed rollback
+acceptance and P08a.3 owns uninterrupted switching. Workers, data and observation
+are separate milestones in the [P08 scope](../roadmaps/application-operations.md).
+
 ## What to do next
 
 The live target now has version 1.0.1 active. PSM run `run_29d57729336843e6`
@@ -96,11 +100,13 @@ PM2 list was saved. Available memory afterwards: **323 MB**, swap in use 194 MB 
 411 MB). handymanservices was left alone because its `.env` changed after it started; the managed
 release replaces it. Unused host services were not disabled.
 
-**print-shop is down (stopped).** Its folder is not a git checkout and holds a newer version
-(MongoDB, Stripe, login) copied in around 2026-04-15 without `npm install` or a `.env`; the
-process running since then still held the old code in memory. Restarting it exposed eleven missing
-packages, and the old code is no longer on disk. It is stopped, and stays stopped after a reboot,
-until its owner restores the right version and configuration. Lesson for the recipe and for M1:
+**print-shop is intentionally stopped for capacity.** User clarification on
+2026-10-05 confirms this is an accepted choice to free droplet capacity, with no
+current recovery task. The October 1 inspection recorded a non-Git folder with
+newer code (MongoDB, Stripe, login), missing dependencies/configuration, and a
+restart that exposed eleven missing packages. Preserve those observations as
+historical restart prerequisites if the owner later chooses to restore it.
+Lesson for the recipe and for M1:
 an unmanaged app can only be restarted safely after checking that the code on disk can start;
 managed releases avoid the problem because the running bytes are always the retained release.
 
@@ -335,9 +341,11 @@ Small, and made as normal reviewed commits:
 
 ## Out of scope for this recipe
 
-Databases, migrations, workers, scheduled jobs, horizontal scaling, blue/green, log shipping and
-external Watch. Each is a separate P08 item with its own acceptance; handymanservices needs none
-of them.
+Databases, migrations and workers use P08b/P08c; operational observation and
+external Watch use P08d. This app has no database or worker of its own. The
+current recipe does not implement uninterrupted switching; P08a.3 adds it as a
+required follow-up. Regional/horizontal rollout belongs to P13. External Watch
+is a release-policy gate when required, even if it is provided outside this recipe.
 
 ## Acceptance on staging
 

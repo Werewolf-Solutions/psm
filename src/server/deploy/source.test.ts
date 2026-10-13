@@ -7,9 +7,11 @@ import test from "node:test";
 
 import {
   artifactOutputPath,
+  bumpWorkspaceVersion,
   commitReachableFrom,
   compareWorkspaceVersions,
   deploymentInputsDirty,
+  proposedDeploymentVersion,
   readDeploymentSource,
 } from "./source.ts";
 
@@ -51,6 +53,15 @@ test("workspace versions use the house X.Y.Z ordering", () => {
   assert.equal(compareWorkspaceVersions("0.2.2", "0.2.2"), 0);
   assert.equal(compareWorkspaceVersions("0.2.1", "0.2.2"), -1);
   assert.throws(() => compareWorkspaceVersions("v0.2.1", "0.2.2"));
+});
+
+test("deployment previews a patch floor while the managed commit can select a larger bump", () => {
+  assert.equal(proposedDeploymentVersion("1.0.4", "1.0.4"), "1.0.5");
+  assert.equal(proposedDeploymentVersion("1.0.4", "1.1.0"), "1.1.0");
+  assert.equal(proposedDeploymentVersion("1.0.4", "0.9.0"), "1.0.5");
+  assert.equal(bumpWorkspaceVersion("1.0.4", "major"), "2.0.0");
+  assert.equal(bumpWorkspaceVersion("1.0.4", "minor"), "1.1.0");
+  assert.equal(bumpWorkspaceVersion("1.0.4", "patch"), "1.0.5");
 });
 
 test("artifact output cannot escape its checkout", () => {

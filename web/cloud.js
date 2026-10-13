@@ -295,7 +295,7 @@ function renderCloudAccount() {
   };
   document.querySelectorAll(".cloud-restore").forEach((button) => {
     button.onclick = async () => {
-      const destination = prompt("Restore into a new or empty absolute directory:");
+      const destination = await window.psmPrompt("Restore into a new or empty absolute directory:", "Restore backup");
       if (!destination) return;
       button.disabled = true;
       try {
@@ -313,7 +313,7 @@ function renderCloudAccount() {
   });
   document.querySelectorAll(".cloud-delete").forEach((button) => {
     button.onclick = async () => {
-      if (!confirm("Delete this encrypted snapshot?")) return;
+      if (!await window.psmConfirm("Delete this encrypted snapshot?", "Delete backup snapshot")) return;
       try {
         await cloudApi("/api/cloud/backups/" + button.dataset.id, { method: "DELETE" });
         toast("Snapshot deleted");

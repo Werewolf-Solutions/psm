@@ -9,6 +9,8 @@ import {
   type ConnectionProfile,
 } from "./connections.ts";
 import { BetterStackClient } from "./adapters/better-stack.ts";
+import { observeWerewolfWatch } from "./adapters/werewolf-watch.ts";
+import { SshMachineTransport } from "../machines/ssh.ts";
 import { DigitalOceanClient, DigitalOceanError, dnsMatches, type DigitalOceanDnsRecord } from "./adapters/digitalocean.ts";
 import { GitHubActionsAdapter, GitHubExecutorError, type GitHubActionsConnectionMetadata, type GitHubDispatchReceipt } from "./adapters/github.ts";
 import { deploymentGitHubToken, githubAppIdentity, githubAppPages, githubAppTokens } from "./github-app.ts";
@@ -300,6 +302,29 @@ export function ingressObservationTls(kind: string, operation: PlannedActionDocu
   return kind === "reconcile-ingress-http@1" && operation !== "noop" ? false : undefined;
 }
 
+/** Deployment receipts need the current Watch verdict, not seven days of chart data. */
+export function deploymentWatchReceipt(observed: WatchObservation): JsonValue {
+  const evidence = observed.evidence ?? {};
+  const boundedText = (key: string) => typeof evidence[key] === "string" ? (evidence[key] as string).slice(0, 200) : null;
+  const boundedNumber = (key: string) => typeof evidence[key] === "number" && Number.isFinite(evidence[key]) ? evidence[key] : null;
+  return {
+    monitorId: observed.monitorId,
+    providerState: observed.providerState,
+    effectiveState: observed.effectiveState,
+    observedAt: observed.observedAt,
+    detail: observed.detail?.slice(0, 300) ?? null,
+    evidence: {
+      provider: boundedText("provider"),
+      providerMonitorId: boundedText("providerMonitorId"),
+      observer: boundedText("observer"),
+      failureDomain: boundedText("failureDomain"),
+      status: boundedNumber("status"),
+      durationMs: boundedNumber("durationMs"),
+      tlsExpiresAt: boundedNumber("tlsExpiresAt"),
+    },
+  };
+}
+
 function stateResult(data: Record<string, unknown>, detail: string): ResourceDiscoveryResult {
   const allowed = new Set(["in-sync", "create", "update", "adopt", "conflict", "blocked", "unknown"]);
   const state = typeof data.state === "string" && allowed.has(data.state) ? data.state : "unknown";
@@ -363,6 +388,8 @@ export class DeploymentRuntimeAdapters {
       }];
     }
     const adapter = this.#github(github);
+    const appManaged = Boolean(githubAppIdentity(github)) || controllers.some((entry) => object(entry).targetId === targetId && object(entry).sourceAuthorization === "installation-token");
+    const reviewSetup = "Press “Review controller setup / update” in the GitHub connection, then “Apply reviewed controller setup”. PSM verifies the bundle, prepares the target file and environment, and installs its release credentials.";
     const checks: ExecutionReadinessCheck[] = [];
     // Fixes PSM cannot make itself name the exact GitHub page where they are made.
     const pinned = controllers.map(object).find((entry) => entry.targetId === targetId && entry.controller === releaseController) ?? {};
@@ -377,7 +404,7 @@ export class DeploymentRuntimeAdapters {
         ready: !moved,
         // The full new commit stays in the text: the Pin button sends back exactly what was shown.
         detail: !moved ? `Pinned to ${head.pinnedHeadSha.slice(0, 12)}, the current ${head.ref} of ${head.repository}.`
-          : `${head.repository} ${head.ref} moved from ${head.pinnedHeadSha.slice(0, 12)} to ${head.headSha}. Releases stay refused until you review the change (https://github.com/${head.repository}/compare/${head.pinnedHeadSha}...${head.headSha}) and pin the new commit.`,
+          : `${head.repository} ${head.ref} moved from ${head.pinnedHeadSha.slice(0, 12)} to ${head.headSha}. Releases stay refused until you review the change (https://github.com/${head.repository}/compare/${head.pinnedHeadSha}...${head.headSha}) and ${appManaged ? reviewSetup : "pin the new commit."}`,
       });
     } catch (error) {
       checks.push({ id: `${unit.id}:controller-pin`, purpose: "deploy", title: "Release controller pin", ready: false, detail: `Could not read the release controller's current commit: ${error instanceof Error ? error.message : String(error)}` });
@@ -436,7 +463,8 @@ export class DeploymentRuntimeAdapters {
         id: `${unit.id}:controller-target`, purpose: "deploy", title: "Release controller target file",
         ready: Object.keys(file).length > 0 && wrong.length === 0,
         // GitHub answers 404 both for a missing file and for a private repository the token cannot see.
-        detail: !Object.keys(file).length ? `PSM's GitHub token cannot read ${targetFile} at the pinned controller commit: the file is missing there, or the token has no access to ${String(pinned.repository)}. Create it at ${controllerUrl}/new/${controllerBranch}/targets?filename=${targetFile.slice("targets/".length)}, then pin the new commit.`
+        detail: appManaged && (!Object.keys(file).length || wrong.length) ? `${!Object.keys(file).length ? "The target file is unavailable at the pinned controller commit." : "The pinned target file does not match the enrolled target."} ${reviewSetup}`
+          : !Object.keys(file).length ? `PSM's GitHub token cannot read ${targetFile} at the pinned controller commit: the file is missing there, or the token has no access to ${String(pinned.repository)}. Create it at ${controllerUrl}/new/${controllerBranch}/targets?filename=${targetFile.slice("targets/".length)}, then pin the new commit.`
           : wrong.length ? `Update the controller's target file, then pin the new commit: ${wrong.map(([key, value]) => `${key} must be ${JSON.stringify(value)} (is ${JSON.stringify(file[key] ?? null)})`).join("; ")}. Edit it at ${controllerUrl}/edit/${controllerBranch}/${targetFile}`
           : "Matches the enrolled target.",
       });
@@ -450,6 +478,7 @@ export class DeploymentRuntimeAdapters {
         id: `${unit.id}:controller-credentials`, purpose: "deploy", title: "Release controller credentials",
         ready: missing.length === 0,
         detail: missing.length === 0 ? "The controller's GitHub Environment holds the release key and host key."
+          : appManaged ? `The target’s release environment or its required credentials are not available. ${reviewSetup}`
           : names === null ? `PSM's GitHub token cannot see the controller's GitHub Environment: it does not exist yet, or the token has no access to the controller repository. ${ci ? "Publishing the CI release key creates it." : "Add a CI release key in Machines, then publish it from this page."}`
           : ci ? `The controller's GitHub Environment is missing ${missing.join(" and ")}. Publish the CI release key from this page.`
           : `The controller's GitHub Environment is missing ${missing.join(" and ")}. First add a CI release key in Machines, then publish it from this page.`,
@@ -1096,6 +1125,7 @@ export class DeploymentRuntimeAdapters {
   ): Promise<WatchObservation> {
     const profile = this.#profileForEnvironment({ checkoutId: context.checkoutId, environment: context.environment, slot: definition.connection, kind: "external-monitor@1" });
     const provider = profile.publicMetadata?.provider;
+    if (provider === "werewolf-watch@1") return observeWerewolfWatch(profile, new SshMachineTransport({broker: this.#connections.broker}), definition);
     if (provider !== "better-stack@1") throw new Error("external monitor profile is not Better Stack v1");
     return this.#connections.withToken(profile, (token) => new BetterStackClient({
       token,
@@ -1295,7 +1325,7 @@ export class DeploymentRuntimeAdapters {
         const definition = environmentValue.watch.find((item) => item.id === id);
         if (!definition) throw new Error(`watch ${id} is absent from the manifest`);
         const observed = await this.observeWatch(definition, { projectId: document.projectId, checkoutId: document.checkoutId, environment: environmentValue });
-        return { outcome: observed.effectiveState === "healthy" ? "succeeded" : "failed", data: json(observed) };
+        return { outcome: observed.effectiveState === "healthy" ? "succeeded" : "failed", data: deploymentWatchReceipt(observed) };
       },
     };
     const stage: DeploymentActionAdapter = {

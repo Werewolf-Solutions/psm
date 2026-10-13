@@ -5,6 +5,16 @@ Live hosted operation is **blocked** on two open decisions recorded in the
 [delivery index](../roadmaps/README.md#open-decisions): where the runner fleet
 runs, and production Werewolf registration for PSM.
 
+Reconciled product contract, 2026-10-05: registration uses the single `psm` web
+CloudApplication, with identity setup separate from billing. P03 supplies hosted
+execution and scoped delegation; P12 enables accepted automatic staging followed
+by automatic production policies. A durable GitHub/CI executor may implement
+that release path independently of the hosted fleet. Hosted operator setup uses
+authenticated workspace controls and HTTPS callbacks; local loopback approval
+is a current implementation detail, not a requirement for every automatic release.
+See [acceptance evidence](../roadmaps/acceptance-evidence.md) and
+[release milestones](../roadmaps/release-and-api-lifecycle.md).
+
 ## Pieces
 
 | Process | Talks to | Holds |

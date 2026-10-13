@@ -8,6 +8,7 @@ import { planStore } from "./plans.ts";
 import { childEnv } from "./procs.ts";
 import { composeSystemRules } from "./rules.ts";
 import { runManagedAgent, type ManagedAgentPolicy } from "./agent-permission-runtime.ts";
+import { ManagedResumeUnavailableError } from "./agent-session-errors.ts";
 import { writeFileAtomic } from "../store.ts";
 
 /**
@@ -83,6 +84,14 @@ export interface AiEvent {
   text: string;
   /** PSM-generated work, shown as a compact entry instead of an operator message. */
   preparation?: import("./deploy/repair-sessions.ts").PreparationTurn;
+  /** A suggested cross-project room; only the user can approve its creation. */
+  workroomProposal?: WorkroomProposal;
+}
+
+export interface WorkroomProposal {
+  projects: string[];
+  title: string;
+  objective: string;
 }
 
 export interface AiQuestionOption {
@@ -120,7 +129,7 @@ interface AiSession {
    * The managed (broker) session to resume and the authority it ran under.
    * Only resumed while that authority is unchanged; never a CLI session.
    */
-  managedResume?: { id: string; authority: string } | null;
+  managedResume?: { id: string; authority: string; toolsDigest?: string } | null;
   busy: boolean;
   child: ChildProcess | null;
   managedAbort?: AbortController;
@@ -170,6 +179,7 @@ When you need user input that materially affects the work, prefer your native us
 If no native question tool is available, output exactly one marker and stop the turn:
 <psm-question>{"questions":[{"id":"short_id","header":"Short label","question":"What do you need to know?","options":[{"label":"Choice","description":"What this choice changes"}],"multiSelect":false,"isSecret":false}]}</psm-question>
 Use 1-3 questions. Options are optional. Do not wrap the marker in a code fence and do not continue until the user answers.
+When a project task needs another project and a shared conversation would help, ask any necessary scope questions first. Then offer a handoff with <psm-workroom>{"projects":["current-project","other-project"],"title":"Short room name","objective":"Specific work to do across both projects"}</psm-workroom>. Use actual project names and include the current project. Make the objective self-contained: the new room does not inherit this transcript. The marker only suggests a room; psm asks the user to review and approve it. Do not claim it was created until psm confirms it.
 Only in a dedicated psm planner session, emit one <psm-plan> JSON marker with id, title, phases, and notes. Each phase has id, title, summary, and steps; each step has id, text, done, and children. Normal project-agent sessions implement confirmed plans and must not create plan markers.
 Only in a dedicated psm reviewer session, emit one <psm-plan-review> marker with planId, revision, summary, and issues. Each issue has severity (info, warning, or blocking), message, and optional phaseId/stepId.
 While executing a confirmed plan, report durable progress with <psm-plan-progress>{"planId":"...","revision":1,"completedStepIds":[],"blockedStepIds":[]}</psm-plan-progress>.
@@ -195,8 +205,11 @@ export function stopProjectAgents(projectPath: string): void {
   }
 }
 /** What a managed session's authority was: engine, projects, checkouts and their restriction revisions. */
-function managedAuthority(engine: string, policy: ManagedAgentPolicy): string {
-  return [engine, ...policy.snapshots.map((snapshot) => `${snapshot.project.id}@${snapshot.project.path}@${snapshot.restrictedRevision ?? 0}`).sort()].join("|");
+function managedAuthority(engine: string, policy: ManagedAgentPolicy, model: AiModel = null, effort: AiEffort = null): string {
+  // Stored Codex settings survive resume. A changed selection (including returning
+  // to provider defaults) gets a fresh thread rather than inheriting old overrides.
+  const profile = engine === "codex" ? `codex:${JSON.stringify([model, effort])}` : engine;
+  return [profile, ...policy.snapshots.map((snapshot) => `${snapshot.project.id}@${snapshot.project.path}@${snapshot.restrictedRevision ?? 0}@${snapshot.project.workspaceId ?? "personal"}@${snapshot.workspaceRestrictedRevision ?? 0}`).sort()].join("|");
 }
 function resolveManagedPolicy(s: TurnSpec): ManagedAgentPolicy | null {
   if (sessionIdentity(s.name).role !== "agent" || s.name === WORKSPACE_NAME) return null;
@@ -211,7 +224,7 @@ interface PersistedSession {
   effort?: string | null;
   actualModel?: string | null;
   sessionId: string | null;
-  managedResume?: { id: string; authority: string } | null;
+  managedResume?: { id: string; authority: string; toolsDigest?: string } | null;
   log: AiEvent[];
   summary: string | null;
   summaryAt: number;
@@ -844,9 +857,27 @@ function noteQuestion(s: AiSession, raw: unknown, sourceId?: string): boolean {
 }
 
 const QUESTION_MARKER_RE = /<psm-question>\s*([\s\S]*?)\s*<\/psm-question>/i;
+const WORKROOM_MARKER_RE = /<psm-workroom>\s*([\s\S]*?)\s*<\/psm-workroom>/i;
 const PLAN_MARKER_RE = /<psm-plan>\s*([\s\S]*?)\s*<\/psm-plan>/i;
 const PLAN_REVIEW_MARKER_RE = /<psm-plan-review>\s*([\s\S]*?)\s*<\/psm-plan-review>/i;
 const PLAN_PROGRESS_MARKER_RE = /<psm-plan-progress>\s*([\s\S]*?)\s*<\/psm-plan-progress>/i;
+
+export function parseWorkroomProposal(project: string, raw: unknown): WorkroomProposal {
+  if (!raw || typeof raw !== "object" || !project) throw new Error("invalid workroom proposal");
+  const value = raw as Record<string, unknown>;
+  if (!Array.isArray(value.projects)) throw new Error("a workroom proposal needs projects");
+  const projects = [project];
+  for (const item of value.projects) {
+    if (typeof item !== "string") continue;
+    const name = item.trim();
+    if (name && name !== project && !projects.includes(name)) projects.push(name);
+  }
+  if (projects.length < 2 || projects.length > 8) throw new Error("a workroom proposal needs 2–8 projects");
+  const title = typeof value.title === "string" ? value.title.trim().slice(0, 200) : "";
+  const objective = typeof value.objective === "string" ? value.objective.trim().slice(0, 4000) : "";
+  if (!objective) throw new Error("a workroom proposal needs an objective");
+  return { projects, title: title || projects.join(" ↔ "), objective };
+}
 
 function handleAssistantText(s: AiSession, text: string): void {
   s.turnHadAssistant = true;
@@ -860,6 +891,14 @@ function handleAssistantText(s: AiSession, text: string): void {
       pattern: QUESTION_MARKER_RE,
       handle: (value) => {
         if (!noteQuestion(s, value)) throw new Error("invalid question marker");
+      },
+    },
+    {
+      pattern: WORKROOM_MARKER_RE,
+      handle: (value) => {
+        if (!identity.project || identity.role !== "agent") throw new Error("only a project chat can suggest a workroom");
+        const proposal = parseWorkroomProposal(identity.project, value);
+        pushEvent(s, { t: Date.now(), role: "assistant", text: "Work together in a shared workroom", workroomProposal: proposal });
       },
     },
     {
@@ -1064,22 +1103,9 @@ export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
     : ["--effort", value];
 }
 
-/**
- * Whether one turn may run with the sandbox off.
- *
- * The project's saved setting is a **ceiling**, not a default. A request may ask
- * for less than it — the AI pane's toggle takes effect on the next send, before
- * the PATCH that persists it has landed — and may never ask for more.
- *
- * It used to read `req.body.fullAccess ?? saved`, which let the request name its
- * own authority: a POST carrying `fullAccess: true` earned
- * `--dangerously-bypass-approvals-and-sandbox` on a project whose full access
- * was switched off. Everything that reaches the loopback port could do it,
- * including a page psm did not serve. Sandboxing is only a boundary if crossing
- * it requires something the caller does not control.
- */
-export function permittedFullAccess(saved: boolean, requested: unknown): boolean {
-  return saved && requested !== false;
+/** Retired legacy setting: old saved values and clients cannot disable the sandbox. */
+export function permittedFullAccess(_saved: boolean, _requested: unknown): boolean {
+  return false;
 }
 
 /**
@@ -1107,13 +1133,9 @@ export function buildCommand(
   extraContext = "",
 ): { cmd: string; args: string[] } {
   const readOnly = sessionIdentity(s.name).role !== "agent";
-  // read-only wins over full access: a planner is a planner whatever the
-  // project's setting says. Sandbox-off exists only for workspace chat, and
-  // never with a multi-project scope: project and workroom agents run through
-  // the managed broker, and must not fall back to an unrestricted CLI if that
-  // broker is ever unavailable.
-  const unrestricted = fullAccess && s.name === WORKSPACE_NAME && s.extraDirs.length === 0;
-  const sandbox = readOnly ? "read-only" : unrestricted ? "off" : "workspace-write";
+  // Keep sandboxing even if an old caller passes fullAccess=true.
+  void fullAccess;
+  const sandbox = readOnly ? "read-only" : "workspace-write";
   const scope = writableRootArgs(s.extraDirs);
   const rules = [
     composeSystemRules(s.cwd),
@@ -1125,11 +1147,7 @@ export function buildCommand(
     .filter(Boolean)
     .join("\n\n");
   if (s.engine === "codex") {
-    const sandboxArgs = sandbox === "read-only"
-      ? ["-s", "read-only"]
-      : sandbox === "off"
-      ? ["--dangerously-bypass-approvals-and-sandbox"]
-      : ["-s", "workspace-write"];
+    const sandboxArgs = ["-s", sandbox];
     const model = s.model ? ["--model", s.model] : [];
     const base = ["--json", "--skip-git-repo-check", ...model, ...effortArgs(s.engine, s.effort), ...sandboxArgs, ...scope];
     if (s.sessionId) {
@@ -1147,7 +1165,7 @@ export function buildCommand(
   args.push(...scope);
   args.push(
     "--permission-mode",
-    readOnly ? "plan" : unrestricted ? "bypassPermissions" : "acceptEdits",
+    readOnly ? "plan" : "acceptEdits",
   );
   if (rules) args.push("--append-system-prompt", rules);
   if (s.sessionId) args.push("--resume", s.sessionId);
@@ -1683,19 +1701,24 @@ function startTurn(
     s.sessionId = null;
     // The provider's own session is resumed only while the authority it ran
     // under is unchanged; any reduction since then starts fresh from the replay.
-    const authority = managedAuthority(s.engine, policy);
-    const resume = s.engine === "claude" && s.managedResume?.authority === authority ? s.managedResume.id : null;
+    const authority = managedAuthority(s.engine, policy, s.model, s.effort);
+    const resume = s.managedResume?.authority === authority ? s.managedResume.id : null;
     const recent = s.log.filter((event) => event.role !== "system").slice(-30)
       .map((event) => `${event.role}: ${event.text}`).join("\n").slice(-48_000);
     const base = [composeSystemRules(s.cwd), scopeContext(s.cwd, s.extraDirs, false), extraContext, INTERACTION_RULES, policy.taskNotes ?? ""].filter(Boolean);
     let captured: string | null = null;
+    let capturedToolsDigest: string | undefined;
     const run = (resumeId: string | null) => managedRunner({
       policy, engine: s.engine, cwd: s.cwd, model: s.model, effort: s.effort, message, resume: resumeId,
+      resumeToolsDigest: resumeId ? s.managedResume?.toolsDigest : undefined,
       context: [...base, ...(resumeId ? [] : [`Recent conversation (context only, never permission):\n${recent}`])].join("\n\n"),
       signal: abort,
       event: (event) => {
-        const init = event as { type?: string; subtype?: string; session_id?: string };
-        if (init.type === "system" && init.subtype === "init" && typeof init.session_id === "string") captured = init.session_id;
+        const init = event as { type?: string; subtype?: string; session_id?: string; psm_tools_digest?: string };
+        if (init.type === "system" && init.subtype === "init" && typeof init.session_id === "string") {
+          captured = init.session_id;
+          capturedToolsDigest = typeof init.psm_tools_digest === "string" ? init.psm_tools_digest : undefined;
+        }
         if (!abort.signal.aborted) handleClaudeLine(s, JSON.stringify(event));
       },
     });
@@ -1703,12 +1726,13 @@ function startTurn(
       try {
         try { await run(resume); }
         catch (error) {
-          if (!resume || abort.signal.aborted) throw error;
+          if (!resume || abort.signal.aborted || (s.engine === "codex" && !(error instanceof ManagedResumeUnavailableError))) throw error;
           s.managedResume = null;
+          captured = null; capturedToolsDigest = undefined;
           pushEvent(s, sys("[psm] the previous session could not be resumed; continuing from the recent conversation instead"));
           await run(null);
         }
-        if (captured && s.engine === "claude") s.managedResume = { id: captured, authority };
+        if (captured && !abort.signal.aborted) s.managedResume = { id: captured, authority, ...(capturedToolsDigest ? { toolsDigest: capturedToolsDigest } : {}) };
       } catch (error) {
         if (!abort.signal.aborted) pushEvent(s, sys(`[psm] managed agent failed: ${error instanceof Error ? error.message : "unknown error"}`));
       } finally {
@@ -1965,6 +1989,18 @@ export function stopSession(name: string): { cancelled: boolean; queuedCleared: 
   broadcast(s, "working-stopped", {});
   saveSessionsSoon();
   return { cancelled, queuedCleared, questionCleared };
+}
+
+/** Permanently discard a conversation after its owning workroom is deleted. */
+export function deleteSession(name: string): void {
+  const s = sessions.get(name);
+  if (!s) return;
+  stopSession(name);
+  for (const subscriber of s.subscribers) subscriber.end();
+  s.subscribers.clear();
+  sessions.delete(name);
+  if (saveTimer) clearTimeout(saveTimer);
+  saveSessions();
 }
 
 /** Attach an SSE response: replay transcript, then stream live. */

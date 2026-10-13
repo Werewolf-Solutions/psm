@@ -1,0 +1,105 @@
+{
+  "nginx": [
+    {
+      "file": "/etc/nginx/sites-enabled/handymanservices-staging.werewolf.solutions",
+      "target": "/etc/nginx/sites-available/handymanservices-staging.werewolf.solutions",
+      "serverNames": [
+        "handymanservices-staging.werewolf.solutions",
+        "handymanservices-staging.werewolf.solutions"
+      ],
+      "proxyPass": [
+        "http://127.0.0.1:41000"
+      ],
+      "roots": [
+        "/var/www/certbot"
+      ]
+    },
+    {
+      "file": "/etc/nginx/sites-enabled/handymanservices",
+      "target": "/etc/nginx/sites-available/handymanservices",
+      "serverNames": [
+        "handymanservices.werewolf.solutions",
+        "handymanservices.werewolf.solutions"
+      ],
+      "proxyPass": [
+        "http://localhost:3001"
+      ],
+      "roots": [
+        "/home/lorenzo/handymanservices/client/dist"
+      ]
+    }
+  ],
+  "memory": {
+    "MemTotal": "988272",
+    "MemAvailable": "253340",
+    "SwapTotal": "2097148",
+    "SwapFree": "1889532"
+  },
+  "disk": {
+    "availableBytes": 17671884800,
+    "totalBytes": 25821052928
+  },
+  "pm2": [
+    {
+      "name": "handymanservices",
+      "pid": 917500,
+      "status": "online",
+      "cwd": "/home/lorenzo/handymanservices/server",
+      "script": "/home/lorenzo/.nvm/versions/node/v22.21.0/bin/npm",
+      "memory": 20156416
+    },
+    {
+      "name": "pm2-logrotate",
+      "pid": 1673773,
+      "status": "online",
+      "cwd": "/home/lorenzo/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate",
+      "script": "/home/lorenzo/.pm2/modules/pm2-logrotate/node_modules/pm2-logrotate/app.js",
+      "memory": 31047680
+    },
+    {
+      "name": "printshop",
+      "pid": 0,
+      "status": "stopped",
+      "cwd": "/home/lorenzo/print-shop/server",
+      "script": "/home/lorenzo/.nvm/versions/node/v22.21.0/bin/npm",
+      "memory": 0
+    },
+    {
+      "name": "ai-social-media-manager",
+      "pid": 3017673,
+      "status": "online",
+      "cwd": "/home/lorenzo/AI-social-media-autopilot/server",
+      "script": "/home/lorenzo/AI-social-media-autopilot/server/bin/www",
+      "memory": 103137280
+    },
+    {
+      "name": "werewolf-dapp-staging",
+      "pid": 2990400,
+      "status": "online",
+      "cwd": "/home/lorenzo/werewolf-dapp-staging/server",
+      "script": "/home/lorenzo/werewolf-dapp-staging/server/bin/www",
+      "memory": 99414016
+    },
+    {
+      "name": "werewolf-dapp",
+      "pid": 2990564,
+      "status": "online",
+      "cwd": "/home/lorenzo/werewolf-dapp/server",
+      "script": "/home/lorenzo/werewolf-dapp/server/bin/www",
+      "memory": 89071616
+    }
+  ],
+  "date": "2026-10-06",
+  "scope": "read-only host diagnostics; no environment variables or customer records",
+  "todo": {
+    "activeVersion": "0.6.5",
+    "commit": "cc9942ab317c2f652f68c137c6917a2a1f1995f9",
+    "watch": "not-monitored"
+  },
+  "handymanservices": {
+    "managedStagingVersion": "1.0.1",
+    "commit": "ff17b6a769c3be1a316a98040725d2adc568661b",
+    "watch": "not-monitored",
+    "productionHostnameOwnedBy": "legacy PM2 deployment"
+  }
+}

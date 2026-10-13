@@ -1,0 +1,76 @@
+{
+  "connectionId": "con_c5284ad1-1a83-4cf3-9245-9c06e30c1525",
+  "metadataRevision": 3,
+  "publicMetadata": {
+    "revision": 1,
+    "prepareWorkflows": [
+      {
+        "repository": "Werewolf-Solutions/handymanservices",
+        "workflow": "build-node-service.yml",
+        "workflowPath": ".github/workflows/build-node-service.yml",
+        "refs": [
+          {
+            "ref": "dev"
+          }
+        ]
+      }
+    ],
+    "releaseControllers": [
+      {
+        "controller": "werewolf-static@1",
+        "sourceAuthorization": "installation-token",
+        "targetId": "werewolf:handymanservices-staging-web",
+        "repository": "Werewolf-Solutions/deployment-control-handymanservices",
+        "workflow": "release-static.yml",
+        "workflowPath": ".github/workflows/release-static.yml",
+        "ref": "refs/heads/main",
+        "expectedHeadSha": "0c9f663cdf1b2abc0fa0e83072cdc3a707f0ca21",
+        "expectedWorkflowBlobSha": "ff2577b79e0efeeaf5779eb7d7466d6afbe1e00b",
+        "githubEnvironment": "werewolf-handymanservices-staging-web",
+        "allowedSourceRepositories": [
+          "Werewolf-Solutions/handymanservices"
+        ],
+        "branchProtection": "unavailable-on-plan",
+        "reviewedWriters": [
+          "Oznerol92"
+        ]
+      }
+    ],
+    "githubAppSetup": {
+      "id": "5153618",
+      "slug": "psm-werewolf-solutions-ca7020",
+      "owner": "Werewolf-Solutions",
+      "accountKind": "organization",
+      "projectId": "prj_a1557b3e3e9c57129fa8",
+      "environmentId": "staging",
+      "slot": "github",
+      "bindingRevision": null,
+      "controllerRepository": "Werewolf-Solutions/deployment-control-handymanservices"
+    },
+    "githubApp": {
+      "id": "5153618",
+      "slug": "psm-werewolf-solutions-ca7020",
+      "owner": "Werewolf-Solutions",
+      "installationId": "166975245"
+    }
+  },
+  "constraints": {
+    "allowedProjectIds": [
+      "prj_a1557b3e3e9c57129fa8"
+    ],
+    "allowedEnvironmentIds": [
+      "staging"
+    ],
+    "maximumAuthorizedRisk": "staging",
+    "allowedRepositories": [
+      "Werewolf-Solutions/handymanservices",
+      "Werewolf-Solutions/deployment-control-handymanservices"
+    ],
+    "allowedSourceRefs": [
+      "dev"
+    ],
+    "allowedTargetIds": [
+      "werewolf:handymanservices-staging-web"
+    ]
+  }
+}

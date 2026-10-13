@@ -154,7 +154,7 @@ test("every workspace tab has a pane, and every pane a tab", () => {
   vm.runInContext(app.slice(app.indexOf("const PANE_MEMORY_KEY ="), app.indexOf("function projectHash(")), context);
   for (const tab of tabs) {
     assert.equal(context.selectedPane("project", "prj_test", tab), tab, `navigation would refuse ${tab}`);
-    assert.equal(context.selectedPane("work", "room", tab), ["ai", "session", "changes"].includes(tab) ? tab : "ai");
+    assert.equal(context.selectedPane("work", "room", tab), ["ai", "session", "changes", "deploy"].includes(tab) ? tab : "ai");
     assert.equal(context.selectedPane("project", "__workspace__", tab), ["ai", "session"].includes(tab) ? tab : "ai");
   }
 });

@@ -43,6 +43,8 @@ export interface PermissionSnapshot {
   revision: number;
   /** The last revision that reduced authority. */
   restrictedRevision?: number;
+  workspaceRevision?: number;
+  workspaceRestrictedRevision?: number;
   grants: Partial<Record<AgentPermission, { granted: boolean; actor: string; at: number }>>;
   /** Scoped Allow/Ask/Deny rules beside the grants. */
   rules?: PolicyRule[];
@@ -81,12 +83,52 @@ export class AgentPermissionStore {
     const canonical = { ...project, path: fs.realpathSync(project.path) };
     const row = this.database().prepare("SELECT revision, grants, rules, restricted_revision FROM agent_permissions WHERE project_id = ? AND checkout = ?")
       .get(project.id, canonical.path) as { revision: number; grants: string; rules: string; restricted_revision: number } | undefined;
-    return { project: canonical, revision: row?.revision ?? 0, restrictedRevision: row?.restricted_revision ?? 0, grants: row ? JSON.parse(row.grants) : {}, rules: row ? JSON.parse(row.rules) : [] };
+    const workspace = this.workspacePolicy(project.workspaceId);
+    return { project: canonical, revision: row?.revision ?? 0, restrictedRevision: row?.restricted_revision ?? 0, workspaceRevision: workspace.revision, workspaceRestrictedRevision: workspace.restrictedRevision, grants: row ? JSON.parse(row.grants) : {}, rules: row ? JSON.parse(row.rules) : [] };
+  }
+  workspacePolicy(workspaceId = "personal"): { workspaceId: string; revision: number; restrictedRevision: number; rules: PolicyRule[] } {
+    const row = this.database().prepare("SELECT revision, restricted_revision, rules FROM agent_permissions WHERE project_id = ? AND checkout = ''")
+      .get(workspaceKey(workspaceId)) as { revision: number; restricted_revision: number; rules: string } | undefined;
+    return { workspaceId: workspaceId.toLowerCase(), revision: row?.revision ?? 0, restrictedRevision: row?.restricted_revision ?? 0, rules: row ? JSON.parse(row.rules) : [] };
   }
   /** Workspace-level rules; only their Deny rules take part in decisions. */
   workspaceRules(workspaceId = "personal"): PolicyRule[] {
-    const row = this.database().prepare("SELECT rules FROM agent_permissions WHERE project_id = ? AND checkout = ''").get(workspaceKey(workspaceId)) as { rules: string } | undefined;
-    return row ? JSON.parse(row.rules) : [];
+    return this.workspacePolicy(workspaceId).rules;
+  }
+  /** Workspace policy restricts projects; it never grants authority to them. */
+  addWorkspaceRule(workspaceId: string, input: Parameters<typeof makeRule>[0], revision: unknown) {
+    if (input.effect !== "deny" || !(input.permission === "*" || AGENT_PERMISSIONS.some((entry) => entry.id === input.permission))) throw new PermissionError("Workspace rules must deny a supported operation or all operations.");
+    if (input.duration && !["standing", "until"].includes(input.duration.kind)) throw new PermissionError("Workspace restrictions must be standing or time-limited.");
+    if (Object.keys(input.scope ?? {}).some((key) => !["environmentId", "connectionId", "capability", "tool"].includes(key))) throw new PermissionError("Invalid workspace rule scope.");
+    const rule = makeRule(input);
+    return this.#writeWorkspace(workspaceId, revision, input.actor, (rules) => ({ rules: [...rules, rule], event: `rule:deny:${rule.permission}`, restrictive: true }));
+  }
+  removeWorkspaceRule(workspaceId: string, ruleId: string, revision: unknown, actor: string) {
+    return this.#writeWorkspace(workspaceId, revision, actor, (rules) => {
+      const rule = rules.find((entry) => entry.id === ruleId);
+      if (!rule) throw new PermissionError("That rule no longer exists. Refresh and review again.");
+      return { rules: rules.filter((entry) => entry.id !== ruleId), event: `rule-removed:${rule.effect}:${rule.permission}`, restrictive: false };
+    });
+  }
+  #writeWorkspace(workspaceId: string, revision: unknown, actor: string, change: (rules: PolicyRule[]) => { rules: PolicyRule[]; event: string; restrictive: boolean }) {
+    if (!/^(personal|business:[a-f0-9]{24})$/i.test(workspaceId) || !Number.isSafeInteger(revision)) throw new PermissionError("Invalid workspace policy change.");
+    const database = this.database();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const before = this.workspacePolicy(workspaceId);
+      if (before.revision !== revision) throw new PermissionError("Workspace policy changed since this view was loaded. Refresh and review again.");
+      const next = change(before.rules);
+      const nextRevision = before.revision + 1;
+      database.prepare("INSERT INTO agent_permissions (project_id, checkout, revision, grants, rules, restricted_revision) VALUES (?, '', ?, '{}', ?, ?) ON CONFLICT(project_id, checkout) DO UPDATE SET revision = excluded.revision, rules = excluded.rules, restricted_revision = excluded.restricted_revision")
+        .run(workspaceKey(workspaceId), nextRevision, JSON.stringify(next.rules), next.restrictive ? nextRevision : before.restrictedRevision);
+      database.prepare("INSERT INTO agent_permission_events(project_id, checkout, revision, permission, granted, actor, at) VALUES (?, '', ?, ?, ?, ?, ?)")
+        .run(workspaceKey(workspaceId), nextRevision, next.event, Number(!next.restrictive), actor, Date.now());
+      database.exec("COMMIT");
+      return this.workspacePolicy(workspaceId);
+    } catch (error) { database.exec("ROLLBACK"); throw error; }
+  }
+  workspaceHistory(workspaceId: string): unknown[] {
+    return this.database().prepare("SELECT revision, permission, granted, actor, at FROM agent_permission_events WHERE project_id = ? AND checkout = '' ORDER BY revision DESC LIMIT 100").all(workspaceKey(workspaceId));
   }
   /**
    * Decide one operation against the *current* policy. A snapshot taken before
@@ -98,6 +140,7 @@ export class AgentPermissionStore {
     // Decisions always use the current rules. A snapshot older than the last
     // reduction of authority is refused as a whole; additions do not stop a task.
     if (current.project.path !== snapshot.project.path || snapshot.revision < (current.restrictedRevision ?? 0)) throw new PermissionError("Project permissions changed. Start a fresh turn.");
+    if ((snapshot.workspaceRevision ?? 0) < (current.workspaceRestrictedRevision ?? 0)) throw new PermissionError("Workspace permissions changed. Start a fresh turn.");
     if (!AGENT_PERMISSIONS.some((entry) => entry.id === permission && entry.supported)) {
       return { effect: "deny", rule: null, workspace: false, reason: `${permission} is not an operation PSM supports.` };
     }

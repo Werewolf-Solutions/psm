@@ -56,6 +56,23 @@ test("managed commits preserve an explicit newer version and sync its lockfile",
   assert.equal(JSON.parse(git("show", "HEAD:package-lock.json")).version, "0.7.0");
 });
 
+for (const [bump, expected] of [["major", "1.0.0"], ["minor", "0.7.0"]] as const) {
+  test(`managed commits apply a selected ${bump} release bump`, (t) => {
+    const { tools, git } = versionedFixture(t);
+    tools.write("app.txt", "new behavior\n"); tools.stage(["app.txt"]);
+    assert.match(tools.commit("new behavior", bump), new RegExp(`release version ${expected.replace(/\./g, "\\.")}`));
+    assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, expected);
+    assert.equal(JSON.parse(git("show", "HEAD:package-lock.json")).version, expected);
+  });
+}
+
+test("selected major bump takes precedence over a smaller staged version", (t) => {
+  const { tools, git } = versionedFixture(t);
+  tools.write("package.json", '{"name":"app","version":"0.6.1"}\n'); tools.stage(["package.json"]);
+  tools.commit("breaking change", "major");
+  assert.equal(JSON.parse(git("show", "HEAD:package.json")).version, "1.0.0");
+});
+
 test("documentation-only commits do not consume a release version", (t) => {
   const { tools, git } = versionedFixture(t);
   tools.write("README.md", "Updated docs\n"); tools.stage(["README.md"]); tools.commit("docs");
@@ -294,4 +311,37 @@ test("when Git itself cannot name a committer, the checkout says what to set", (
   git("config", "user.useConfigOnly", "true");
   isolatedIdentity(t, {});
   assert.throws(() => tools.preflightCommit(), /cannot tell who to commit as.*user\.name and user\.email/);
+});
+
+test("website commits require current builds and browser checks, including nested packages", async (t) => {
+  const { taskInputs } = await import("./agent-task-inputs.ts");
+  const { tools, root, git } = fixture(t);
+  fs.mkdirSync(path.join(root, "client"));
+  fs.writeFileSync(path.join(root, "client/package.json"), JSON.stringify({ scripts: { build: "tsc && vite build" }, dependencies: { react: "19" } }));
+  git("add", "client/package.json"); git("commit", "-qm", "add website");
+  tools.write("app.txt", "fixed\n"); tools.stage(["app.txt"]);
+  const head = git("rev-parse", "HEAD");
+  assert.throws(() => tools.commit("unverified"), /Commit blocked.*build in client.*browser preview in client/);
+  assert.equal(git("rev-parse", "HEAD"), head);
+  tools.recordVerification("client", "build", taskInputs(tools).digest);
+  assert.throws(() => tools.commit("build alone"), /browser preview/);
+  tools.recordVerification("client", "preview", taskInputs(tools).digest);
+  tools.write("app.txt", "changed after checks\n"); tools.stage(["app.txt"]);
+  assert.throws(() => tools.commit("stale checks"), /current source is unverified/);
+  tools.recordVerification("client", "build", taskInputs(tools).digest);
+  tools.recordVerification("client", "preview", taskInputs(tools).digest);
+  tools.commit("verified website");
+  assert.equal(git("show", "HEAD:app.txt"), "changed after checks\n");
+});
+
+test("builds cannot certify different staged source and docs-only changes need no runner", async (t) => {
+  const { taskInputs } = await import("./agent-task-inputs.ts");
+  const { tools, root, git } = fixture(t);
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { build: "node build.js" } }));
+  git("add", "package.json"); git("commit", "-qm", "add build");
+  tools.write("README.md", "docs\n"); tools.stage(["README.md"]); tools.commit("docs");
+  tools.write("app.txt", "broken staged content\n"); tools.stage(["app.txt"]);
+  tools.write("app.txt", "passing worktree content\n");
+  tools.recordVerification(".", "build", taskInputs(tools).digest);
+  assert.throws(() => tools.commit("partial staging"), /app.txt differs from verified source/);
 });

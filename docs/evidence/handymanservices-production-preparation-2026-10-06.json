@@ -1,0 +1,173 @@
+{
+  "state": "prepared-awaiting-local-controller-review",
+  "source": {
+    "repository": "Werewolf-Solutions/handymanservices",
+    "branch": "dev",
+    "commit": "4405cb7ee1367fae696037b80eda551306bd5f24",
+    "previousCommit": "ff17b6a769c3be1a316a98040725d2adc568661b",
+    "subject": "Make production the sole Handymanservices deployment environment",
+    "previousPreparationCommit": "3256bbdf0ea0c60921d26dbe1640fac310727a55",
+    "version": "1.0.3",
+    "environments": [
+      "production"
+    ]
+  },
+  "controller": {
+    "repository": "Werewolf-Solutions/deployment-control-handymanservices",
+    "head": "28d07a9d6ceca09fc1ef9465bbd97cb645d02b4d",
+    "githubEnvironment": "werewolf-handymanservices-production-web",
+    "changes": [],
+    "writers": [
+      "Oznerol92"
+    ],
+    "actions": [
+      "Update reviewed controller files",
+      "Branch protection is not part of Werewolf-Solutions/deployment-control-handymanservices's GitHub plan, so PSM guards it instead: releases run only at the commit pinned here, and are refused if anyone other than Oznerol92 can push to it",
+      "Restrict the target environment to this branch where the plan allows it",
+      "Publish the CI release key and known host",
+      "Verify the complete bundle and pin its commit"
+    ]
+  },
+  "productionTarget": {
+    "targetId": "werewolf:handymanservices-production-web",
+    "unitId": "web",
+    "hostname": "handymanservices.werewolf.solutions",
+    "canonicalRoot": "/srv/handymanservices.werewolf.solutions",
+    "allowedRootPrefix": "/srv",
+    "certbotEmail": "handymanservices@werewolf.solutions",
+    "revision": "psm-784325b48805",
+    "file": "/etc/psm-deploy/targets/0bd09ba0e05cbe568e3e3444b97e59e011961a3f3a968b7d3121f952b63b9e39.json",
+    "service": {
+      "entry": "bin/www",
+      "healthPath": "/healthz",
+      "startupTimeoutSeconds": 20,
+      "memoryMaxMb": 256,
+      "account": "psm-s-handymanservices-pr-366a60",
+      "unitName": "psm-svc-handymanservices-pr-366a60"
+    }
+  },
+  "recovery": {
+    "backupDirectory": "/var/backups/psm-handymanservices-20261006",
+    "facts": {
+      "/etc/nginx/sites-available/handymanservices": {
+        "sha256": "08a26ee6a60e81e634ab72a9d0b200b12513b4861ce7af233d23cabdee70c125",
+        "backup": "/var/backups/psm-handymanservices-20261006/handymanservices"
+      },
+      "/etc/nginx/sites-available/handymanservices-staging.werewolf.solutions": {
+        "sha256": "8f03e60674e16f9ea425d011087faa0677a3aa467bbb1fe956927334c452f2c0",
+        "backup": "/var/backups/psm-handymanservices-20261006/handymanservices-staging.werewolf.solutions"
+      },
+      "/etc/psm-deploy/targets/0bd09ba0e05cbe568e3e3444b97e59e011961a3f3a968b7d3121f952b63b9e39.json": {
+        "sha256": "8c903ecef40935931198c1a75554f5b11fb5d5c90e4cca2e612cdb351928124d",
+        "backup": "/var/backups/psm-handymanservices-20261006/0bd09ba0e05cbe568e3e3444b97e59e011961a3f3a968b7d3121f952b63b9e39.json"
+      },
+      "legacy": {
+        "name": "handymanservices",
+        "pid": 917500,
+        "cwd": "/home/lorenzo/handymanservices/server",
+        "topLevelEntries": [
+          ".env",
+          ".env.example",
+          ".gitignore",
+          "README.md",
+          "app.js",
+          "bin",
+          "middleware",
+          "node_modules",
+          "package-lock.json",
+          "package.json",
+          "public",
+          "routes",
+          "utils"
+        ],
+        "recoveryConfig": "/var/backups/psm-handymanservices-20261006/legacy-process.json"
+      }
+    }
+  },
+  "archive": {
+    "archive": "/var/backups/psm-handymanservices-20261006/legacy-code.tar.gz",
+    "bytes": 223793088,
+    "sha256": "f847948105d25d3d3d1db46084f4effd368734594898ab8a7cd216d1ddd60590",
+    "service": {
+      "unitName": "psm-svc-handymanservices-pr-366a60",
+      "user": "psm-s-handymanservices-pr-366a60",
+      "uid": 994,
+      "gid": 994,
+      "port": 41001,
+      "memoryMaxMb": 256,
+      "entry": "bin/www",
+      "healthPath": "/healthz",
+      "startupTimeoutSeconds": 20,
+      "systemdDir": "/etc/systemd/system",
+      "configDir": "/etc/psm-deploy/services"
+    },
+    "productionTarget": "werewolf:handymanservices-production-web"
+  },
+  "trafficChanged": false,
+  "legacyRemoved": false,
+  "stagingControllerReleaseSuspended": true,
+  "stagingServiceRunning": true,
+  "productionIdentity": {
+    "decision": "preserve-existing-production-business",
+    "apiKeyMatchesStaging": true,
+    "businessIdMatchesStaging": false,
+    "savedToProductionSecretBroker": true,
+    "valuesIncluded": false
+  },
+  "sharedController": {
+    "psmVersion": "0.3.36",
+    "existingRepositoryReusable": true,
+    "workflowChanges": 0,
+    "peerFilesPreserved": true,
+    "compatiblePeerPinsUpdatedAtomically": true,
+    "requiresLocalApply": true
+  },
+  "trafficSwitched": false,
+  "productionMonitor": {
+    "key": "handymanservices-production-web",
+    "url": "https://handymanservices.werewolf.solutions/",
+    "state": "healthy",
+    "purpose": "bootstrap availability of currently serving legacy route; not new release verification"
+  },
+  "readinessUiFix": {
+    "psmVersion": "0.3.35",
+    "reason": "Readiness offered manual file creation at an old pin and an App-managed pin endpoint that refused the operation.",
+    "action": "review-controller",
+    "taskList": "one combined controller bundle review",
+    "manualFileCreationRequired": false,
+    "targetedTestsPassed": 35,
+    "typecheck": "passed"
+  },
+  "localOperatorPolicy": {
+    "psmVersion": "0.3.36",
+    "requiresWerewolfSignIn": false,
+    "appliesTo": [
+      "source-publication",
+      "production-approval",
+      "held-run-recovery",
+      "production-cancellation"
+    ],
+    "requiresExactLoopbackCockpitAndSameOriginBrowser": true,
+    "retainsExactDigestAndOneUseIntent": true,
+    "hostedExemptionCanBeDisabled": true,
+    "saasAuthentication": "deferred-to-hosted-roadmap",
+    "liveSessionCapabilityVerified": true
+  },
+  "currentPreparation": {
+    "state": "awaiting-approval",
+    "phase": "infrastructure",
+    "planId": "dpl_bc0a2a61058447f6",
+    "psmVersion": "0.3.37",
+    "freshRecheckDigestMatches": true
+  },
+  "localPolicyVerification": {
+    "repositorySuite": {
+      "passed": 798,
+      "skipped": 5,
+      "failed": 0
+    },
+    "uiSessionRefreshSuitePassed": 6,
+    "typecheck": "passed"
+  },
+  "telemetryPlanFixEvidence": "handymanservices-stale-plan-2026-10-06.json"
+}

@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { approvedReleaseActiveOnTarget, helperData, ingressObservationTls, missingReceiptReleaseAbsent, newlyCreatedDnsStillPending, preDispatchContractFailure, releaseStateOnTarget, rollbackAuthorization } from "./runtime-adapters.ts";
+import { approvedReleaseActiveOnTarget, deploymentWatchReceipt, helperData, ingressObservationTls, missingReceiptReleaseAbsent, newlyCreatedDnsStillPending, preDispatchContractFailure, releaseStateOnTarget, rollbackAuthorization } from "./runtime-adapters.ts";
 import { HOST_HELPER_RESPONSE_SCHEMA } from "./adapters/host-helper.ts";
 import type { ReleaseControllerDispatch } from "./adapters/executor-contract.ts";
 import type { DeploymentResourceBinding, DeploymentRunStep } from "./store.ts";
+
+test("deployment Watch receipt stays below the durable result limit with a full monitoring history", () => {
+  const history = { checks: Array.from({ length: 169 }, (_, at) => ({ at: 1791900000000 + at * 3600000, checks: 60, healthy: 60, degraded: 0, down: 0, latencyMs: 12.4 })),
+    host: Array.from({ length: 169 }, (_, at) => ({ at: 1791900000000 + at * 3600000, cpuPercent: 20,
+      memoryUsedBytes: 123456789, memoryTotalBytes: 234567890, diskUsedBytes: 123456789,
+      diskTotalBytes: 234567890, load1: 0.25 })) };
+  const observed = { monitorId: "public-web", providerState: "healthy", effectiveState: "healthy" as const,
+    observedAt: Date.now(), detail: "HTTP 200; TLS verified", evidence: { provider: "werewolf-watch@1",
+      providerMonitorId: "public-web", status: 200, tlsExpiresAt: Date.now() + 86400000, history } };
+  assert.ok(JSON.stringify(observed).length > 32 * 1024);
+  const receipt = deploymentWatchReceipt(observed);
+  assert.ok(JSON.stringify(receipt).length < 32 * 1024);
+  assert.deepEqual(receipt, { monitorId: "public-web", providerState: "healthy", effectiveState: "healthy",
+    observedAt: observed.observedAt, detail: "HTTP 200; TLS verified", evidence: {
+      provider: "werewolf-watch@1", providerMonitorId: "public-web", observer: null, failureDomain: null,
+      status: 200, durationMs: null, tlsExpiresAt: observed.evidence.tlsExpiresAt,
+    } });
+});
 
 test("only a DNS record created by this submission gets a bounded visibility grace", () => {
   const submittedAt = 1_000_000;

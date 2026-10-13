@@ -10,3 +10,5 @@ contract.
 - [ADR-0003: The privileged host helper is a static Go service](0003-static-go-host-helper.md)
 - [ADR-0004: Controller revisions are immutable release tags](0004-controller-revisions.md)
 - [ADR-0005: Retain artifacts for 30 days and five target releases](0005-release-retention.md)
+
+- [0006: Werewolf-owned monitoring](0006-werewolf-watch.md) — accepted; supersedes Better Stack as the default.

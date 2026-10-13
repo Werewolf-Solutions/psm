@@ -41,6 +41,83 @@
     if (!response.ok) throw new Error(body.error || "Request failed");
     return body;
   }
+  async function renderWorkspacePolicy(section, { api, workspaceId, current, onChanged }) {
+    const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/agent-policy`;
+    const active = () => current() && section.isConnected;
+    let pending = false;
+    const show = (data, message = "") => {
+      if (!active()) return;
+      const workspaceName = data.workspaceName || workspaceId;
+      section.replaceChildren(node("h3", "Workspace restrictions"), node("p", `Applies to every project in ${workspaceName}. A workspace restriction overrides project grants and presets.`, "cap-section-description"));
+      const status = node("p", message, "permission-status"); status.setAttribute("role", "status");
+      section.append(status);
+      const change = async (path, body, method = "POST") => {
+        if (pending || !active()) return;
+        pending = true;
+        const controls = [...section.querySelectorAll("button, select, input")];
+        controls.forEach((item) => { item.disabled = true; });
+        try {
+          const updated = await request(api, `${base}${path}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, revision: data.revision }) });
+          if (active()) {
+            const message = method === "DELETE" ? "Restriction removed. Project grants still determine access." : "Restriction saved. Affected agent turns and queued messages were stopped.";
+            show(updated, message); onChanged(message);
+          }
+        } catch (error) { if (active()) status.textContent = `${error.message} Use Refresh policy before retrying a stale change.`; }
+        finally { pending = false; controls.forEach((item) => { item.disabled = false; }); }
+      };
+      const refresh = node("button", "Refresh policy", "btn"); refresh.type = "button";
+      refresh.onclick = async () => {
+        if (pending) return;
+        refresh.disabled = true;
+        try { show(await request(api, base)); }
+        catch (error) { if (active()) status.textContent = error.message; }
+        finally { refresh.disabled = false; }
+      };
+      section.append(refresh);
+      for (const rule of data.rules || []) {
+        const row = node("article", "", "permission-row");
+        const expired = rule.expiresAt !== null && rule.expiresAt <= Date.now();
+        row.append(node("p", `${describeRule(rule)}${expired ? " · expired" : ""}`));
+        const remove = node("button", "Remove restriction", "btn"); remove.type = "button";
+        remove.onclick = async () => {
+          if (await window.psmConfirm(`Remove this workspace restriction for every project in ${workspaceName}?\n${describeRule(rule)}\nProject grants will determine access.`, "Remove workspace restriction")) void change(`/rules/${encodeURIComponent(rule.id)}`, {}, "DELETE");
+        };
+        row.append(remove); section.append(row);
+      }
+      if (!(data.rules || []).length) section.append(node("p", "No workspace restrictions."));
+      const form = node("form", "", "permission-rule-form");
+      section.append(node("p", "Leave scope fields empty to apply everywhere. Filled fields must all match the operation.", "cap-section-description"));
+      const select = (choices, title) => {
+        const element = document.createElement("select"); element.setAttribute("aria-label", title);
+        for (const [value, text] of choices) { const option = node("option", text); option.value = value; element.append(option); }
+        return element;
+      };
+      const permission = select([["", "Choose an operation"], ["*", "All supported operations"], ...data.permissions.filter((entry) => entry.supported).map((entry) => [entry.id, entry.title])], "Restricted operation");
+      permission.required = true;
+      const duration = select(DURATIONS.filter(([value]) => value !== "once"), "Restriction duration");
+      const scopeInputs = [["environmentId", "Environment"], ["connectionId", "Connection"], ["capability", "Capability"], ["tool", "Tool"]].map(([key, title]) => {
+        const input = document.createElement("input"); input.placeholder = `${title} (optional)`; input.setAttribute("aria-label", title);
+        return { key, input };
+      });
+      const add = node("button", "Add restriction", "btn"); add.type = "submit";
+      form.append(permission, ...scopeInputs.map(({ input }) => input), duration, add);
+      form.onsubmit = async (event) => {
+        event.preventDefault();
+        const scope = Object.fromEntries(scopeInputs.filter(({ input }) => input.value.trim()).map(({ key, input }) => [key, input.value.trim()]));
+        const details = Object.entries(scope).map(([key, value]) => `${key.replace("Id", "")}: ${value}`).join(", ") || "all environments and connections";
+        if (!await window.psmConfirm(`Deny ${permission.value} for every project in ${workspaceName}?\nScope: ${details}\nDuration: ${duration.selectedOptions[0].textContent}\nAffected agent turns and queued messages will stop.`, "Add workspace restriction")) return;
+        void change("/rules", { permission: permission.value, effect: "deny", scope, duration: duration.value === "standing" ? { kind: "standing" } : { kind: "until", expiresAt: Date.now() + Number(duration.value) * 3_600_000 } });
+      };
+      section.append(form);
+      const audit = node("details", "", "permission-audit"); audit.append(node("summary", "Workspace policy history"));
+      for (const event of data.history || []) audit.append(node("p", `${new Date(event.at).toLocaleString()} · ${event.actor} · ${event.permission} · revision ${event.revision}`));
+      if (!(data.history || []).length) audit.append(node("p", "No workspace policy changes recorded."));
+      section.append(audit);
+    };
+    section.append(node("h3", "Workspace restrictions"), node("p", "Loading workspace policy…"));
+    try { show(await request(api, base)); }
+    catch (error) { if (active()) section.replaceChildren(node("h3", "Workspace restrictions"), node("p", error.message, "permission-status")); }
+  }
   async function render(container, connections, { api, project, onDeploy }) {
     const generation = (generations.get(container) || 0) + 1;
     generations.set(container, generation);
@@ -67,7 +144,7 @@
         : fallbackCategories.filter((category) => categoryIds.has(category.id));
       const changePermissions = async (permissions, granted, label) => {
         if (pending || !current() || !permissions.length) return;
-        if (granted && !window.confirm(`Allow ${project.name} agents to ${label}?\n\nThis changes ${permissions.length} standing permission${permissions.length === 1 ? "" : "s"}. Remote Git grants can publish source, and repository grants can delete files. Current turns will stop so the new permissions take effect.`)) return;
+        if (granted && !await window.psmConfirm(`Allow ${project.name} agents to ${label}?\n\nThis changes ${permissions.length} standing permission${permissions.length === 1 ? "" : "s"}. Remote Git grants can publish source, and repository grants can delete files. Current turns will stop so the new permissions take effect.`, "Change agent permissions")) return;
         pending = true;
         list.querySelectorAll("button").forEach((item) => { item.disabled = true; });
         try {
@@ -122,9 +199,9 @@
         limits.append(ul);
         const apply = node("button", active ? "Apply again" : `Apply ${preset.title}`, preset.id === "full" ? "btn" : "btn btn-primary");
         apply.type = "button";
-        apply.onclick = () => {
+        apply.onclick = async () => {
           const lines = [`${preset.title} for ${project.name}:`, preset.summary, "", "Allows: " + preset.grants.join(", "), ...(preset.rules || []).map((rule) => `${rule.effect.toUpperCase()} ${rule.permission}${rule.scope?.environmentId ? ` in ${rule.scope.environmentId}` : ""}`), "", "Replaces this project's current grants and rules. Running agent turns stop."];
-          if (window.confirm(lines.join("\n"))) post("/agent-permissions/preset", { preset: preset.id });
+          if (await window.psmConfirm(lines.join("\n"), "Apply access preset")) post("/agent-permissions/preset", { preset: preset.id });
         };
         card.append(limits, apply);
         presetGrid.append(card);
@@ -133,6 +210,9 @@
       const revokeAll = action("Revoke all grants", granted, false, "revoke every managed operation", false, currentCatalog);
       summary.append(presetGrid, revokeAll);
       list.append(summary);
+
+      const workspaceSection = node("section", "", "permission-workspace-policy");
+      list.append(workspaceSection);
 
       const rules = node("section", "", "permission-rules");
       rules.append(node("h3", "Rules"), node("p", "Rules narrow or widen single operations: Allow, Ask (you review each use) or Deny, for an environment, for a while, or once. The most specific rule wins; Deny beats Ask beats Allow.", "cap-section-description"));
@@ -209,6 +289,16 @@
       if (!data.history.length) audit.append(node("p", "No permission changes recorded."));
       list.append(audit);
       container.append(list);
+      void renderWorkspacePolicy(workspaceSection, {
+        api, workspaceId: data.project?.workspaceId || "personal", current,
+        onChanged: async (message) => {
+          status.textContent = message;
+          try {
+            const updated = await request(api, `${base}/agent-permissions`);
+            if (current()) { show(updated); await loadAccess(); }
+          } catch (error) { if (current()) status.textContent = `${message} Could not refresh project access: ${error.message}`; }
+        },
+      });
     };
     const status = node("p", "", "permission-status");
     status.setAttribute("role", "status");
@@ -289,7 +379,7 @@
               if (answer === "task" && !review.task) continue;
               const button = node("button", label, answer === "once" ? "btn btn-primary" : "btn"); button.type = "button";
               button.onclick = async () => {
-                if (answer === "standing" && !window.confirm(`Always allow ${review.permission}${review.context?.environmentId ? ` in ${review.context.environmentId}` : ""} for ${project.name}? Future requests of this kind will not ask.`)) return;
+                if (answer === "standing" && !await window.psmConfirm(`Always allow ${review.permission}${review.context?.environmentId ? ` in ${review.context.environmentId}` : ""} for ${project.name}? Future requests of this kind will not ask.`, "Always allow permission")) return;
                 row.querySelectorAll("button").forEach((item) => { item.disabled = true; });
                 try { await request(api, `${base}/agent-reviews/${encodeURIComponent(review.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ answer }) }); status.textContent = answer === "reject" ? "Rejected." : "Approved. The agent can retry now."; }
                 catch (error) { status.textContent = error.message; }
@@ -320,7 +410,7 @@
             for (const [approve, always, label] of [[true, false, "Approve call"], [true, true, "Always allow this tool"], [false, false, "Reject"]]) {
               const button = node("button", label, "btn");
               button.onclick = async () => {
-                if (approve && !window.confirm(always ? `Run ${call.tool} now, and let future ${call.tool} calls through ${call.capability} run without review?` : `Run ${call.tool} through ${call.capability} with the displayed arguments? This may change an external service.`)) return;
+                if (approve && !await window.psmConfirm(always ? `Run ${call.tool} now, and let future ${call.tool} calls through ${call.capability} run without review?` : `Run ${call.tool} through ${call.capability} with the displayed arguments? This may change an external service.`, "Approve attached tool")) return;
                 row.querySelectorAll("button").forEach((button) => { button.disabled = true; });
                 try { await request(api, `${base}/agent-tool-requests/${encodeURIComponent(call.id)}/decision`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ digest: call.digest, approve, always }) }); }
                 catch (error) { status.textContent = error.message; }

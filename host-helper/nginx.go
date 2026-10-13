@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"text/template"
 )
@@ -196,4 +199,51 @@ func renderIngress(target TargetConfig, raw json.RawMessage, tls bool) ([]byte, 
 		return nil, err
 	}
 	return renderNginx(target, desired, tls)
+}
+
+// A matching managed file is not enough: nginx may select an earlier legacy
+// server block for the same hostname. Inspect only this target's enabled-site
+// directory and report competing exact server_name entries without changing it.
+func enabledIngressSites(target TargetConfig) (bool, []string, error) {
+	entries, err := os.ReadDir(target.NginxEnabledDir)
+	if os.IsNotExist(err) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	serverName := regexp.MustCompile(`(?m)^\s*server_name\s+([^;]+);`)
+	managedEnabled := false
+	var conflicts []string
+	for _, entry := range entries {
+		filename := filepath.Join(target.NginxEnabledDir, entry.Name())
+		if entry.Name() == target.Hostname {
+			link, err := os.Readlink(filename)
+			managedEnabled = err == nil && link == nginxPath(target)
+			continue
+		}
+		if !entry.Type().IsRegular() && entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		content, err := os.ReadFile(filename)
+		if err != nil {
+			return false, nil, err
+		}
+		matched := false
+		for _, match := range serverName.FindAllSubmatch(content, -1) {
+			for _, name := range strings.Fields(string(match[1])) {
+				if name == target.Hostname {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if matched {
+			conflicts = append(conflicts, entry.Name())
+		}
+	}
+	return managedEnabled, conflicts, nil
 }

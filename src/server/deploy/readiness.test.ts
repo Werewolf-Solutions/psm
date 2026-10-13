@@ -169,3 +169,17 @@ test("readiness preserves upstream ownership and groups a failing host connectio
   assert.equal(message.match(/error in libcrypto/g)?.length, 1);
   assert.match(message, /Project prj_upstream/); assert.match(message, /Connection host/);
 });
+
+test("App-managed controller prerequisites lead to scoped controller review", () => {
+  const document = plan();
+  const readiness = deploymentReadiness({ ...document, blocked: true, blockers:
+    ["pin", "target", "credentials"].map((part) => ({ id: `executor-not-ready:executor:web:controller-${part}`,
+      code: "executor-not-ready", title: "Executor Not Ready", ownerRef: `executor:web:controller-${part}`,
+      message: "Press “Review controller setup / update” then apply the reviewed setup." })) }, { canPrepare: true });
+  for (const item of readiness.items.filter((entry) => entry.status !== "ready")) {
+    assert.equal(item.action, "review-controller");
+    assert.equal(item.slot, "github");
+    assert.equal(item.automatic, false);
+    assert.equal(item.repairScope, "external");
+  }
+});

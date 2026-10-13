@@ -1,0 +1,7 @@
+{
+  "monitors": [
+    {"id":"todo-staging-web","url":"https://todo.werewolf.solutions/","expectedStatus":200,"intervalSeconds":60,"timeoutSeconds":10,"tlsWarningDays":14,"confirmationChecks":2,"recoveryChecks":2},
+    {"id":"handymanservices-staging-web","url":"https://handymanservices-staging.werewolf.solutions/healthz","expectedStatus":200,"intervalSeconds":60,"timeoutSeconds":10,"tlsWarningDays":14,"confirmationChecks":2,"recoveryChecks":2,"expectJson":{"ok":true}},
+    {"id":"werewolf-staging-api","url":"https://staging.werewolf.solutions/api/v1/health","expectedStatus":200,"intervalSeconds":60,"timeoutSeconds":10,"tlsWarningDays":14,"confirmationChecks":2,"recoveryChecks":2}
+  ]
+}

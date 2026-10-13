@@ -23,7 +23,7 @@
     controllerRepository: ["The GitHub repository holding the trusted release workflow that deploys prepared artifacts. It can differ from your application's repository. PSM reads that workflow, the branch it runs from, and the hashes that pin it out of this repository itself.", "example/deployment-controller"],
     githubEnvironment: ["The GitHub Environment in the release repository that holds this target's deploy credentials and protection rules. PSM fills this in from the repository's configured environments when it can reach it.", "production"],
     zones: ["DNS domains this connection may manage in DigitalOcean. Enter zone names, not individual record names; separate multiple zones with commas.", "example.com, example.org"],
-    monitors: ["The Better Stack monitor IDs this connection may read. PSM uses them to check external monitoring status after deployment. Enter IDs rather than monitor names or URLs.", "123456, 789012"],
+    monitors: ["The monitor IDs this connection may read. Werewolf Watch uses names from its monitor configuration; legacy Better Stack uses numeric IDs.", "todo-staging-web"],
     apiToken: ["The provider-issued secret used to authenticate API requests for this connection. Paste the token itself; PSM stores it separately from the public profile in the agent's secure store.", "your-provider-issued-token (illustrative; use your real token)"],
     privateKey: ["The private SSH login key for the deployment account. This is separate from the server's public host key. Select the complete key file below to preserve its formatting.", "-----BEGIN OPENSSH PRIVATE KEY----- … -----END OPENSSH PRIVATE KEY----- (abbreviated)"],
     keyFile: ["Choose the private SSH key file for the deployment account. PSM reads it and stores it with the agent when you choose Save credential. Select the private file, not the .pub file; maximum size is 64 KB.", "id_ed25519"],
@@ -81,7 +81,7 @@
     if (kind === "ssh-host-helper@1") return "Use the operator's verified SSH host key, SSH account, allowed targets and release directories, known-host entry, and trusted target contracts. The private key is added separately after importing.";
     if (kind === "github-actions@1") return "Use the operator's approved repositories, source refs, and trusted build and release workflow contracts. The API token is added separately after importing.";
     if (kind === "digitalocean-api@1") return "Use the operator's approved DNS zones and provider account scope. The API token is added separately after importing.";
-    if (kind === "external-monitor@1") return "Use the operator's monitoring provider metadata and allowed monitor IDs. Any API token is added separately after importing.";
+    if (kind === "external-monitor@1") return "Use a Werewolf Watch reader connection and allowed monitor IDs. Store its read-only SSH key separately.";
     return "Use the operator's connection metadata and explicit scope for this environment. Credentials are added separately after importing.";
   }
 
@@ -99,7 +99,7 @@
     const list = (value) => unique(value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean));
     const setup = connection.setup || {};
     const kind = connection.kind;
-    const names = { "ssh-host-helper@1": "Host", "github-actions@1": "GitHub", "digitalocean-api@1": "DigitalOcean DNS", "external-monitor@1": "Better Stack" };
+    const names = { "ssh-host-helper@1": "Host", "github-actions@1": "GitHub", "digitalocean-api@1": "DigitalOcean DNS", "external-monitor@1": "Werewolf monitoring" };
     if (!names[kind]) return null;
     field("label", "Connection name", `${names[kind]} · ${environment.id}`);
     let configure;
@@ -166,10 +166,25 @@
       field("zones", "DNS zones", (setup.zones || []).join(", "), "Domain names separated by commas, for example example.com.");
       configure = (values, profile) => { profile.constraints.allowedZones = list(values.zones); };
     } else {
-      field("monitors", "Better Stack monitor IDs", (setup.monitorIds || []).join(", "), "Monitor IDs separated by commas.");
+      field("provider", "Monitoring provider", "werewolf-watch@1");
+      fields.at(-1).choices = [["werewolf-watch@1", "Werewolf Watch (self hosted)"], ["better-stack@1", "Better Stack (existing connection)"]];
+      field("monitors", "Monitor IDs", (setup.monitorIds || []).join(", "), "Monitor IDs separated by commas.");
+      field("host", "Monitoring server", "", "The server running Werewolf Watch.", "", true);
+      field("user", "Read-only SSH account", "psm-watch-read", "", "", true);
+      field("port", "SSH port", "22", "", "[0-9]{1,5}", true);
+      field("knownHost", "Verified SSH host key", "", "The previously verified known_hosts entry.", "", true);
+      field("hostKeyFingerprint", "SSH host key fingerprint", "", "Previously verified SHA256 fingerprint.", "SHA256:[A-Za-z0-9+/]{43}", true);
       configure = (values, profile) => {
         profile.constraints.allowedMonitorIds = list(values.monitors);
-        profile.publicMetadata = { provider: "better-stack@1" };
+        if (values.provider === "better-stack@1") { profile.publicMetadata = {provider: "better-stack@1"}; return; }
+        if (values.provider !== "werewolf-watch@1") throw new Error("Choose a supported monitoring provider.");
+        for (const key of ["host", "user", "knownHost", "hostKeyFingerprint"]) if (!values[key]) throw new Error(`Werewolf monitoring requires ${key}.`);
+        const port = Number(values.port);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid monitoring SSH port.");
+        if (list(values.monitors).some((id) => !/^[a-z][a-z0-9-]{0,79}$/.test(id))) throw new Error("Invalid Werewolf monitor ID.");
+        profile.requiredSecretSlots = ["privateKey"];
+        profile.constraints.ssh = {host:values.host,user:values.user,port,hostKeyFingerprint:values.hostKeyFingerprint};
+        profile.publicMetadata = {provider:"werewolf-watch@1",knownHost:values.knownHost};
       };
     }
     return { fields, controller, build(values, connectionId) {
@@ -538,7 +553,7 @@
       if (setup) {
         const draftKey = JSON.stringify([projectKey, environment.id, connection.slot, connection.kind]);
         const draft = savedDrafts.get(draftKey) || {};
-        add.append(element("p", "dep-row-detail", `Create a connection for this project in ${environment.id}. Add its ${connection.kind === "ssh-host-helper@1" ? "private key" : "API token"} after saving.`));
+        add.append(element("p", "dep-row-detail", `Create a connection for this project in ${environment.id}. Save its credential separately; Werewolf monitoring uses a read-only SSH key.`));
         add.append(element("p", "dep-connection-help", "Known settings are filled in below. Review or change them, and complete any remaining fields."));
         for (const note of connection.setup?.defaults?.notes || []) add.append(element("p", "dep-connection-help", note));
         add.append(element("p", "dep-connection-help", "Hover over a field or focus it with Tab for details and an example. Press Escape to dismiss the notes."));
@@ -547,8 +562,9 @@
         for (const field of setup.fields) {
           const label = element("label", "dep-connection-field");
           label.append(element("span", "dep-row-detail", field.label));
-          const input = element("input", "dep-connection-input");
-          input.type = "text";
+          const input = element(field.choices ? "select" : "input", "dep-connection-input");
+          if (field.choices) for (const [value, name] of field.choices) { const option = element("option", "", name); option.value = value; input.append(option); }
+          else input.type = "text";
           input.value = Object.hasOwn(draft, field.key) ? draft[field.key] : field.value;
           input.required = !field.optional;
           input.autocomplete = "off";

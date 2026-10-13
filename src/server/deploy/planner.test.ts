@@ -340,3 +340,41 @@ test("the same state observed on a different underlying thing is a different pla
   const rebuilt = buildDeploymentPlan(inputWithObservation(1_000, "ready", "sha256:moved"));
   assert.notEqual(rebuilt.digest, approved.digest);
 });
+
+function inputWithWatch(sample: number): BuildDeploymentPlanInput {
+  const value = input();
+  value.observations.watch = [{ monitorId: "public-web", providerState: "healthy", effectiveState: "healthy", observedAt: sample,
+    detail: "Werewolf Watch: HTTP 200; TLS verified", evidence: {
+      provider: "werewolf-watch@1", providerMonitorId: "production-web", url: "https://example.test/healthz",
+      observer: "werewolf-alpha", failureDomain: "same-host", status: 200, tlsExpiresAt: 9999999,
+      durationMs: sample, incidents: [], history: {
+        checks: [{ checks: sample, healthy: sample, latencyMs: sample }],
+        hostLatest: { cpuPercent: sample, memoryUsedBytes: sample, diskUsedBytes: sample, uptimeSeconds: sample },
+      },
+    } }];
+  return value;
+}
+
+test("fresh monitoring telemetry does not invalidate a reviewed plan or discard dashboard evidence", () => {
+  const first = buildDeploymentPlan(inputWithWatch(1000));
+  const next = buildDeploymentPlan(inputWithWatch(2000));
+  assert.equal(next.digest, first.digest);
+  assert.equal(next.document.observations.watch[0].observedAt, 2000);
+  assert.equal(next.document.observations.watch[0].evidence?.durationMs, 2000);
+  assert.equal((next.document.observations.watch[0].evidence?.history as any).hostLatest.cpuPercent, 2000);
+});
+
+test("monitor health and identity changes still invalidate a reviewed plan", () => {
+  const approved = buildDeploymentPlan(inputWithWatch(1000));
+  for (const state of ["down", "degraded", "stale", "unknown"] as const) {
+    const changed = inputWithWatch(2000); changed.observations.watch[0].effectiveState = state;
+    assert.notEqual(buildDeploymentPlan(changed).digest, approved.digest, state);
+  }
+  for (const [key, value] of Object.entries({ url: "https://other.test/healthz", providerMonitorId: "other", observer: "other-host",
+    failureDomain: "independent-host", status: 503, tlsExpiresAt: 9998888 })) {
+    const changed = inputWithWatch(2000); changed.observations.watch[0].evidence![key] = value;
+    assert.notEqual(buildDeploymentPlan(changed).digest, approved.digest, key);
+  }
+  const unknown = inputWithWatch(2000); unknown.observations.watch[0].evidence!.verification = "failed";
+  assert.notEqual(buildDeploymentPlan(unknown).digest, approved.digest, "unrecognized evidence remains protected");
+});

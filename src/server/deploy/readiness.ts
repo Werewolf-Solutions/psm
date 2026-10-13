@@ -7,7 +7,7 @@ export interface DeploymentReadinessItem {
   title: string;
   detail: string;
   status: "ready" | "action-required" | "blocked" | "preparing";
-  action: "review-capabilities" | "prepare-artifact" | "connect" | "review-source" | "resolve-dependency" | "review-resource" | "configure-provider" | "review-policy" | null;
+  action: "review-capabilities" | "prepare-artifact" | "connect" | "review-source" | "resolve-dependency" | "review-resource" | "configure-provider" | "review-controller" | "review-policy" | null;
   automatic: boolean;
   slot?: string;
   connectionId?: string;
@@ -64,6 +64,12 @@ function requiredItem(blocker: PlanBlocker, options: DeploymentReadinessOptions,
     title = blocker.code === "monitor-stale" ? "Restore fresh external monitoring" : "Configure the deployment provider";
   }
   const environment = document.manifest.environments.find((entry) => entry.id === document.environmentId);
+  if (blocker.code === "executor-not-ready" && /controller-/.test(blocker.ownerRef ?? "") && detail.includes("Review controller setup / update")) {
+    action = "review-controller";
+    title = "Review the release controller setup";
+    const unitId = /^executor:([^:]+):/.exec(blocker.ownerRef ?? "")?.[1];
+    slot = environment?.units.find((entry) => entry.id === unitId)?.executor.connection ?? "github";
+  }
   const resourceId = /^resource:([^/#]+)/.exec(blocker.ownerRef ?? "")?.[1];
   const resource = environment?.resources.find((entry) => entry.id === resourceId);
   slot ??= resource?.connection;

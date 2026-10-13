@@ -1,0 +1,228 @@
+{
+  "apiVersion": "psm.werewolf.solutions/deployments/v1",
+  "kind": "DeploymentManifest",
+  "projectId": "prj_a1557b3e3e9c57129fa8",
+  "environments": [
+    {
+      "id": "production",
+      "risk": "production",
+      "releasePolicy": {
+        "allowedBranch": "dev",
+        "requireReachableFromBranch": true,
+        "requireChecks": true,
+        "approval": "authenticated-local-operator"
+      },
+      "connections": {
+        "github": {
+          "kind": "github-actions@1"
+        },
+        "dns": {
+          "kind": "digitalocean-api@1"
+        },
+        "host": {
+          "kind": "ssh-host-helper@1"
+        },
+        "monitor": {
+          "kind": "external-monitor@1"
+        }
+      },
+      "dependencies": [],
+      "resources": [
+        {
+          "id": "dns",
+          "kind": "digitalocean-dns-record@1",
+          "connection": "dns",
+          "desired": {
+            "zone": "werewolf.solutions",
+            "type": "A",
+            "name": "handymanservices",
+            "valueFrom": {
+              "connection": "host",
+              "field": "address"
+            },
+            "ttl": 300
+          }
+        },
+        {
+          "id": "directory",
+          "kind": "host-release-directory@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns"
+          ],
+          "desired": {
+            "root": "/srv/handymanservices.werewolf.solutions",
+            "retainReleases": 5
+          }
+        },
+        {
+          "id": "service",
+          "kind": "systemd-node-service@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:directory"
+          ],
+          "desired": {
+            "entry": "bin/www",
+            "healthPath": "/healthz",
+            "startupTimeoutSeconds": 20,
+            "memoryMaxMb": 256,
+            "config": {
+              "NODE_ENV": "production",
+              "FRONTEND_URL_PROD": "https://handymanservices.werewolf.solutions",
+              "WEREWOLF_API_URL": "https://werewolf.solutions/api/v1"
+            }
+          }
+        },
+        {
+          "id": "secrets",
+          "kind": "service-secrets@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:service"
+          ],
+          "desired": {
+            "names": [
+              "API_KEY",
+              "BUSINESS_ID"
+            ]
+          }
+        },
+        {
+          "id": "ingress",
+          "kind": "nginx-node-proxy@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns",
+            "resource:service"
+          ],
+          "desired": {
+            "hostname": "handymanservices.werewolf.solutions",
+            "securityHeaders": "app-managed@1",
+            "maxBodyMb": 10
+          }
+        },
+        {
+          "id": "certificate",
+          "kind": "letsencrypt-certificate@1",
+          "connection": "host",
+          "dependsOn": [
+            "resource:dns",
+            "resource:ingress#http-ready"
+          ],
+          "desired": {
+            "hostname": "handymanservices.werewolf.solutions",
+            "renewal": "automatic"
+          }
+        }
+      ],
+      "units": [
+        {
+          "id": "web",
+          "recipe": "node-service-ssh-nginx@1",
+          "resourceRefs": [
+            "resource:dns",
+            "resource:directory",
+            "resource:service",
+            "resource:secrets",
+            "resource:ingress",
+            "resource:certificate"
+          ],
+          "artifact": {
+            "kind": "node-service@1",
+            "runtime": "node@22",
+            "install": [
+              ".",
+              "client",
+              "server"
+            ],
+            "buildScript": "build",
+            "serviceRoot": "server",
+            "entry": "bin/www",
+            "publicDir": "public",
+            "buildProfile": {
+              "id": "production",
+              "publicInputs": {}
+            }
+          },
+          "executor": {
+            "kind": "github-actions@1",
+            "connection": "github",
+            "sourceRepository": "Werewolf-Solutions/handymanservices",
+            "prepareWorkflow": "build-node-service.yml",
+            "releaseController": "werewolf-static@1"
+          },
+          "target": {
+            "kind": "ssh-release-directory@1",
+            "targetId": "werewolf:handymanservices-production-web",
+            "observerConnection": "host",
+            "root": "/srv/handymanservices.werewolf.solutions"
+          },
+          "verification": [
+            {
+              "id": "home",
+              "kind": "http-status@1",
+              "request": {
+                "url": "https://handymanservices.werewolf.solutions/",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 200
+              }
+            },
+            {
+              "id": "health",
+              "kind": "http-json@1",
+              "request": {
+                "url": "https://handymanservices.werewolf.solutions/healthz",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "status": 200,
+                "equals": [
+                  {
+                    "path": "$.ok",
+                    "value": true
+                  }
+                ]
+              }
+            },
+            {
+              "id": "release-metadata",
+              "kind": "release-metadata@1",
+              "request": {
+                "url": "https://handymanservices.werewolf.solutions/version.json",
+                "method": "GET",
+                "timeoutMs": 5000
+              },
+              "expect": {
+                "commit": "$release.commit",
+                "psmArtifactId": "$release.psmArtifactId",
+                "version": "$release.version"
+              }
+            }
+          ]
+        }
+      ],
+      "watch": [
+        {
+          "id": "handymanservices-production-public-web",
+          "kind": "external-http-monitor@1",
+          "connection": "monitor",
+          "unit": "web",
+          "monitorKey": "handymanservices-production-web",
+          "hostname": "handymanservices.werewolf.solutions",
+          "maxObservationAgeSeconds": 300
+        }
+      ],
+      "policy": {
+        "planTtlSeconds": 900,
+        "rollbackOnVerificationFailure": true,
+        "allowDelete": false,
+        "requireFreshWatchBeforeRelease": true
+      }
+    }
+  ]
+}
