@@ -517,8 +517,10 @@ function validateResource(
   }
 
   if (kind === "systemd-node-service@1") {
-    const desired = v.object(base?.desired, `${at}.desired`, ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config"],
+    const desired = v.object(base?.desired, `${at}.desired`, ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config", "switching", "drainSeconds"],
       ["entry", "healthPath", "startupTimeoutSeconds", "memoryMaxMb", "config"]);
+    if (desired?.switching !== undefined && desired.switching !== "health-checked") v.issue("unsupported", `${at}.desired.switching`, "must be health-checked, or omitted to restart in place");
+    if (desired?.drainSeconds !== undefined && desired.switching !== "health-checked") v.issue("unsupported", `${at}.desired.drainSeconds`, "needs switching: health-checked");
     const rawConfig = v.object(desired?.config, `${at}.desired.config`, Object.keys((desired?.config as object | undefined) ?? {}));
     const config: Record<string, string> = {};
     if (rawConfig) {
@@ -546,6 +548,8 @@ function validateResource(
         startupTimeoutSeconds: v.integer(desired?.startupTimeoutSeconds, `${at}.desired.startupTimeoutSeconds`, 5, 300),
         memoryMaxMb: v.integer(desired?.memoryMaxMb, `${at}.desired.memoryMaxMb`, 64, 4096),
         config,
+        ...(desired?.switching === "health-checked" ? { switching: "health-checked" as const } : {}),
+        ...(desired?.drainSeconds !== undefined ? { drainSeconds: v.integer(desired.drainSeconds, `${at}.desired.drainSeconds`, 1, 60) } : {}),
       },
     };
   }

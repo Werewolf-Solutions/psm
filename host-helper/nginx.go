@@ -123,7 +123,10 @@ type proxyIngressDesired struct {
 
 const proxyTemplate = `# managed-by: psm-host-helper/v1
 # target: {{.TargetID}}
-server {
+{{if .Upstream}}upstream {{.UpstreamName}} {
+    include {{.Upstream}};
+}
+{{end}}server {
     listen 80;
     listen [::]:80;
     server_name {{.Hostname}};
@@ -145,7 +148,7 @@ server {
     client_max_body_size {{.MaxBodyMB}}m;
 
     location / {
-        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_pass http://{{if .Upstream}}{{.UpstreamName}}{{else}}127.0.0.1:{{.Port}}{{end}};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -173,7 +176,10 @@ func renderProxy(target TargetConfig, desired proxyIngressDesired, tls bool) ([]
 		return nil, fmt.Errorf("maxBodyMb must be between 1 and 100")
 	}
 	view := map[string]any{"TargetID": target.TargetID, "Hostname": target.Hostname, "AcmeWebroot": target.AcmeWebroot,
-		"Port": target.Service.Port, "MaxBodyMB": desired.MaxBodyMB, "TLS": tls}
+		"Port": target.Service.Port, "MaxBodyMB": desired.MaxBodyMB, "TLS": tls, "Upstream": "", "UpstreamName": target.Service.UnitName}
+	if target.Service.AlternatePort != 0 {
+		view["Upstream"] = upstreamFile(target)
+	}
 	parsed, err := template.New("proxy").Parse(proxyTemplate)
 	if err != nil {
 		return nil, err

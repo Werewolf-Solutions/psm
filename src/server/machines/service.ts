@@ -81,7 +81,7 @@ export interface MachineServiceOptions {
   buildHelper?: (arch: string) => HelperBuild;
   helperSourceDigest?: () => string;
   /** The host target a project environment's deployment manifest names, if any. */
-  hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number } } | null;
+  hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number; switching?: "health-checked"; drainSeconds?: number } } | null;
   now?: () => number;
 }
 

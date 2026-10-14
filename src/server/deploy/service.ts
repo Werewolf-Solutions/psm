@@ -457,7 +457,7 @@ export class DeploymentService {
    * The host target a project environment's manifest names — what a machine's
    * deploy identities must be enrolled for. Null when the manifest has none.
    */
-  hostTarget(idOrName: string, environmentId: string): { slot: string; unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number } } | null {
+  hostTarget(idOrName: string, environmentId: string): { slot: string; unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number; switching?: "health-checked"; drainSeconds?: number } } | null {
     let context: LoadedContext;
     try { context = this.loadCurrent(idOrName); } catch { return null; }
     const environment = context.manifest.environments.find((entry) => entry.id === environmentId);
@@ -472,6 +472,8 @@ export class DeploymentService {
       ...(serviceResource?.kind === "systemd-node-service@1" ? { service: {
         entry: serviceResource.desired.entry, healthPath: serviceResource.desired.healthPath,
         startupTimeoutSeconds: serviceResource.desired.startupTimeoutSeconds, memoryMaxMb: serviceResource.desired.memoryMaxMb,
+        ...(serviceResource.desired.switching ? { switching: serviceResource.desired.switching } : {}),
+        ...(serviceResource.desired.drainSeconds ? { drainSeconds: serviceResource.desired.drainSeconds } : {}),
       } } : {}),
     };
   }

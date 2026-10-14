@@ -129,15 +129,31 @@ test("a Node service target gets its own no-login account, a /srv root and a con
   assert.throws(() => deploy({ service: { ...service, memoryMaxMb: 8192 } }), /memory limit/);
 });
 
-test("the enrollment script keeps a target's port and otherwise picks the first free one", () => {
-  const plan = deploy({ service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256 } });
+test("the enrollment script keeps a target's ports and otherwise picks free, unclaimed ones", () => {
+  const plan = deploy({ service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256, switching: "health-checked", drainSeconds: 10 } });
+  assert.equal(syntax(plan.script).status, 0);
+  const contract = JSON.parse(Buffer.from(/readonly PSM_CONTRACT_B64='([A-Za-z0-9+/=]+)'/.exec(plan.script)![1], "base64").toString());
+  assert.equal(contract.service.alternatePort, "__SERVICE_ALT_PORT__");
+  assert.equal(contract.service.drainSeconds, 10);
+  assert.match(plan.script, /readonly PSM_SERVICE_SWITCHING='yes'/);
+  assert.throws(() => deploy({ service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256, drainSeconds: 10 } }), /drain time/);
   const fn = /service_port\(\) \{[\s\S]*?\n\}\n/.exec(plan.script)![0];
-  const run = (targetFile: string) => spawnSync("bash", ["-c", `set -euo pipefail\nPSM_TARGET_FILE=${targetFile}\n${fn}\nservice_port`], { encoding: "utf8" });
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-port-"));
+  const targets = path.join(directory, "targets");
+  fs.mkdirSync(targets);
+  const run = (targetFile: string, args: string) => spawnSync("bash", ["-c", `set -euo pipefail\nPSM_TARGET_FILE=${targetFile}\nPSM_TARGETS_DIR=${targets}\n${fn}\nservice_port ${args}`], { encoding: "utf8" });
   const enrolled = path.join(directory, "target.json");
-  fs.writeFileSync(enrolled, `{\n  "service": {\n    "port": 41007,\n    "user": "x"\n  }\n}\n`);
-  assert.equal(run(enrolled).stdout, "41007", "a re-enrolled target keeps its port");
-  const fresh = run(path.join(directory, "absent.json"));
-  assert.equal(fresh.status, 0);
-  assert.match(fresh.stdout, /^41\d{3}$/);
+  fs.writeFileSync(enrolled, `{\n  "service": {\n    "port": 41007,\n    "alternatePort": 41012,\n    "user": "x"\n  }\n}\n`);
+  assert.equal(run(enrolled, "port").stdout, "41007", "a re-enrolled target keeps its port");
+  assert.equal(run(enrolled, "alternatePort 41007").stdout, "41012", "and its second port");
+  // Ports other contracts claim are skipped even while nothing listens on them.
+  const free = (port: number) => spawnSync("bash", ["-c", `ss -Htln "sport = :${port}" | grep -q .`]).status !== 0;
+  const [first, second, third] = Array.from({ length: 1000 }, (_, index) => 41000 + index).filter(free);
+  fs.writeFileSync(path.join(targets, "other.json"), `{\n  "service": {\n    "port": ${first},\n    "alternatePort": ${second}\n  }\n}\n`);
+  const absent = path.join(directory, "absent.json");
+  assert.equal(run(absent, "port").stdout, String(third));
+  assert.equal(run(absent, `alternatePort ${third}`).stdout, String(Array.from({ length: 1000 }, (_, index) => 41000 + index).filter(free).filter((port) => ![first, second, third].includes(port))[0]), "the second port is never the first");
+  const single = deploy({ service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256 } });
+  assert.match(single.script, /readonly PSM_SERVICE_SWITCHING='no'/);
+  assert.ok(!Buffer.from(/readonly PSM_CONTRACT_B64='([A-Za-z0-9+/=]+)'/.exec(single.script)![1], "base64").toString().includes("alternatePort"));
 });

@@ -1,9 +1,12 @@
+import type { PreviewFixture } from "./agent-preview-fixtures.ts";
+
 /** Runs inside the disposable browser container, never against the host dev server. */
-export function browserPreviewProbe(script: string, port: number, paths: string[], args: string[], build = false): string {
+export function browserPreviewProbe(script: string, port: number, paths: string[], args: string[], build = false, fixtures: PreviewFixture[] = []): string {
   return String.raw`
 const cp = require('child_process');
 if (${build}) { const built = cp.spawnSync('npm', ['run', 'build'], { stdio: 'inherit' }); if (built.error || built.status !== 0) process.exit(1); }
 const origin = 'http://127.0.0.1:${port}';
+const fixtures = ${JSON.stringify(fixtures)};
 const server = cp.spawn('npm', ['run', ${JSON.stringify(script)}, ...${JSON.stringify(args)}], {
   detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, PORT: '${port}', HOST: '127.0.0.1', BROWSER: 'none' }
@@ -30,18 +33,27 @@ let browser;
     browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] });
     for (const route of ${JSON.stringify(paths)}) {
       const context = await browser.newContext({ serviceWorkers: 'block' });
+      // A declared fixture answers the app's own API call; its status is the repository's choice, not a failure.
+      const answered = new Set();
+      const used = [];
       await context.route('**/*', request => {
         const url = new URL(request.request().url());
-        return url.origin === origin ? request.continue() : request.abort();
+        if (url.origin !== origin) return request.abort();
+        const fixture = !['fetch', 'xhr'].includes(request.request().resourceType()) ? null : fixtures.find(f => f.method === request.request().method() && f.path === url.pathname);
+        if (!fixture) return request.continue();
+        answered.add(request.request().url());
+        const label = fixture.method + ' ' + fixture.path + ' -> ' + fixture.status;
+        if (!used.includes(label)) used.push(label);
+        return request.fulfill({ status: fixture.status, contentType: fixture.contentType, body: fixture.body });
       });
       const page = await context.newPage();
       const errors = [];
       const addError = message => { if (errors.length < 20) errors.push(String(message).slice(0, 1000)); };
       page.on('pageerror', e => addError(e.message));
-      page.on('console', m => { if (m.type() === 'error') addError(m.text()); });
-      page.on('response', r => { if (r.url().startsWith(origin + '/') && r.status() >= 400 && !r.url().endsWith('/favicon.ico')) addError('HTTP ' + r.status() + ': ' + r.url()); });
+      page.on('console', m => { if (m.type() === 'error' && !(answered.has(m.location().url) && m.text().startsWith('Failed to load resource'))) addError(m.text()); });
+      page.on('response', r => { if (r.url().startsWith(origin + '/') && r.status() >= 400 && !answered.has(r.url()) && !r.url().endsWith('/favicon.ico')) addError('HTTP ' + r.status() + ': ' + r.url()); });
       page.on('requestfailed', r => { if (r.url().startsWith(origin + '/') && !r.url().endsWith('/favicon.ico')) addError('Request failed: ' + r.url()); });
-      let result = { path: route, status: null, type: null, body: '', errors };
+      let result = { path: route, status: null, type: null, body: '', fixtures: used, errors };
       try {
         const response = await page.goto(origin + route, { waitUntil: 'networkidle', timeout: 10000 });
         result.status = response?.status() ?? null;

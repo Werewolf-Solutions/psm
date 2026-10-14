@@ -37,6 +37,47 @@ without a restart gap.
    Done for `handymanservices-staging.werewolf.solutions`; `API_KEY` and
    `BUSINESS_ID` are in PSM's broker and match the host.
 
+## Health-checked switching (built 2026-10-13, not yet on any host)
+
+By default a release still restarts its unit in place, with a gap of a few
+seconds. A service resource can instead declare:
+
+```json
+"desired": { "entry": "bin/www", "healthPath": "/healthz", "startupTimeoutSeconds": 20,
+             "memoryMaxMb": 256, "config": {}, "switching": "health-checked", "drainSeconds": 10 }
+```
+
+The target must be enrolled for it: enrollment then reserves a second loopback
+port (`alternatePort`) in the root-owned contract, and the helper refuses a
+manifest whose switching differs from the contract. Changing mode means
+enrolling the target again and pinning the new contract.
+
+With two slots the helper writes a second unit (`<unit>-alt`) and
+`upstream.conf` beside the service's config, and nginx forwards through it
+(`upstream <unit> { include .../upstream.conf; }`). That file is the only record
+of which slot is live. A release, a config change and a secret change all:
+
+1. start the idle slot on the release `current` names and wait for the health
+   gate (HTTP 200, unit active, loopback-only listener);
+2. write the upstream file, run `nginx -t` and reload nginx;
+3. enable the new slot for boot and disable the old one;
+4. wait `drainSeconds` (default 5), then stop the old slot.
+
+If the gate fails, the candidate is stopped and nginx is never touched. If
+`nginx -t` or the reload fails, the upstream file is restored and the candidate
+stopped. In both cases the previous slot keeps serving. Until nginx has been
+reconciled to use the upstream file, the live slot restarts in place as before.
+
+Limits: a request still running after the drain is cut when the old process
+stops, since Node does not drain on SIGTERM by itself. Two instances run
+briefly, so memory for two is needed during a switch. After a failed gate
+without rollback authority, `current` names the failed release while the
+previous one serves; a later restart would start the failed one.
+
+Tested by `host-helper/switching_test.go` and, with `PSM_SWITCH_DOCKER=1`,
+`switching_nginx_test.go`: real nginx, continuous requests through two switches
+and a failing candidate. Not yet tested with real systemd units or on a target.
+
 ## Built (2026-10-01)
 
 | Part | Where | Tested by |

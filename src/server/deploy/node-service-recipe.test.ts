@@ -99,6 +99,20 @@ test("runtime configuration refuses reserved names, secrets in config and overla
   assert.ok(issues(handymanManifest((environment) => { service(environment).config.BUSINESS_ID = "biz_1"; })).some((issue) => issue.startsWith("config-secret-overlap")));
 });
 
+test("health-checked switching is an explicit, bounded manifest choice", () => {
+  const service = (environment: Record<string, any>) => environment.resources.find((resource: any) => resource.kind === "systemd-node-service@1");
+  const parsed = parseDeploymentManifest(handymanManifest((environment) => { Object.assign(service(environment).desired, { switching: "health-checked", drainSeconds: 10 }); }), { projectRoot: projectRoot() });
+  const resource = parsed.environments[0].resources.find((entry) => entry.kind === "systemd-node-service@1");
+  assert.ok(resource?.kind === "systemd-node-service@1");
+  assert.equal(resource.desired.switching, "health-checked");
+  assert.equal(resource.desired.drainSeconds, 10);
+  const plain = parseDeploymentManifest(handymanManifest(), { projectRoot: projectRoot() }).environments[0].resources.find((entry) => entry.kind === "systemd-node-service@1");
+  assert.ok(plain?.kind === "systemd-node-service@1" && !("switching" in plain.desired), "a manifest without it sends the helper nothing new");
+  assert.ok(issues(handymanManifest((environment) => { service(environment).desired.switching = "blue-green"; })).some((issue) => /or omitted to restart in place/.test(issue)));
+  assert.ok(issues(handymanManifest((environment) => { service(environment).desired.drainSeconds = 10; })).some((issue) => /needs switching: health-checked/.test(issue)));
+  assert.ok(issues(handymanManifest((environment) => { Object.assign(service(environment).desired, { switching: "health-checked", drainSeconds: 600 }); })).length > 0);
+});
+
 test("the service recipe requires its own resources and a matching entry point", () => {
   assert.ok(issues(handymanManifest((environment) => {
     environment.units[0].artifact.entry = "server.js";

@@ -141,6 +141,9 @@ export interface ServiceSettings {
   healthPath: string;
   startupTimeoutSeconds: number;
   memoryMaxMb: number;
+  /** Enrolls a second loopback port so a release takes traffic only after its health gate. */
+  switching?: "health-checked";
+  drainSeconds?: number;
 }
 
 function serviceSettings(value: unknown): ServiceSettings | null {
@@ -154,7 +157,11 @@ function serviceSettings(value: unknown): ServiceSettings | null {
   if (!/^\/[A-Za-z0-9._~/-]{0,200}$/.test(healthPath)) throw new MachinePlanError("The service health path must be a URL path such as /healthz.", "service");
   if (!Number.isInteger(startupTimeoutSeconds) || startupTimeoutSeconds < 5 || startupTimeoutSeconds > 300) throw new MachinePlanError("The service startup timeout must be 5-300 seconds.", "service");
   if (!Number.isInteger(memoryMaxMb) || memoryMaxMb < 64 || memoryMaxMb > 4096) throw new MachinePlanError("The service memory limit must be 64-4096 MB.", "service");
-  return { entry, healthPath, startupTimeoutSeconds, memoryMaxMb };
+  if (input.switching !== undefined && input.switching !== "health-checked") throw new MachinePlanError("Service switching must be health-checked or omitted.", "service");
+  const switching = input.switching === "health-checked";
+  const drainSeconds = input.drainSeconds === undefined ? undefined : Number(input.drainSeconds);
+  if (drainSeconds !== undefined && (!switching || !Number.isInteger(drainSeconds) || drainSeconds < 1 || drainSeconds > 60)) throw new MachinePlanError("The service drain time must be 1-60 seconds and needs health-checked switching.", "service");
+  return { entry, healthPath, startupTimeoutSeconds, memoryMaxMb, ...(switching ? { switching: "health-checked" as const } : {}), ...(drainSeconds ? { drainSeconds } : {}) };
 }
 
 function finish<T extends Omit<BasePlan, "scriptDigest" | "digest">>(body: T): T & { scriptDigest: string; digest: string } {
@@ -465,15 +472,16 @@ service_state() {
   return 0
 }
 
-# Keep this target's port; otherwise the lowest one in 41000-41999 that no other
+# Keep this target's port; otherwise the lowest one in 41000-41999 that no
 # enrolled contract claims and nothing listens on.
 service_port() {
-  local port
-  if [[ -f "$PSM_TARGET_FILE" ]] && port=$(grep -oE '"port": [0-9]+' "$PSM_TARGET_FILE" | grep -oE '[0-9]+$'); then
+  local field=$1 taken=\${2:-} port
+  if [[ -f "$PSM_TARGET_FILE" ]] && port=$(grep -oE "\\"$field\\": [0-9]+" "$PSM_TARGET_FILE" | grep -oE '[0-9]+$'); then
     printf '%s' "$port"; return 0
   fi
   for port in $(seq 41000 41999); do
-    grep -qsE "\"port\": $port[,}]?\$" /etc/psm-deploy/targets/*.json && continue
+    [[ "$port" == "$taken" ]] && continue
+    grep -qsE "\\"(port|alternatePort)\\": $port,?\$" "$PSM_TARGETS_DIR"/*.json && continue
     ss -Htln "sport = :$port" | grep -q . && continue
     printf '%s' "$port"; return 0
   done
@@ -516,10 +524,18 @@ service_values=()
 if [[ -n "$PSM_SERVICE" ]]; then
   getent passwd "$PSM_SERVICE" >/dev/null || useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --comment "$PSM_COMMENT" "$PSM_SERVICE"
   service_uid=$(id -u "$PSM_SERVICE"); service_gid=$(id -g "$PSM_SERVICE")
-  port=$(service_port) || { report result no-free-port; exit 70; }
+  PSM_TARGETS_DIR=/etc/psm-deploy/targets
+  port=$(service_port port) || { report result no-free-port; exit 70; }
   [[ "$service_uid" =~ ^[1-9][0-9]*$ && "$service_gid" =~ ^[1-9][0-9]*$ && "$port" =~ ^41[0-9]{3}$ ]] || { report result bad-ids; exit 70; }
   report service_port "$port"
   service_values=(-e "s/\\"__SERVICE_UID__\\"/$service_uid/g" -e "s/\\"__SERVICE_GID__\\"/$service_gid/g" -e "s/\\"__SERVICE_PORT__\\"/$port/g")
+  if [[ "$PSM_SERVICE_SWITCHING" == yes ]]; then
+    # The second slot's port: kept if this target already has one, never the first slot's.
+    alternate=$(service_port alternatePort "$port") || { report result no-free-port; exit 70; }
+    [[ "$alternate" =~ ^41[0-9]{3}$ && "$alternate" != "$port" ]] || { report result bad-ids; exit 70; }
+    report service_alternate_port "$alternate"
+    service_values+=(-e "s/\\"__SERVICE_ALT_PORT__\\"/$alternate/g")
+  fi
 fi
 contract=$(mktemp)
 trap 'rm -f -- "$contract"' EXIT
@@ -601,6 +617,8 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
       unitName, user: serviceAccount, uid: "__SERVICE_UID__", gid: "__SERVICE_GID__", port: "__SERVICE_PORT__",
       memoryMaxMb: settings.memoryMaxMb, entry: settings.entry, healthPath: settings.healthPath,
       startupTimeoutSeconds: settings.startupTimeoutSeconds, systemdDir: "/etc/systemd/system", configDir: "/etc/psm-deploy/services",
+      ...(settings.switching ? { alternatePort: "__SERVICE_ALT_PORT__" } : {}),
+      ...(settings.drainSeconds ? { drainSeconds: settings.drainSeconds } : {}),
     } } : {}),
   };
   const revision = `psm-${digest(JSON.stringify(template)).slice(7, 19)}`;
@@ -621,6 +639,7 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     PSM_CONTRACT_B64: Buffer.from(JSON.stringify(template)).toString("base64"),
     PSM_REPLACE_TARGET: replacesTarget,
     PSM_SERVICE: serviceAccount ?? "",
+    PSM_SERVICE_SWITCHING: settings?.switching ? "yes" : "no",
   });
   return finish({
     schema: MACHINE_PLAN_SCHEMA,

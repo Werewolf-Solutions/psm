@@ -1,0 +1,33 @@
+{
+  "date": "2026-10-13",
+  "psmSource": "799c58c plus the uncommitted preview-fixture change (package 0.3.39)",
+  "subject": "todo-app 45454a3 (0.6.6), client package",
+  "method": "The managed task runner (ManagedTaskRunner + RepositoryTools) driven directly with repo.read, script.run and pkg.install granted in an in-memory permission store. Disposable offline containers; images node:22-bookworm-slim and psm-task-browser:1.64.0. No provider-driven agent turn was run.",
+  "withoutFixture": {
+    "checkout": "the real todo-app working tree, unmodified",
+    "installs": "passed (root and client; 72 packages for client)",
+    "builds": "passed (client and root; tsc -b and vite build, 75 modules)",
+    "routes": ["/", "/objectives", "/notes", "/backlog", "/auth/callback"],
+    "rendered": "Chromium rendered the signed-out door with version v0.6.6 on every route",
+    "verified": false,
+    "cause": "POST /api/v1/apps/todo/auth/refresh is proxied by Vite to a backend that does not exist in the offline sandbox, so it answers HTTP 500 and the check counts a failed same-origin request. Every route fails; a managed agent could not commit frontend changes to this project."
+  },
+  "withFixture": {
+    "checkout": "a scratch clone of 45454a3 with client/psm-preview.json added; todo-app itself was not changed",
+    "fixture": { "method": "POST", "path": "/api/v1/apps/todo/auth/refresh", "status": 401, "json": { "error": "no session" } },
+    "routes": {
+      "/": "verified; signed-out door; fixture used",
+      "/objectives": "verified; signed-out door; fixture used",
+      "/notes": "verified; signed-out door; fixture used",
+      "/backlog": "verified; signed-out door; fixture used",
+      "/auth/callback": "verified; shows 'This sign-in did not start here. Try again.'"
+    },
+    "verificationStatus": "verified: true for client (build and browser) and root (build)"
+  },
+  "notCovered": [
+    "A provider-driven managed agent turn calling these tools on Todo",
+    "Signed-in journeys (board, objectives, notes, backlog); they need fixtures for the session and data calls",
+    "Handymanservices",
+    "The fixture is not committed to todo-app, so the real project still fails this check"
+  ]
+}

@@ -38,6 +38,10 @@ type ServiceConfig struct {
 	StartupTimeoutSeconds int    `json:"startupTimeoutSeconds"`
 	SystemdDir            string `json:"systemdDir"`
 	ConfigDir             string `json:"configDir"`
+	// AlternatePort enrolls a second loopback port. With it a release starts in
+	// the idle slot and takes traffic only after passing the health gate.
+	AlternatePort int `json:"alternatePort,omitempty"`
+	DrainSeconds  int `json:"drainSeconds,omitempty"`
 }
 
 const (
@@ -53,9 +57,11 @@ var (
 	healthPathPattern = regexp.MustCompile(`^/[A-Za-z0-9._~/-]{0,200}$`)
 	envNamePattern    = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,99}$`)
 	saltPattern       = regexp.MustCompile(`^[0-9a-f]{32,128}$`)
+	upstreamPattern   = regexp.MustCompile(`(?m)^server 127\.0\.0\.1:(\d{5});$`)
 	// Runner commands, replaced in tests.
 	runCommand = commandResult
 	lookupUser = user.Lookup
+	drainWait  = time.Sleep
 )
 
 func (service *ServiceConfig) normalize() {
@@ -96,6 +102,12 @@ func (service *ServiceConfig) validate(target TargetConfig) error {
 	if service.StartupTimeoutSeconds < 5 || service.StartupTimeoutSeconds > 300 {
 		return errors.New("startupTimeoutSeconds must be between 5 and 300")
 	}
+	if service.AlternatePort != 0 && (service.AlternatePort < servicePortMinimum || service.AlternatePort > servicePortMaximum || service.AlternatePort == service.Port) {
+		return fmt.Errorf("alternatePort must be another port in %d-%d", servicePortMinimum, servicePortMaximum)
+	}
+	if service.DrainSeconds < 0 || service.DrainSeconds > 60 || (service.DrainSeconds != 0 && service.AlternatePort == 0) {
+		return errors.New("drainSeconds must be between 0 and 60 and needs alternatePort")
+	}
 	for label, value := range map[string]string{"systemdDir": service.SystemdDir, "configDir": service.ConfigDir} {
 		if _, err := cleanAbsolute(value); err != nil {
 			return fmt.Errorf("%s: %w", label, err)
@@ -124,6 +136,63 @@ func serviceFiles(target TargetConfig) (unit, config, secrets string) {
 	directory := filepath.Join(target.Service.ConfigDir, hex.EncodeToString(digest[:16]))
 	return filepath.Join(target.Service.SystemdDir, target.Service.UnitName+".service"),
 		filepath.Join(directory, "config.env"), filepath.Join(directory, "secrets.env")
+}
+
+// serviceSlot is one supervised instance. A contract without an alternate port
+// has only the primary slot and is restarted in place.
+type serviceSlot struct {
+	Unit string
+	Port int
+}
+
+func serviceSlots(target TargetConfig) []serviceSlot {
+	slots := []serviceSlot{{target.Service.UnitName, target.Service.Port}}
+	if target.Service.AlternatePort != 0 {
+		slots = append(slots, serviceSlot{target.Service.UnitName + "-alt", target.Service.AlternatePort})
+	}
+	return slots
+}
+
+func slotUnitFile(target TargetConfig, slot serviceSlot) string {
+	return filepath.Join(target.Service.SystemdDir, slot.Unit+".service")
+}
+
+// upstreamFile names the slot nginx forwards to. It is the only record of which
+// slot is live, so nginx and the helper cannot disagree.
+func upstreamFile(target TargetConfig) string {
+	_, config, _ := serviceFiles(target)
+	return filepath.Join(filepath.Dir(config), "upstream.conf")
+}
+
+func renderUpstream(port int) []byte {
+	return []byte(fmt.Sprintf("%sserver 127.0.0.1:%d;\n", managedHeader, port))
+}
+
+// liveSlot returns the slot taking traffic and, for a switching contract, the
+// idle one. A missing upstream file means the primary has never been replaced.
+func liveSlot(target TargetConfig) (live serviceSlot, idle *serviceSlot, err error) {
+	slots := serviceSlots(target)
+	if len(slots) == 1 {
+		return slots[0], nil, nil
+	}
+	raw, err := os.ReadFile(upstreamFile(target))
+	if errors.Is(err, os.ErrNotExist) {
+		return slots[0], &slots[1], nil
+	}
+	if err != nil {
+		return serviceSlot{}, nil, err
+	}
+	match := upstreamPattern.FindSubmatch(raw)
+	if !bytes.HasPrefix(raw, []byte(managedHeader)) || match == nil {
+		return serviceSlot{}, nil, errors.New("the service upstream file is not one the helper wrote")
+	}
+	switch string(match[1]) {
+	case strconv.Itoa(slots[0].Port):
+		return slots[0], &slots[1], nil
+	case strconv.Itoa(slots[1].Port):
+		return slots[1], &slots[0], nil
+	}
+	return serviceSlot{}, nil, errors.New("the service upstream file names a port outside the target contract")
 }
 
 func stateDirectory(target TargetConfig) string {
@@ -274,12 +343,12 @@ ReadWritePaths={{.State}}
 WantedBy=multi-user.target
 `
 
-func renderUnit(target TargetConfig) ([]byte, error) {
+func renderUnit(target TargetConfig, slot serviceSlot) ([]byte, error) {
 	service := target.Service
 	_, config, secrets := serviceFiles(target)
 	view := map[string]any{
 		"TargetID": target.TargetID, "User": service.User, "GID": service.GID, "Root": target.CanonicalRoot,
-		"Entry": service.Entry, "Port": service.Port, "ConfigFile": config, "SecretsFile": secrets,
+		"Entry": service.Entry, "Port": slot.Port, "ConfigFile": config, "SecretsFile": secrets,
 		"MemoryMaxMB": service.MemoryMaxMB, "State": stateDirectory(target),
 	}
 	parsed, err := template.New("unit").Parse(unitTemplate)
@@ -301,12 +370,20 @@ type serviceDesired struct {
 	StartupTimeoutSeconds int               `json:"startupTimeoutSeconds"`
 	MemoryMaxMB           int               `json:"memoryMaxMb"`
 	Config                map[string]string `json:"config"`
+	Switching             string            `json:"switching,omitempty"`
+	DrainSeconds          int               `json:"drainSeconds,omitempty"`
 }
 
 func (desired serviceDesired) matches(service *ServiceConfig) error {
 	if desired.Entry != service.Entry || desired.HealthPath != service.HealthPath ||
 		desired.StartupTimeoutSeconds != service.StartupTimeoutSeconds || desired.MemoryMaxMB != service.MemoryMaxMB {
 		return errors.New("service entry, health path, startup timeout or memory limit differs from the enrolled target contract")
+	}
+	if desired.Switching != "" && desired.Switching != "health-checked" {
+		return errors.New("service switching mode is unsupported")
+	}
+	if (desired.Switching == "health-checked") != (service.AlternatePort != 0) || desired.DrainSeconds != service.DrainSeconds {
+		return errors.New("service switching differs from the enrolled target contract; enroll the target again to change it")
 	}
 	return nil
 }
@@ -378,7 +455,7 @@ func reconcileService(target TargetConfig, raw json.RawMessage) (any, error) {
 	if err := validateEnvironment(desired.Config); err != nil {
 		return nil, err
 	}
-	unitFile, configFile, secretsFile := serviceFiles(target)
+	_, configFile, secretsFile := serviceFiles(target)
 	secretNames, err := environmentNames(secretsFile)
 	if err != nil {
 		return nil, err
@@ -408,20 +485,42 @@ func reconcileService(target TargetConfig, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	unit, err := renderUnit(target)
+	live, idle, err := liveSlot(target)
 	if err != nil {
 		return nil, err
 	}
-	unitChanged, err := writeManaged(unitFile, unit, 0644)
-	if err != nil {
-		return nil, err
+	unitChanged := false
+	var unit []byte
+	for index, slot := range serviceSlots(target) {
+		rendered, err := renderUnit(target, slot)
+		if err != nil {
+			return nil, err
+		}
+		changed, err := writeManaged(slotUnitFile(target, slot), rendered, 0644)
+		if err != nil {
+			return nil, err
+		}
+		unitChanged = unitChanged || changed
+		if index == 0 {
+			unit = rendered
+		}
+	}
+	if idle != nil {
+		// Created once; afterwards only a switch moves it.
+		if _, err := os.Stat(upstreamFile(target)); errors.Is(err, os.ErrNotExist) {
+			if _, err := writeManaged(upstreamFile(target), renderUpstream(live.Port), 0644); err != nil {
+				return nil, err
+			}
+		} else if err != nil {
+			return nil, err
+		}
 	}
 	if unitChanged {
 		if _, err := runCommand("systemctl", "daemon-reload"); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := runCommand("systemctl", "enable", target.Service.UnitName); err != nil {
+	if _, err := runCommand("systemctl", "enable", live.Unit); err != nil {
 		return nil, err
 	}
 	restarted := false
@@ -491,6 +590,8 @@ type serviceObserveDesired struct {
 	StartupTimeoutSeconds int               `json:"startupTimeoutSeconds,omitempty"`
 	MemoryMaxMB           int               `json:"memoryMaxMb,omitempty"`
 	Config                map[string]string `json:"config,omitempty"`
+	Switching             string            `json:"switching,omitempty"`
+	DrainSeconds          int               `json:"drainSeconds,omitempty"`
 	Names                 []string          `json:"names,omitempty"`
 	Salt                  string            `json:"salt,omitempty"`
 }
@@ -505,10 +606,11 @@ func observeServiceResource(target TargetConfig, raw json.RawMessage) (any, erro
 	if err := decodeDesired(raw, &desired); err != nil {
 		return nil, err
 	}
-	unitFile, configFile, secretsFile := serviceFiles(target)
+	_, configFile, secretsFile := serviceFiles(target)
 	switch desired.Kind {
 	case "systemd-node-service@1":
-		declared := serviceDesired{Entry: desired.Entry, HealthPath: desired.HealthPath, StartupTimeoutSeconds: desired.StartupTimeoutSeconds, MemoryMaxMB: desired.MemoryMaxMB}
+		declared := serviceDesired{Entry: desired.Entry, HealthPath: desired.HealthPath, StartupTimeoutSeconds: desired.StartupTimeoutSeconds, MemoryMaxMB: desired.MemoryMaxMB,
+			Switching: desired.Switching, DrainSeconds: desired.DrainSeconds}
 		if err := declared.matches(target.Service); err != nil {
 			return map[string]any{"state": "conflict", "unit": target.Service.UnitName, "detail": err.Error()}, nil
 		}
@@ -518,15 +620,20 @@ func observeServiceResource(target TargetConfig, raw json.RawMessage) (any, erro
 		if err := validateEnvironment(desired.Config); err != nil {
 			return nil, err
 		}
-		unit, err := renderUnit(target)
-		if err != nil {
-			return nil, err
-		}
-		state := "in-sync"
-		for _, expected := range []struct {
+		type managedFile struct {
 			file    string
 			content []byte
-		}{{unitFile, unit}, {configFile, renderEnvironmentFile(desired.Config)}} {
+		}
+		files := []managedFile{{configFile, renderEnvironmentFile(desired.Config)}}
+		for _, slot := range serviceSlots(target) {
+			unit, err := renderUnit(target, slot)
+			if err != nil {
+				return nil, err
+			}
+			files = append(files, managedFile{slotUnitFile(target, slot), unit})
+		}
+		state := "in-sync"
+		for _, expected := range files {
 			actual, err := os.ReadFile(expected.file)
 			if errors.Is(err, os.ErrNotExist) {
 				state = "create"
@@ -544,6 +651,14 @@ func observeServiceResource(target TargetConfig, raw json.RawMessage) (any, erro
 		}
 		if state == "in-sync" {
 			if info, err := os.Stat(stateDirectory(target)); err != nil || !info.IsDir() {
+				state = "update"
+			}
+		}
+		if state == "in-sync" && target.Service.AlternatePort != 0 {
+			if _, _, err := liveSlot(target); err != nil {
+				return map[string]any{"state": "conflict", "unit": target.Service.UnitName, "detail": err.Error()}, nil
+			}
+			if _, err := os.Stat(upstreamFile(target)); err != nil {
 				state = "update"
 			}
 		}
@@ -598,13 +713,68 @@ func hasActiveRelease(target TargetConfig) bool {
 	return err == nil && current != nil
 }
 
-// restartHealthy restarts the unit and waits for it to answer its health path,
-// stay active and listen on loopback only.
+// restartHealthy puts the release `current` names into service. A switching
+// contract starts it in the idle slot and moves traffic only once it is healthy;
+// otherwise the unit restarts in place, with a gap.
 func restartHealthy(target TargetConfig) error {
-	if _, err := runCommand("systemctl", "restart", target.Service.UnitName); err != nil {
+	live, idle, err := liveSlot(target)
+	if err != nil {
 		return err
 	}
-	return waitHealthy(target)
+	if idle != nil && ingressUsesUpstream(target) {
+		return switchHealthy(target, live, *idle)
+	}
+	if _, err := runCommand("systemctl", "restart", live.Unit); err != nil {
+		return err
+	}
+	return waitHealthy(target, live)
+}
+
+// ingressUsesUpstream reports whether nginx already forwards through the
+// upstream file. Until it does, moving the file would not move traffic.
+func ingressUsesUpstream(target TargetConfig) bool {
+	site, err := os.ReadFile(nginxPath(target))
+	return err == nil && bytes.Contains(site, []byte("include "+upstreamFile(target)+";"))
+}
+
+// switchHealthy leaves the live slot untouched until the candidate has passed
+// the health gate and nginx has accepted the new upstream.
+func switchHealthy(target TargetConfig, live, candidate serviceSlot) error {
+	if _, err := runCommand("systemctl", "restart", candidate.Unit); err != nil {
+		return err
+	}
+	if err := waitHealthy(target, candidate); err != nil {
+		_, _ = runCommand("systemctl", "stop", candidate.Unit)
+		return err
+	}
+	if _, err := writeManaged(upstreamFile(target), renderUpstream(candidate.Port), 0644); err != nil {
+		_, _ = runCommand("systemctl", "stop", candidate.Unit)
+		return err
+	}
+	_, err := runCommand("nginx", "-t")
+	if err == nil {
+		_, err = runCommand("systemctl", "reload", "nginx")
+	}
+	if err != nil {
+		_, _ = writeManaged(upstreamFile(target), renderUpstream(live.Port), 0644)
+		_, _ = runCommand("systemctl", "stop", candidate.Unit)
+		return fmt.Errorf("nginx did not accept the new upstream; the previous service keeps serving: %s", boundedError(err))
+	}
+	// From here the candidate serves. Boot must start it, not the slot it replaced.
+	if _, err := runCommand("systemctl", "enable", candidate.Unit); err != nil {
+		return err
+	}
+	if _, err := runCommand("systemctl", "disable", live.Unit); err != nil {
+		return err
+	}
+	// nginx's old workers finish requests they already forwarded to the previous slot.
+	drain := target.Service.DrainSeconds
+	if drain == 0 {
+		drain = 5
+	}
+	drainWait(time.Duration(drain) * time.Second)
+	_, err = runCommand("systemctl", "stop", live.Unit)
+	return err
 }
 
 var healthClient = &http.Client{
@@ -612,9 +782,9 @@ var healthClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-func waitHealthy(target TargetConfig) error {
+func waitHealthy(target TargetConfig, slot serviceSlot) error {
 	service := target.Service
-	url := fmt.Sprintf("http://127.0.0.1:%d%s", service.Port, service.HealthPath)
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", slot.Port, service.HealthPath)
 	deadline := time.Now().Add(time.Duration(service.StartupTimeoutSeconds) * time.Second)
 	last := "no answer"
 	for {
@@ -623,10 +793,10 @@ func waitHealthy(target TargetConfig) error {
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				if err := serviceListensOnLoopbackOnly(service.Port); err != nil {
+				if err := serviceListensOnLoopbackOnly(slot.Port); err != nil {
 					return err
 				}
-				active, err := unitActive(service.UnitName)
+				active, err := unitActive(slot.Unit)
 				if err != nil {
 					return err
 				}
@@ -711,14 +881,18 @@ func observeService(target TargetConfig, targetDigest string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	properties, err := unitProperties(target.Service.UnitName)
+	live, idle, err := liveSlot(target)
+	if err != nil {
+		return nil, err
+	}
+	properties, err := unitProperties(live.Unit)
 	if err != nil {
 		return nil, err
 	}
 	result := observed.(map[string]any)
-	listening := serviceListensOnLoopbackOnly(target.Service.Port)
+	listening := serviceListensOnLoopbackOnly(live.Port)
 	result["service"] = map[string]any{
-		"unit": target.Service.UnitName, "activeState": properties["ActiveState"], "subState": properties["SubState"],
+		"unit": live.Unit, "port": live.Port, "switching": idle != nil && ingressUsesUpstream(target), "activeState": properties["ActiveState"], "subState": properties["SubState"],
 		"restarts": properties["NRestarts"], "memoryBytes": properties["MemoryCurrent"],
 		"memoryMaxBytes": int64(target.Service.MemoryMaxMB) * 1024 * 1024,
 		"loopbackOnly":   listening == nil, "listenDetail": errorText(listening),
@@ -805,7 +979,15 @@ func deployServiceRelease(stateDir string, target TargetConfig, targetDigest str
 	state := "activated"
 	if verificationFailed {
 		if !desired.RollbackAllowed || desired.Activate.ExpectedCurrentReleaseID == nil || desired.Activate.ExpectedCurrentPayloadDigest == nil {
-			_, _ = runCommand("systemctl", "stop", target.Service.UnitName)
+			live, idle, slotErr := liveSlot(target)
+			if activationErr != nil && slotErr == nil && idle != nil && ingressUsesUpstream(target) {
+				// The candidate failed its gate before any switch: the previous slot never stopped.
+				return map[string]any{"state": "failed", "staged": staged, "activated": activated, "verification": verification},
+					fmt.Errorf("the new release failed its health gate (%s) and received no traffic; rollback was not authorized, so the previous release keeps serving while current names the failed one", failureDetail)
+			}
+			if slotErr == nil {
+				_, _ = runCommand("systemctl", "stop", live.Unit)
+			}
 			return map[string]any{"state": "failed", "staged": staged, "activated": activated, "verification": verification},
 				fmt.Errorf("post-activation verification failed (%s) and rollback was not authorized; the service was stopped", failureDetail)
 		}

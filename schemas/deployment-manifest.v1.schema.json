@@ -287,6 +287,8 @@
             "healthPath": { "type": "string", "pattern": "^/[A-Za-z0-9._~/-]{0,200}$" },
             "startupTimeoutSeconds": { "type": "integer", "minimum": 5, "maximum": 300 },
             "memoryMaxMb": { "type": "integer", "minimum": 64, "maximum": 4096 },
+            "switching": { "const": "health-checked" },
+            "drainSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
             "config": {
               "type": "object",
               "maxProperties": 64,

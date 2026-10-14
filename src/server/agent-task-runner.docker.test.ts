@@ -72,3 +72,38 @@ test("browser checks reject runtime errors, module syntax failures, overlays and
   await assert.rejects(runner.preview("dev", 4173, ["/runtime"]), /broken React component/);
   assert.equal(repository.verificationStatus().verified, false);
 });
+
+test("a declared preview fixture answers the app's own API call and nothing else", { skip: process.env.PSM_RUNNER_DOCKER !== "1" && "set PSM_RUNNER_DOCKER=1" }, async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-browser-fixtures-"));
+  const database = openDatabase(":memory:");
+  t.after(() => { database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
+  fs.writeFileSync(path.join(directory, "package.json"), JSON.stringify({ scripts: { dev: "node server.js" }, dependencies: { react: "19" } }));
+  fs.writeFileSync(path.join(directory, "server.js"), `
+    const page = '<div id="root">loading</div><script>fetch("/api/session", { method: "POST" }).then(r => { document.getElementById("root").textContent = r.status === 401 ? "signed out" : "status " + r.status; })</script>';
+    require('http').createServer((q,r) => {
+      if (q.url.startsWith('/api/')) { r.statusCode = 502; return r.end('no backend'); }
+      r.setHeader('content-type', 'text/html'); r.end(page);
+    }).listen(process.env.PORT, '127.0.0.1');
+  `);
+  const store = new AgentPermissionStore(() => database);
+  const project = { id: "prj_fixtures", name: "fixtures", path: directory };
+  store.changeMany(project, ["repo.read", "script.run"], true, 0, "operator");
+  const repository = new RepositoryTools(store.snapshot(project), store);
+  const runner = new ManagedTaskRunner(repository, store, new AbortController().signal);
+  t.after(() => runner.close());
+  await assert.rejects(runner.preview("dev", 4173, ["/home"]), /HTTP 502/);
+  const fixture = (responses: unknown) => fs.writeFileSync(path.join(directory, "psm-preview.json"), JSON.stringify({ schema: "psm.werewolf.solutions/preview-fixtures/v1", responses }));
+  fixture([{ method: "GET", path: "/api/session", status: 401 }]);
+  await assert.rejects(runner.preview("dev", 4173, ["/home"]), /HTTP 502/, "another method is not answered");
+  fixture([{ method: "POST", path: "/api/session", status: 401, json: { error: "signed out" } }, { path: "/home", status: 200, text: "replaced page" }]);
+  const output = await runner.preview("dev", 4173, ["/home"]);
+  const report = JSON.parse(output.slice(output.indexOf("{"), output.lastIndexOf("}") + 1));
+  assert.equal(report.verified, true);
+  assert.equal(report.results[0].body, "signed out", "the real page ran; the document fixture was not used");
+  assert.deepEqual(report.results[0].fixtures, ["POST /api/session -> 401"]);
+  assert.equal(repository.verificationStatus().verified, true);
+  fixture([{ method: "POST", path: "/api/session", status: 200 }]);
+  assert.equal(repository.verificationStatus().verified, false, "editing the fixture makes the earlier pass stale");
+  fs.writeFileSync(path.join(directory, "psm-preview.json"), "{");
+  await assert.rejects(runner.preview("dev", 4173, ["/home"]), /psm-preview\.json is invalid/);
+});

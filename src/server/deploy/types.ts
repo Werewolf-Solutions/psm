@@ -159,6 +159,10 @@ export interface SystemdNodeServiceResource {
     memoryMaxMb: number;
     /** Non-secret runtime configuration, shown in plans. */
     config: Record<string, string>;
+    /** Start each release beside the serving one and move traffic after its health gate. Needs a target enrolled with a second port. */
+    switching?: "health-checked";
+    /** Seconds the replaced instance keeps running for requests already in flight (default 5). */
+    drainSeconds?: number;
   };
 }
 

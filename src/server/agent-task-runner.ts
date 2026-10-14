@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { taskInputs } from "./agent-task-inputs.ts";
 import { browserPreviewProbe } from "./agent-browser-preview.ts";
+import { PREVIEW_FIXTURE_FILE, parsePreviewFixtures, type PreviewFixture } from "./agent-preview-fixtures.ts";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
 import type { AgentPermissionStore } from "./agent-permissions.ts";
 
@@ -159,12 +160,17 @@ export class ManagedTaskRunner {
     const digest = this.sourceDigest;
     const args = /(?:^|\s)vite(?:\s|$)/.test(scripts[script]) ? ["--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [];
     this.repository.invalidateVerification(cwd, "preview");
-    const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script));
+    const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script), this.previewFixtures(cwd));
     const output = await this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true);
     this.store.check(this.repository.snapshot, "script.run");
     // The probe exits nonzero on any page error. A listening server is not a pass.
     this.repository.recordVerification(cwd, "preview", digest);
     return output;
+  }
+  /** Read from the checkout the digest covers, so editing a fixture makes an earlier pass stale. */
+  private previewFixtures(cwd: string): PreviewFixture[] {
+    const file = this.packageFile(cwd, PREVIEW_FIXTURE_FILE);
+    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewFixtures(this.repository.read(file)) : [];
   }
   private packageFile(cwd: string, name: string): string {
     if (cwd === ".") return name;

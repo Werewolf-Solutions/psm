@@ -1,6 +1,6 @@
 # PSM delivery index — start here
 
-Planning reconciled 2026-10-05. This is the single delivery index for the PSM plans
+Planning reconciled 2026-10-05; current position rechecked 2026-10-13. This is the single delivery index for the PSM plans
 in this repository. Stable phase IDs identify scope; development priority and
 prerequisites are listed separately. Detailed specifications remain linked. Follow
 this index to avoid restarting completed work, following obsolete architecture,
@@ -10,12 +10,12 @@ or treating every document as a separate project needing another kickoff.
 
 | Field | Value |
 | --- | --- |
-| Next phase | **P05 rendered browser tooling**, alongside P07/P07a remaining release acceptance. P02 local restriction editing and P05 managed Codex continuity are implemented with recorded checks. P03's live hosted gate remains blocked. |
-| Execution state | Working-tree version 0.3.33: workspace restrictions, managed Codex continuity and October 6 deployment source/version clarity and preparation recovery and reconciliation completion and completed-release UI and Werewolf-owned public monitoring with uptime/resource graphs and a Monitoring tab, alongside existing uncommitted changes. Todo staging 0.6.5 is active (October 6); Handymanservices staging 1.0.1 remains active. Current local checks are tracked separately in the [evidence register](acceptance-evidence.md). |
+| Next phase | **P05 real-project browser acceptance**, alongside P07/P07a remaining release acceptance. The Chromium renderer behind `preview_check` is implemented and its real-container tests pass; what remains is a managed-agent walkthrough of an actual project. P02 local restriction editing and P05 managed Codex continuity are implemented with recorded checks. P03's live hosted gate remains blocked. |
+| Execution state | Committed `799c58c` on `dev`, version 0.3.38, clean working tree (2026-10-13). Checks rerun that day: typecheck passed; full suite 837 tests, 831 passed, 0 failed, 6 skipped. Todo staging 0.6.5 is active with 0.6.4, 0.6.1 and 0.6.0 retained; committed Todo source is 0.6.6 and unreleased. Handymanservices now declares **production only**: 1.1.0 is active at `handymanservices.werewolf.solutions`. Details are in the [evidence register](acceptance-evidence.md). |
 | Latest product decision | After thorough acceptance, enable automatic staging deployment, then automatic production deployment under explicit environment policies. Each release is gated by tests, compatibility, target health and recovery evidence. P11 adds configurable engineering workflows and harnesses. |
 | First target | Todo staging on `46.101.29.222` (`werewolf-alpha`); successful managed release recorded 2026-09-29. |
 | First complete outcome | Connect a target, configure authority, deploy and verify staging through PSM; then prove automatic staging and production releases under the accepted policy. Hosted PSM is an execution option with its own P03 acceptance. |
-| Resume action | Close P07/P07a local acceptance and P08a.2 retained rollback; complete browser/workspace checks, then P08a.3 switching and P08d monitoring. Develop P12 contract gates and promotion in parallel. Prove staging automation before production automation. |
+| Resume action | P05 managed-agent browser walkthrough of Todo; P07 Todo rollback rehearsal (four releases are retained, none has been rolled back) and P07a Todo controller migration plus fresh-account flow; then P08a.2 managed recovery, P08a.3 switching and P08d monitoring. P08a.2/P08a.3 need a non-production Node-service target, because the only Node service is now production. Develop P12 contract gates and promotion in parallel. Prove staging automation before production automation. |
 
 ### What the current evidence means
 
@@ -124,11 +124,11 @@ implementation can proceed while its separate hosted acceptance is blocked.
 | **P02 · in progress; local core accepted** | Unified access policies and credential lifecycle | P01; P03 for hosted delegation | Scoped rules, presets, revisions, revocation and leases have recorded local acceptance. Workspace restriction editing is implemented with automated checks in 0.3.26; rendered browser acceptance remains open. Person-to-person delegation and hosted policy management remain open. Scope and actual enforcement must agree. [Editor contract](workspace-policy-editor.md), [permission evidence](agent-permissions.md). |
 | **P03 · blocked (live)** | Hosted control service and isolated runners | P02 | Workspace-authenticated APIs, reachable enrollment, durable jobs/events, supported provider authentication and secret storage. A job survives a closed browser/worker restart; cross-workspace access is denied. Do not put general multi-customer execution into the existing loopback API or assume the shared staging droplet hosts the runner fleet. [Hosted architecture](agent-access-and-operations.md#runners-and-saas-operation), [web authority](machine-onboarding.md#authorization-through-the-hosted-web-app). |
 | **P04 · in progress; local acceptance recorded** | Complete machine onboarding in the web app | P01 and P02 core; P03 for hosted acceptance | Local wizard and real-host verification are recorded. Remaining hosted HTTPS enrollment, expiry/regeneration and recovery/reuse acceptance are tracked separately. [Complete UX and acceptance](machine-onboarding.md), [evidence register](acceptance-evidence.md). |
-| **P05 · in progress; local slices accepted** | Practical agent tools, discovery and task continuity | P02 core; P04 for target commands; P03 for hosted execution | Script execution, discovery, Claude resume and the matched comparison have recorded acceptance. Managed Codex continuity now has protocol/lifecycle and real two-turn 0.160.0 evidence. Remaining: real agent browser inspection, private dependencies and hosted acceptance. [Continuity contract](managed-codex-continuity.md), [evidence register](acceptance-evidence.md), [provider checks](../provider-maintenance.md). |
+| **P05 · in progress; local slices accepted** | Practical agent tools, discovery and task continuity | P02 core; P04 for target commands; P03 for hosted execution | Script execution, discovery, Claude resume and the matched comparison have recorded acceptance. Managed Codex continuity now has protocol/lifecycle and real two-turn 0.160.0 evidence. Rendered Chromium checks through `preview_check` are implemented and gate managed commits; both real-container tests passed 2026-10-13. Remaining: a managed-agent walkthrough of a real project's browser journeys, private dependencies and hosted acceptance. [Website verification](../managed-website-verification.md), [Continuity contract](managed-codex-continuity.md), [evidence register](acceptance-evidence.md), [provider checks](../provider-maintenance.md). |
 | **P06 · in progress; code/local browser evidence recorded** | Close existing app/workspace release defects | P00; required staging checks before automatic rollout | Accepted transfer/viewer fixes must be traced into the released candidate, then staged browser/workspace/isolation checks completed. Preserve prior fixes instead of replaying old briefs. [Completion plan](workspace-completion-plan.md), [evidence register](acceptance-evidence.md), [SSO contract](../werewolf-psm-registration.md). |
 | **P07 · in progress; static target release accepted** | Complete staging release path | P04 local; relevant P05/P06 slices; P03 for hosted slice | Todo run `run_a7ef155bd9f04884` passed four release probes. Remaining local gate: browser/workspace journey, retained rollback, required Watch and P07a repeatable setup. Hosted execution is a separate acceptance slice. [First case](agent-access-and-operations.md#the-enrollment-example-as-the-first-deployment-acceptance-case), [Todo evidence](../deploy/TODO-STAGING.md). |
 | **P07a · in progress** | Button-only GitHub setup | P07 first release | Connect GitHub through the App Manifest flow (Create → Install on GitHub), then only PSM buttons: PSM authenticates as its App, creates and pins the release controller from its reviewed bundle, updates and re-pins it, creates the Environment, and gives each release a one-hour `actions: read` source token instead of a stored artifact-reader App key. Acceptance: a fresh organisation deploys Todo staging with no hand-copied key, variable, push or hash. P07 closes only after this, since its acceptance requires the product flows. [Plan](github-button-setup.md). |
-| **P08 · in progress; P08a.1 accepted** | Application deployment and operations | Named milestone prerequisites | P08a.1 service baseline, P08a.2 recovery, P08a.3 uninterrupted switching, P08b workers/jobs, P08c data/migrations/recovery, P08d observation, **P08e machine inventory and approved app/worker controls**. Later work depends on the relevant accepted milestone. [Milestone scope](application-operations.md), [machine operations plan](../deploy/MACHINE-OPERATIONS.md), [Node recipe](../deploy/NODE-SERVICE-RECIPE.md). |
+| **P08 · in progress; P08a.1 accepted** | Application deployment and operations | Named milestone prerequisites | Handymanservices moved from staging to production on 2026-10-12/13; on 2026-10-13 the operator chose to rehearse recovery and switching on that production target. P08a.3 switching is implemented and tested against real nginx, not yet on a host. P08a.1 service baseline, P08a.2 recovery, P08a.3 uninterrupted switching, P08b workers/jobs, P08c data/migrations/recovery, P08d observation, **P08e machine inventory and approved app/worker controls**. Later work depends on the relevant accepted milestone. [Milestone scope](application-operations.md), [machine operations plan](../deploy/MACHINE-OPERATIONS.md), [Node recipe](../deploy/NODE-SERVICE-RECIPE.md). |
 | **P09 · pending** | Unattended maintenance and SaaS operations | P02 policy; P08a.2/P08d for service maintenance; P03 for hosted jobs | Scheduled/monitor-triggered tasks honor standing grants, recover without duplicate mutations, and expose usage/retention limits. Data-changing tasks need the target's proven recovery path. P08b product schedules and P09 control tasks have separate acceptance. [Operations milestones](application-operations.md), [runner requirements](agent-access-and-operations.md#runners-and-saas-operation). |
 | **P10 · pending** | Complete project governance and agent usage visibility | P05 observable tools/context; P03 for hosted reporting | Audit the archived governance plan and finish missing applicability/readiness UI, rule provenance and measurable usage reporting. Local governance does not wait for all P09 maintenance features. [Preserved governance plan](archive/project-governance.plan.json), [archive context](archive/README.md). |
 | **M1 · pending** | Keep machines and apps current | P04 local inventory; P08a.2 for app migration | Inventory OS support dates, kernel/reboot, runtimes and host tools; report project runtime constraints, outdated/vulnerable dependencies and a pinned end-of-life data source. Produce tested dependency/runtime commits, reviewed host-tool updates and snapshot/restore-backed OS migration plans. First case: the recorded Ubuntu 20.04/system Node v14 host; consider a fresh supported host plus app migration. Acceptance: one machine and one project updated through PSM with recovery evidence. Schedule this before container recipes needing a newer platform. [Operations boundaries](application-operations.md). |
@@ -850,4 +850,71 @@ Independent next work: P07/P07a release acceptance and P12a contract checks.
 Next action: implement P05 rendered-browser inspection through a scoped disposable
   runner, with honest readiness and permission reporting; do not expose an
   unrestricted operator browser or host shell as a managed project tool.
+```
+
+### 2026-10-13 — Position recheck after commit 799c58c
+
+```text
+Phase / step: index reconciliation (documentation only)
+State: P05 in progress; P07/P07a/P08 unchanged in status
+Why: the index still described an uncommitted 0.3.33 tree and listed rendered-browser
+  inspection as unbuilt. Both were stale.
+Observed (2026-10-13):
+  - HEAD 799c58c on dev, package 0.3.38, working tree clean.
+  - npm run typecheck -> exit 0. npm test -> 837 tests, 831 pass, 0 fail, 6 skipped.
+  - PSM_RUNNER_DOCKER=1 src/server/agent-task-runner.docker.test.ts -> 2 pass:
+    scripts and previews in the offline sandbox; browser checks reject runtime errors,
+    module syntax failures, overlays and blank apps (image psm-task-browser:1.64.0).
+  - Local PSM (0.3.38) read-only API: Todo staging active 0.6.5 (cc9942a), retained
+    0.6.4, 0.6.1, 0.6.0, all verified; source 0.6.6 (45454a3) committed, not released;
+    no blockers. Todo's 73 recorded runs contain deploy, reconcile and prepare only:
+    no rollback has ever run.
+  - Handymanservices manifest has one environment, production, at
+    handymanservices.werewolf.solutions. Run run_967ea6a45d234f23 succeeded
+    2026-10-13 14:47 UTC with 1.1.0 (625ff22) active and verified. One release is
+    listed as retained. Its staging environment no longer exists.
+Not observed: the werewolf MCP capability failed to connect, so Werewolf business and
+  cloud-service readiness was not rechecked. Releases 0.3.34-0.3.38 are described in
+  STAGING-TO-PRODUCTION.md and docs/evidence; their claims were not re-verified here.
+Consequence: P08a.2 (managed rollback, failed-release recovery) and P08a.3 can no
+  longer be rehearsed on a Handymanservices staging target. They need a
+  non-production Node-service target or an explicit decision to rehearse on production.
+Next action: P05 managed-agent browser walkthrough of Todo through preview_check.
+```
+
+### 2026-10-13 — P05 preview fixtures, P08a.3 switching, P07 rehearsal started
+
+```text
+Phase / step: P05 real-project acceptance; P08a.3 helper implementation; P07 rollback
+State: P05 in progress; P08a.3 implemented locally; P07 waiting on one operator click
+Changed (psm working tree, package 0.3.39, not committed):
+  - preview_check answers declared fetch/XHR calls from <package>/psm-preview.json
+    (agent-preview-fixtures.ts, agent-browser-preview.ts, agent-task-runner.ts).
+  - Host helper health-checked switching (service.go, nginx.go), manifest and schema
+    field, enrollment second port (machines/roles.ts).
+  - Fixed: the enrollment port picker never matched ports claimed by other contracts
+    (the quotes were lost in the generated script); only a listening process kept two
+    service targets off the same port.
+Verification (2026-10-13):
+  npm run typecheck -> exit 0; npm test -> 842 tests, 835 pass, 0 fail, 7 skipped
+  PSM_RUNNER_DOCKER=1 agent-task-runner.docker.test.ts -> 3 pass
+  (cd host-helper && go vet ./... && go test ./...) -> ok, also with CGO_ENABLED=0
+  PSM_SWITCH_DOCKER=1 real-nginx switching test -> pass, three runs, 0 failed requests
+  Todo walkthrough: docs/evidence/todo-browser-walkthrough-2026-10-13.json
+Operator decisions (2026-10-13): full Todo staging rehearsal (release 0.6.6, roll back
+  to 0.6.5, release 0.6.6 again); rehearse P08a.2/P08a.3 on the production
+  Handymanservices target; commit the Todo preview fixture locally.
+Live state: Todo preparation prep_7166efc9 reached the review of source publication
+  pub_ea351dd2 (todo-app cc9942a -> 45454a3 on GitHub); the review then expired
+  unapproved. Nothing was published, built or deployed. The Todo fixture commit is held until that release, so the pending
+  publication stays one commit.
+Blocked (exact):
+  1. In the cockpit, press Make ready to deploy for Todo staging again and approve the
+     source publication. The agent's approve click was refused by its permission
+     classifier and was not retried another way.
+  2. Homelab host did not resolve; real-systemd proof of switching waits for it.
+  3. P08a.2 on production needs a second retained Handymanservices release, which
+     needs a new source version published the same way.
+Next action: after the Todo publication is approved, let the build finish, deploy 0.6.6,
+  create a rollback plan to 0.6.5 from the run, verify public probes, deploy 0.6.6 again.
 ```

@@ -23,8 +23,37 @@ A dev server listening or returning HTML is insufficient. Chromium executes the
 page scripts and rejects page errors, console errors, failed same-origin requests,
 Vite overlays and empty app content. Each route gets a fresh browser context.
 External requests are blocked; apps needing remote data must provide a local
-fixture or their check remains unverified. Preview/start scripts with a build
+fixture (see below) or their check remains unverified. Preview/start scripts with a build
 script build inside the same disposable container before starting the server.
+
+## Preview fixtures
+
+A frontend whose API lives in another service has nothing to call in the offline
+sandbox. Todo's dev server proxies `/api` to a backend that is absent there, so
+its session refresh answered HTTP 500 and every route failed the check. Such a
+package can commit `psm-preview.json` beside its `package.json`:
+
+```json
+{
+  "schema": "psm.werewolf.solutions/preview-fixtures/v1",
+  "responses": [
+    { "method": "POST", "path": "/api/v1/apps/todo/auth/refresh", "status": 401, "json": { "error": "no session" } }
+  ]
+}
+```
+
+Each entry answers one exact method (default `GET`) and pathname on the preview
+origin with a `status` (200-299 or 400-599) and a `json` or `text` body. At most
+40 entries and 64 KiB of bodies. Only `fetch` and XHR requests are answered: the
+page, its scripts and its assets always come from the real dev server, and
+requests to other origins stay blocked. A fixture's own status is not counted as
+a failed request; page errors, other console errors and unlisted failing requests
+still fail the check. Each route's result lists the fixtures it used.
+
+The file is part of the verified source snapshot, so changing it makes an earlier
+pass stale. An invalid file stops the check. A fixture states what the app is
+shown, not that the real API behaves that way; it appears in the commit for
+review like any other source file.
 
 Preload the browser image on the PSM host:
 
