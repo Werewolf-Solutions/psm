@@ -18,6 +18,8 @@ import { sessionContext } from "../session.ts";
 import { claudeEngine, fileTriageCache } from "../triage/run.ts";
 import { executorId, executorPaused, hubClient, runExecutor, type ExecutorEvent } from "./client.ts";
 import { triageJobRunner } from "./triage-job.ts";
+import { ExecutorActivity } from "./activity.ts";
+import { statePath } from "../../store.ts";
 
 export interface ExecutorStatus {
   enabled: boolean;
@@ -44,7 +46,18 @@ export function executorStatus(): ExecutorStatus {
   return { ...status, running: [...status.running], paused: status.enabled && executorPaused() };
 }
 
+let activity: ExecutorActivity | null = null;
+
+/** Job-by-job history for the cockpit (Running → Executor). Created on first use. */
+export function executorActivity(): ExecutorActivity {
+  if (!activity) activity = new ExecutorActivity(process.env.PSM_EXECUTOR_ACTIVITY_FILE || statePath(".psm-executor-activity.json"));
+  return activity;
+}
+
 function track(event: ExecutorEvent): void {
+  if (event.type === "claimed") executorActivity().claimed(event.job);
+  else if (event.type === "posted") executorActivity().posted(event.jobId, event.outcome);
+  else if (event.type === "abandoned") executorActivity().abandoned(event.jobId, event.reason);
   switch (event.type) {
     case "idle":
       status.state = "connected";
@@ -80,18 +93,42 @@ function concurrency(): number {
   return Number.isFinite(value) ? Math.min(2, Math.max(1, Math.floor(value))) : 1;
 }
 
-/**
- * Start the loop if `PSM_EXECUTOR=1`. Returns a stop function, or null when the
- * executor is off. Nothing here traps SIGTERM: a killed process simply lets its
- * leases expire, which is the contract's crash path.
- */
-export function startExecutorService(): { stop: () => Promise<void> } | null {
-  if (process.env.PSM_EXECUTOR !== "1") return null;
+let handle: { stop: () => Promise<void> } | null = null;
 
+/** Is the executor on because PSM_EXECUTOR=1 (so the cockpit switch cannot turn it off)? */
+export const executorForcedByEnv = () => process.env.PSM_EXECUTOR === "1";
+
+/**
+ * Start the loop if `PSM_EXECUTOR=1` or `on` (the cockpit switch, remembered in
+ * .psm-switches.json). Returns a stop function, or null when the executor is
+ * off. Nothing here traps SIGTERM: a killed process simply lets its leases
+ * expire, which is the contract's crash path.
+ */
+export function startExecutorService(on = false): { stop: () => Promise<void> } | null {
+  if (!executorForcedByEnv() && !on) return null;
+  if (handle) return handle;
+  handle = launch();
+  return handle;
+}
+
+/** The cockpit switch: start or stop the loop in this process, now. */
+export async function setExecutorRunning(on: boolean): Promise<ExecutorStatus> {
+  if (on) startExecutorService(true);
+  else if (handle && !executorForcedByEnv()) {
+    const current = handle;
+    handle = null;
+    await current.stop();
+    Object.assign(status, { enabled: false, state: "off", running: [] });
+  }
+  return executorStatus();
+}
+
+function launch(): { stop: () => Promise<void> } {
   const id = executorId();
   status.enabled = true;
   status.executorId = id;
   status.state = "starting";
+  status.lastError = null;
 
   // TODO(P14 B4): a long-lived executor needs a credential that survives a
   // restart without a person at the keyboard — a device session it can refresh
@@ -100,7 +137,7 @@ export function startExecutorService(): { stop: () => Promise<void> } | null {
   const token = async () => (await sessionContext()).accessToken;
   const hub = hubClient({ apiUrl: () => werewolfApiUrl(), token, executorId: id });
 
-  const run = triageJobRunner({
+  const runJob = triageJobRunner({
     findProject: (projectId) => {
       const project = getProjects().find((candidate) => candidate.id === projectId);
       return project ? { name: project.name, path: project.path } : null;
@@ -109,7 +146,13 @@ export function startExecutorService(): { stop: () => Promise<void> } | null {
     recap: (name) => cachedRecap(name),
     engine: claudeEngine({ model: process.env.PSM_TRIAGE_MODEL || null }),
     cache: fileTriageCache(),
+    onStep: (job, step) => executorActivity().step(job, step),
   });
+  const run: typeof runJob = async (job, signal) => {
+    const outcome = await runJob(job, signal);
+    executorActivity().finishing(job.jobId, outcome);
+    return outcome;
+  };
 
   const controller = new AbortController();
   const loop = runExecutor({

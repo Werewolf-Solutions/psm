@@ -126,6 +126,16 @@ export interface Hub {
   result(jobId: string, outcome: JobOutcome): Promise<void>;
   /** The owner's intake for one project — context for triage. */
   listIntake(projectId: string): Promise<OpenIntake[]>;
+  /** Replace this executor's share of the project registry the `@` picker reads. */
+  publishProjects(projects: HubProject[]): Promise<{ count: number; archived: number }>;
+}
+
+/** One entry of the hub's project registry (contract: p14-hub-contract.md). */
+export interface HubProject {
+  projectId: string;
+  name: string;
+  displayName?: string | null;
+  archived?: boolean;
 }
 
 function isJob(value: any): value is ExecutorJob {
@@ -191,6 +201,10 @@ export function hubClient(options: HubOptions): Hub {
     },
     async result(jobId, outcome) {
       await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/result`, outcome, REQUEST_TIMEOUT_MS);
+    },
+    async publishProjects(projects) {
+      const { data } = await call("PUT", "/psm/projects", { projects }, REQUEST_TIMEOUT_MS);
+      return { count: Number(data?.count ?? projects.length), archived: Number(data?.archived ?? 0) };
     },
     async listIntake(projectId) {
       const { data } = await call("GET", `/psm/intake?projectId=${encodeURIComponent(projectId)}`, undefined, REQUEST_TIMEOUT_MS);

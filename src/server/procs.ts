@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 
 /** A managed process: a project's dev server, or a deploy to a target. */
-export type ProcKind = "run" | "deploy:staging" | "deploy:production" | `custom:${string}`;
+export type ProcKind = "run" | "deploy:staging" | "deploy:production" | `custom:${string}` | `script:${string}`;
 export type ProcStatus = "running" | "exited" | "error";
 
 export interface LogLine {
@@ -27,6 +27,8 @@ interface ProcEntry {
   log: LogLine[];
   file: fs.WriteStream | null; // the full transcript, for Download
   subscribers: Set<Response>;
+  /** Mask `scheme://user:password@` in every line before it is kept or shown. */
+  redact?: boolean;
 }
 
 /** Ring-buffer cap per process. Exported so a capped download can say so. */
@@ -107,6 +109,11 @@ export function childEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function withoutVariables(env: NodeJS.ProcessEnv, names: string[]): NodeJS.ProcessEnv {
+  for (const name of names) delete env[name];
+  return env;
+}
+
 export function getProc(name: string, kind: ProcKind): ProcEntry | undefined {
   return registry.get(keyOf(name, kind));
 }
@@ -145,8 +152,14 @@ export function activeProcesses() {
     }));
 }
 
+/** `mongodb://app:s3cret@host` → `mongodb://app:***@host`. */
+export function redactCredentials(line: string): string {
+  return line.replace(/([a-z][a-z0-9+.-]*:\/\/)([^\s:@/]*):([^\s@/]+)@/gi, "$1$2:***@");
+}
+
 function pushLine(p: ProcEntry, stream: LogLine["stream"], text: string) {
-  for (const raw of stripAnsi(text).split(/\r?\n/)) {
+  for (const unmasked of stripAnsi(text).split(/\r?\n/)) {
+    const raw = p.redact ? redactCredentials(unmasked) : unmasked;
     if (raw === "") continue;
     const entry: LogLine = { t: Date.now(), stream, line: raw };
     p.log.push(entry);
@@ -178,7 +191,18 @@ function broadcastStatus(p: ProcEntry) {
 }
 
 /** Start (or return the already-running) process for name+kind. */
-export function start(name: string, kind: ProcKind, command: string, cwd: string): ProcEntry {
+export interface StartOptions {
+  /**
+   * Inherited variables to drop for this child. A database script must read its
+   * target from its own `.env`, and dotenv never overrides a variable that is
+   * already set — so one exported in psm's shell would silently win.
+   */
+  unsetEnv?: string[];
+  /** Mask credentials in connection strings the process prints. */
+  redact?: boolean;
+}
+
+export function start(name: string, kind: ProcKind, command: string, cwd: string, options: StartOptions = {}): ProcEntry {
   const key = keyOf(name, kind);
   const existing = registry.get(key);
   if (existing && existing.status === "running") return existing;
@@ -199,6 +223,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
   };
   p.command = command;
   p.cwd = cwd;
+  p.redact = options.redact === true;
   p.status = "running";
   p.exitCode = null;
   p.startedAt = Date.now();
@@ -215,7 +240,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     cwd,
     shell: true,
     detached: true,
-    env: { ...childEnv(), FORCE_COLOR: "0", NO_COLOR: "1" },
+    env: withoutVariables({ ...childEnv(), FORCE_COLOR: "0", NO_COLOR: "1" }, options.unsetEnv ?? []),
   });
   p.child = child;
 

@@ -71,6 +71,11 @@ psm has two postures, chosen with `PSM_MODE`, and both have a machine under them
 | `dev` (default) | the local cockpit, `npm run dev` | `workspaceRoot` automatically |
 | `agent` | the same server, driven from psm.werewolf.solutions, `npm run agent` | only linked folders |
 
+**Both at once.** Dev mode can pair too: **Folders → Drive this machine from
+psm.werewolf.solutions → On** lets the hosted page drive this psm (with the pairing token
+shown there) while it keeps scanning your workspace. Off by default, remembered in
+`.psm-switches.json`, and only the local cockpit can flip it. Agent mode always pairs.
+
 There is no third. **psm.werewolf.solutions is static files** — nginx serves `web/`, the
 browser signs in against werewolf-dapp directly, and every project operation goes to the
 agent on your own machine. `PSM_MODE=hosted` is refused with a pointer to that fact, because
@@ -83,10 +88,12 @@ output never reach a server.
 
 ### The executor (P14, opt-in)
 
-`npm run executor` (or `PSM_EXECUTOR=1` with either mode) also runs the **executor**: it
+**Running → Executor → On** (or `PSM_EXECUTOR=1` / `npm run executor`) runs the **executor**: it
 claims triage jobs from the PSM hub in werewolf-dapp, runs one tool-less `claude` call per
 job in the project's folder, and posts back a validated verdict
-([contract](docs/roadmaps/p14-hub-contract.md)). It is off by default.
+([contract](docs/roadmaps/p14-hub-contract.md)). It is off by default. The switch starts and
+stops it in the running psm, in either mode, and is remembered across restarts in
+`.psm-switches.json`; with `PSM_EXECUTOR=1` it is on and the switch is locked.
 
 - It uses psm's Werewolf session, so it claims nothing until you **Continue with Werewolf**
   on the local cockpit, and it waits again after a restart.
@@ -95,8 +102,21 @@ job in the project's folder, and posts back a validated verdict
   60 s. **Kill switch:** `PSM_EXECUTOR_PAUSED=1`, or `"paused": true` in
   `.psm-executor.json` (read live). A stopped or paused job posts nothing; its lease
   expires and the hub hands it out again.
+- **Running → Executor → Activity** shows each job as it happens: the Todo note, the
+  prompt psm sent Claude (project context + note, and the system prompt), Claude's answer
+  as a verdict with the raw JSON one click away, model/time/tokens/cost, and a timeline
+  through to the hub. A job is one tool-less call, not a chat. The last 50 jobs are kept
+  in `.psm-executor-activity.json` (0600, local only).
 - `GET /api/executor` reports its state. `PSM_TRIAGE_MODEL` picks the model;
   `PSM_EXECUTOR_CONCURRENCY` (1–2) sizes the pool.
+
+**Project registry (on whenever signed in, executor or not).** The Todo app's `@project`
+picker lists the projects the hub knows, and psm tells it: while psm holds a Werewolf
+session it publishes each project's `prj_` id, name and archived flag — nothing else —
+right after sign-in and then whenever the list changes (re-sent every 30 minutes).
+`GET /api/hub/projects` shows the last publish; `POST /api/hub/projects/publish` sends
+now. `PSM_PUBLISH_PROJECTS=0` turns it off. The Todo account and psm's Werewolf account
+must be the same person, since the registry is per owner.
 
 ## Linked folders — what psm looks at
 
@@ -259,7 +279,30 @@ agents have actually used.
   port as a dashed `:3000?` chip meaning "meant to serve this, nothing listening". Where the same project has several copies of the same command alive, all but
   the newest are flagged **left over** — that is why a fourth `npm run dev` ends up on
   5176. Stopping is two clicks and sends `SIGTERM`; **Stop stale** clears the leftovers in
-  one go. psm's own process is shown but has no stop button.
+  one go. psm's own process is shown but has no stop button. A strip at the top shows
+  this machine's databases with their access level; each chip opens Resources.
+- **🗄 Resources** — databases, Docker containers, node servers and folders on this
+  machine, each with an access level: **None** (listed only; personal), **Read** (inspect
+  and preview) or **Full** (development: writes allowed). Anything new is None until you
+  choose; psm suggests one (Full for a local database a project's `.env` uses, Read for a
+  remote one, None under `~/Pictures`, `~/Videos` and similar). Databases are found from
+  listening ports (system services and Docker included) and from projects' `.env` files,
+  which psm reads only for engine, host, port and database name — user, password and
+  query string are dropped as they are parsed and never stored, logged or shown.
+  - **Data buttons.** A script under `scripts/` that writes only with `--apply` gets
+    **Preview** and **Apply** in the project's Capabilities pane and under its database
+    here. Its target is resolved from its own package's `.env` (following local
+    `require`s); psm refuses rather than guesses when a host variable such as
+    `MONGO_HOSTNAME` is set or two databases are possible. Preview needs Read; Apply needs
+    Full and a clean Preview of the same database in the last 15 minutes, all checked by
+    the server at click time. The script runs with the variables it reads removed from
+    psm's environment, so only its `.env` decides, and credentials in its output are masked.
+  - **Agents.** psm's sandboxed agents have no network, so no level lets them reach a
+    database; their access summary lists each one and its level. Terminal agents
+    (Claude Code, Codex) get the levels as guidance in a marked block that psm keeps in
+    `~/.claude/CLAUDE.md` (and `~/.codex/AGENTS.md` when Codex is set up) — machine-wide,
+    never in a repository. psm writes it after the first change in Resources and only
+    refreshes it after that; `PSM_AGENT_GUIDANCE=0` turns it off. It is guidance, not a lock.
 - **Working on** — projects with an open AI/Session pane, a running process, an active
   or queued AI turn, or a manual **Working on now** mark. **Stop working** clears the
   manual mark, cancels AI work and its queue, closes the AI session pane, and stops

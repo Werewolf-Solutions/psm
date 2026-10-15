@@ -36,7 +36,24 @@ export interface EngineRequest {
   signal?: AbortSignal;
 }
 
-export type EngineAnswer = { ok: true; text: string } | { ok: false; error: string };
+/** What one engine call cost, when the engine says. */
+export interface EngineMeta {
+  model?: string | null;
+  costUsd?: number | null;
+  durationMs?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+}
+
+export type EngineAnswer = { ok: true; text: string; meta?: EngineMeta } | { ok: false; error: string };
+
+/** What a run went through, for the cockpit's executor activity. Observation only. */
+export type TriageStep =
+  | { type: "cached"; verdict: Verdict }
+  | { type: "prompt"; systemPrompt: string; prompt: string }
+  | { type: "answer"; text: string; meta: EngineMeta | null }
+  | { type: "engine-error"; error: string }
+  | { type: "invalid"; error: string };
 
 /** The seam tests replace: one prompt in, one answer out. */
 export type TriageEngine = (request: EngineRequest) => Promise<EngineAnswer>;
@@ -106,7 +123,19 @@ export function readClaudeJson(stdout: string): EngineAnswer {
     return { ok: false, error: `the engine reported an error: ${String(parsed.result || parsed.subtype || "unknown").slice(0, 300)}` };
   }
   if (typeof parsed?.result !== "string") return { ok: false, error: "the engine output has no result" };
-  return { ok: true, text: parsed.result };
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+  const models = parsed.modelUsage && typeof parsed.modelUsage === "object" ? Object.keys(parsed.modelUsage) : [];
+  return {
+    ok: true,
+    text: parsed.result,
+    meta: {
+      model: models[0] ?? null,
+      costUsd: num(parsed.total_cost_usd),
+      durationMs: num(parsed.duration_ms),
+      inputTokens: num(parsed.usage?.input_tokens),
+      outputTokens: num(parsed.usage?.output_tokens),
+    },
+  };
 }
 
 /**
@@ -234,9 +263,18 @@ export interface TriageInput {
   cache?: TriageCache | null;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Told each step, for display. Must not throw; a throw is ignored. */
+  onStep?: (step: TriageStep) => void;
 }
 
 export async function runTriage(input: TriageInput): Promise<TriageResult> {
+  const step = (value: TriageStep) => {
+    try {
+      input.onStep?.(value);
+    } catch {
+      /* watching must never change the outcome */
+    }
+  };
   const text = input.intakeText.trim();
   if (!text) return { ok: false, reason: "the intake item has no text" };
 
@@ -245,26 +283,38 @@ export async function runTriage(input: TriageInput): Promise<TriageResult> {
   if (hit) {
     // Re-validated: a cache entry written by an older validator must not slip through.
     const checked = parseVerdictAnswer(JSON.stringify(hit));
-    if (checked.ok) return { ok: true, verdict: checked.verdict, cached: true };
+    if (checked.ok) {
+      step({ type: "cached", verdict: checked.verdict });
+      return { ok: true, verdict: checked.verdict, cached: true };
+    }
   }
 
   const engine = input.engine || claudeEngine();
+  const prompt = triagePrompt(input.projectName, text, input.pack);
+  step({ type: "prompt", systemPrompt: SYSTEM_PROMPT, prompt });
   let answer: EngineAnswer;
   try {
     answer = await engine({
       cwd: input.projectDir,
       systemPrompt: SYSTEM_PROMPT,
-      prompt: triagePrompt(input.projectName, text, input.pack),
+      prompt,
       timeoutMs: input.timeoutMs ?? TRIAGE_TIMEOUT_MS,
       signal: input.signal,
     });
   } catch (err) {
     answer = { ok: false, error: `the engine failed: ${(err as Error).message}` };
   }
-  if (!answer.ok) return { ok: false, reason: answer.error };
+  if (!answer.ok) {
+    step({ type: "engine-error", error: answer.error });
+    return { ok: false, reason: answer.error };
+  }
+  step({ type: "answer", text: answer.text, meta: answer.meta ?? null });
 
   const parsed = parseVerdictAnswer(answer.text);
-  if (!parsed.ok) return { ok: false, reason: parsed.error };
+  if (!parsed.ok) {
+    step({ type: "invalid", error: parsed.error });
+    return { ok: false, reason: parsed.error };
+  }
   input.cache?.set(key, parsed.verdict);
   return { ok: true, verdict: parsed.verdict, cached: false };
 }

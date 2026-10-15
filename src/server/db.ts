@@ -434,6 +434,13 @@ const MIGRATIONS: readonly string[] = [
   `CREATE TABLE deployment_service_secret_generations (
      owner TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation >= 0), updated_at INTEGER NOT NULL
    );`,
+  // Access levels for what runs on this machine (databases, containers, folders).
+  // Keyed by the resource itself, not by workspace: whether the local Mongo is a
+  // development database is a fact about this machine. Discovery is never stored;
+  // a row exists only once someone chose a level (or added a folder).
+  `CREATE TABLE resources (
+     key TEXT PRIMARY KEY, revision INTEGER NOT NULL, document TEXT NOT NULL CHECK(json_valid(document))
+   );`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

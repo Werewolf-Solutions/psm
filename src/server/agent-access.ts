@@ -13,6 +13,7 @@ import path from "node:path";
 
 import type { AgentPermissionStore, PermissionSnapshot } from "./agent-permissions.ts";
 import type { ServerEnvironment } from "./machines/commands.ts";
+import type { ProjectDatabase } from "./resources/summary.ts";
 
 export type AccessStatus = "ready" | "needs-review" | "needs-grant" | "needs-connection" | "needs-runner" | "provider-restricted" | "unsupported";
 
@@ -37,6 +38,8 @@ export interface AccessInputs {
   runner: { ok: boolean; detail: string; browser?: { ok: boolean; detail: string } };
   attachedTools: number;
   servers: ServerEnvironment[];
+  /** Databases this project's .env files point at, with the level set in Resources. */
+  databases?: ProjectDatabase[];
 }
 
 const UNSUPPORTED: ReadonlyArray<[string, string, string]> = [
@@ -92,6 +95,20 @@ export function explainAccess(input: AccessInputs): AccessItem[] {
       : "Each infrastructure plan waits for your review in Deploy.",
     action: byPolicy.length ? null : "Add a deploy.approve rule for an environment, or apply Operate staging.",
   });
+  // Managed agents run with no network, so no level lets them reach a database
+  // directly; the level decides what the project's Data buttons may do instead.
+  for (const database of input.databases ?? []) {
+    const level = database.level ?? "none";
+    items.push({
+      id: `database:${database.key}`,
+      title: `Change ${database.label}`,
+      status: "unsupported",
+      permission: null,
+      detail: `${database.references.join(", ")}. Access: ${database.level ? level : "not set (treated as none)"}. Managed agents have no network, so they cannot connect to it themselves.`
+        + (level === "full" ? " Its scripts can run from the Data card (Preview, then Apply)." : level === "read" ? " Its scripts can be previewed from the Data card; Apply needs Full." : ""),
+      action: level === "full" ? null : "Set this database's level in Resources.",
+    });
+  }
   for (const [id, title, detail] of UNSUPPORTED) items.push({ id, title, status: "unsupported", permission: null, detail, action: null });
   return items;
 }

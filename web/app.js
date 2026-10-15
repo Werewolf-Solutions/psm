@@ -2581,6 +2581,9 @@ function renderNotes() {
 }
 
 async function loadCapabilities(force = false) {
+  if (WS.name && !WS.chatOnly) void PsmResources.renderData($("#cap-data"), {
+    api: agentApi, stream: agentStream, project: WS.name, openResources,
+  });
   if (WS.name && !WS.chatOnly) void PsmAgentPermissions.render(document.querySelector("#agent-permissions"), document.querySelector("#cap-deployment-connections"), {
     api: agentApi, project: currentProject(), onDeploy: () => switchPane("deploy"),
   });
@@ -7797,6 +7800,9 @@ function closeModals() {
   $("#procs-modal").hidden = true;
   $("#links-modal").hidden = true;
   $("#machines-modal").hidden = true;
+  $("#resources-modal").hidden = true;
+  $("#executor-modal").hidden = true;
+  PsmExecutor.close();
   $("#questions-modal").hidden = true;
   $("#new-modal").hidden = true;
   $("#rules-modal").hidden = true;
@@ -7998,6 +8004,9 @@ async function openProcs() {
 async function loadProcs() {
   PROCS.loading = true;
   renderProcs();
+  void PsmResources.strip($("#procs-resources"), { api: agentApi, openResources });
+  SWITCHES = null;
+  void renderExecutorSwitch();
   try {
     const r = await agentApi("/api/machine/processes");
     const data = await r.json();
@@ -8275,12 +8284,112 @@ async function openLinks() {
   await loadLinks();
 }
 
+/* ---- switches: executor and pairing, flipped here, remembered by psm ---- */
+let SWITCHES = null;
+
+/** Off · On as the same segmented control Resources uses. */
+function renderSwitch(root, on, { disabled = false, title = "", onChange }) {
+  root.replaceChildren();
+  for (const [value, label] of [[false, "Off"], [true, "On"]]) {
+    const b = el("button", `res-level ${value ? "res-level-full" : "res-level-none"}${on === value ? " on" : ""}`, label);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", on === value ? "true" : "false");
+    b.disabled = disabled;
+    if (title) b.title = title;
+    b.onclick = async () => {
+      if (on === value) return;
+      root.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+      b.classList.add("res-level-saving");
+      await onChange(value);
+    };
+    root.append(b);
+  }
+}
+
+async function loadSwitches() {
+  try {
+    const r = await agentApi("/api/switches");
+    if (!r.ok) return null;
+    SWITCHES = await r.json();
+  } catch {
+    SWITCHES = null;
+  }
+  return SWITCHES;
+}
+
+async function flipSwitch(change) {
+  try {
+    const r = await agentApi("/api/switches", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(change) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "Could not change that");
+    SWITCHES = data;
+  } catch (err) {
+    toast(err.message);
+    await loadSwitches();
+  }
+}
+
+function executorNote(executor) {
+  const status = executor.status || {};
+  if (!executor.on) return "Off — Todo notes tagged @project wait in the hub until an executor picks them up.";
+  if (status.paused) return "On, but paused by the kill switch (PSM_EXECUTOR_PAUSED or .psm-executor.json).";
+  if (status.state === "hub-error") {
+    return /sign in/i.test(status.lastError || "") ? "On — waiting for you to sign in with Werewolf." : `On — the hub is not answering: ${status.lastError || "unknown error"}. Retrying.`;
+  }
+  const last = status.lastClaimAt ? ` · last triage ${fmtAge(Math.round((Date.now() - status.lastClaimAt) / 1000))} ago` : "";
+  const running = status.running?.length ? ` · ${status.running.length} running` : "";
+  if (status.state === "connected") return `On — connected, waiting for tagged notes${running}${last}.`;
+  return `On — ${status.state || "starting"}…`;
+}
+
+async function renderExecutorSwitch() {
+  const data = SWITCHES || (await loadSwitches());
+  const row = $("#executor-switch-row");
+  row.hidden = !data;
+  if (!data) return;
+  const { executor } = data;
+  $("#executor-switch-note").textContent = executorNote(executor);
+  renderSwitch($("#executor-switch"), executor.on, {
+    disabled: executor.forcedByEnv,
+    title: executor.forcedByEnv ? "On because psm was started with PSM_EXECUTOR=1" : "",
+    onChange: async (on) => {
+      await flipSwitch({ executor: on });
+      renderExecutorSwitch();
+    },
+  });
+}
+
+async function renderPairingSwitch() {
+  const data = SWITCHES || (await loadSwitches());
+  const row = $("#pairing-switch-row");
+  row.hidden = !data;
+  if (!data) return;
+  const { pairing } = data;
+  const origins = (pairing.origins || []).join(", ") || "no origin configured";
+  $("#pairing-switch-note").textContent = pairing.forcedByMode
+    ? `On — agent mode always pairs. ${origins} can drive this machine with the token below.`
+    : pairing.on
+      ? `On — ${origins} can drive this machine with the token below, and this cockpit keeps scanning your workspace.`
+      : "Off — only this cockpit can reach psm. Turn on to pair the hosted page while this one keeps scanning your workspace.";
+  renderSwitch($("#pairing-switch"), pairing.on, {
+    disabled: pairing.forcedByMode,
+    title: pairing.forcedByMode ? "Always on in agent mode" : "",
+    onChange: async (on) => {
+      await flipSwitch({ pairing: on });
+      await renderPairingSwitch();
+      loadPairing();
+    },
+  });
+}
+
 /* ---- pairing: the only thing that lets a hosted page drive this machine ---- */
 let PAIRING = { token: null, shown: false };
 
 async function loadPairing() {
   const box = $("#pairing");
-  box.hidden = LINKS.mode !== "agent";
+  const pairing = (SWITCHES || (await loadSwitches()))?.pairing;
+  box.hidden = !(pairing ? pairing.on : LINKS.mode === "agent");
   if (box.hidden) return;
   try {
     const r = await agentApi("/api/agent/token");
@@ -8313,6 +8422,8 @@ async function loadLinks() {
     LINKS.links = [];
   }
   renderLinks();
+  SWITCHES = null;
+  await renderPairingSwitch();
   loadPairing();
 }
 
@@ -8965,6 +9076,39 @@ $("#stale-dismiss").onclick = () => {
 };
 $("#links-open").onclick = openLinks;
 $("#machines-open").onclick = () => openMachines();
+$("#resources-open").onclick = () => openResources();
+$("#executor-activity-open").onclick = () => openExecutorActivity();
+$("#executor-close").onclick = closeModals;
+$("#executor-back").onclick = () => openProcs();
+
+/** Executor activity: each claimed note, the prompt, Claude's answer, the verdict. */
+function openExecutorActivity() {
+  closeModals();
+  openModal("#executor-modal");
+  void PsmExecutor.open({
+    api: agentApi,
+    list: $("#executor-list"),
+    detail: $("#executor-detail"),
+    summary: $("#executor-summary"),
+    isOpen: () => !$("#executor-modal").hidden,
+  });
+}
+$("#resources-close").onclick = closeModals;
+$("#resources-refresh").onclick = () => void PsmResources.refresh();
+
+/** Resources panel, optionally scrolled to one resource (a database key). */
+function openResources(focus = null) {
+  closeModals();
+  openModal("#resources-modal");
+  void PsmResources.open({
+    api: agentApi,
+    stream: agentStream,
+    root: $("#resources-body"),
+    summary: $("#resources-summary"),
+    toast,
+    focus,
+  });
+}
 $("#machines-close").onclick = closeModals;
 
 /** Machines inventory and setup wizard; optionally for one project's environment. */

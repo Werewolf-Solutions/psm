@@ -91,7 +91,54 @@ function listeningByPid(): Map<number, Set<number>> {
   return found;
 }
 
-interface PsRow {
+/** One listening TCP socket. `pid` is null when the socket is not ours to see. */
+export interface ListeningSocket {
+  address: string;
+  port: number;
+  pid: number | null;
+}
+
+/**
+ * Every listening socket, including the ones `listeningByPid` cannot attribute.
+ *
+ * `ss -p` only names processes this user owns, so a system `mongod`, `redis-server`
+ * or Docker's `docker-proxy` shows up as a bare address. Those are exactly the
+ * services the Resources panel is about, so they are kept here with `pid: null`.
+ */
+export function listeningSockets(): ListeningSocket[] {
+  const found: ListeningSocket[] = [];
+  const seen = new Set<string>();
+  const push = (address: string, port: number, pid: number | null) => {
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return;
+    const key = `${address}|${port}|${pid ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    found.push({ address, port, pid });
+  };
+  const ss = run("ss", ["-tlnpH"]);
+  for (const line of ss.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts[0] !== "LISTEN" || parts.length < 4) continue;
+    const local = parts[3];
+    const cut = local.lastIndexOf(":");
+    const address = local.slice(0, cut).replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+    const port = Number(local.slice(cut + 1));
+    const pids = [...line.matchAll(/pid=(\d+)/g)].map((match) => Number(match[1]));
+    if (!pids.length) push(address, port, null);
+    for (const pid of pids) push(address, port, pid);
+  }
+  if (ss) return found;
+  for (const line of run("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"]).split("\n").slice(1)) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 9) continue;
+    const local = parts[8];
+    const cut = local.lastIndexOf(":");
+    push(local.slice(0, cut).replace(/^\[|\]$/g, ""), Number(local.slice(cut + 1)), Number(parts[1]) || null);
+  }
+  return found;
+}
+
+export interface PsRow {
   pid: number;
   ppid: number;
   etimes: number;
@@ -99,7 +146,7 @@ interface PsRow {
   args: string;
 }
 
-function processTable(): Map<number, PsRow> {
+export function processTable(): Map<number, PsRow> {
   const rows = new Map<number, PsRow>();
   // etimes is elapsed seconds — far easier to reason about than ps's [[dd-]hh:]mm:ss
   for (const line of run("ps", ["-eo", "pid=,ppid=,etimes=,rss=,args="]).split("\n")) {

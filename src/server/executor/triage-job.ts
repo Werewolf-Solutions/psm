@@ -5,7 +5,7 @@
  * test can drive it with a fake hub and a fake engine.
  */
 import { buildContextPack, type OpenIntake } from "../triage/context.ts";
-import { runTriage, type TriageCache, type TriageEngine } from "../triage/run.ts";
+import { runTriage, type TriageCache, type TriageEngine, type TriageStep } from "../triage/run.ts";
 import type { ExecutorJob, JobOutcome } from "./client.ts";
 
 export interface TriageJobDeps {
@@ -18,7 +18,12 @@ export interface TriageJobDeps {
   engine?: TriageEngine;
   cache?: TriageCache | null;
   timeoutMs?: number;
+  /** Told what the job is doing, for the cockpit's activity view. */
+  onStep?: (job: ExecutorJob, step: JobStep) => void;
 }
+
+/** A triage step, or the context psm assembled before it. */
+export type JobStep = TriageStep | { type: "context"; bytes: number; truncated: boolean; openIntake: number; project: string };
 
 export function triageJobRunner(deps: TriageJobDeps) {
   return async (job: ExecutorJob, signal: AbortSignal): Promise<JobOutcome> => {
@@ -39,6 +44,11 @@ export function triageJobRunner(deps: TriageJobDeps) {
       openIntake,
       recap: deps.recap?.(project.name) ?? null,
     });
+    try {
+      deps.onStep?.(job, { type: "context", bytes: pack.bytes, truncated: pack.truncated, openIntake: openIntake.length, project: project.name });
+    } catch {
+      /* watching must never change the outcome */
+    }
     const result = await runTriage({
       projectDir: project.path,
       projectName: project.name,
@@ -48,6 +58,7 @@ export function triageJobRunner(deps: TriageJobDeps) {
       cache: deps.cache,
       timeoutMs: deps.timeoutMs,
       signal,
+      onStep: (step) => deps.onStep?.(job, step),
     });
     return result.ok ? { status: "triaged", verdict: result.verdict } : { status: "failed", error: result.reason };
   };

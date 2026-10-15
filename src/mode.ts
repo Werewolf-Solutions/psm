@@ -55,8 +55,22 @@ export function setModeForTesting(mode: PsmMode | undefined) {
 /** Does it scan a workspace root implicitly, or only what has been linked? */
 export const scansImplicitly = () => psmMode() === "dev";
 
+/**
+ * Pairing can also be switched on from the cockpit while staying in dev mode
+ * (server/switches.ts), so one process scans the workspace *and* answers
+ * psm.werewolf.solutions. The server registers that reader at start; this
+ * module stays free of server imports.
+ */
+let pairingSwitch: () => boolean = () => false;
+export function usePairingSwitch(read: () => boolean): void {
+  pairingSwitch = read;
+}
+
+/** Pairing is on because of the mode itself, so the switch cannot turn it off. */
+export const pairsByMode = () => psmMode() === "agent";
+
 /** May a paired browser origin other than loopback talk to it? */
-export const acceptsPairedOrigins = () => psmMode() === "agent";
+export const acceptsPairedOrigins = () => pairsByMode() || pairingSwitch();
 
 export function describeMode(): string {
   return psmMode() === "dev"

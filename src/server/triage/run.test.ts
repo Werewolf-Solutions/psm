@@ -57,7 +57,8 @@ test("the argv turns every tool off and isolates project settings", () => {
 });
 
 test("claude's JSON output is reduced to the answer text", () => {
-  assert.deepEqual(readClaudeJson('{"type":"result","result":"hi","is_error":false}'), { ok: true, text: "hi" });
+  const answer = readClaudeJson('{"type":"result","result":"hi","is_error":false}');
+  assert.equal(answer.ok && answer.text, "hi");
   assert.equal(readClaudeJson('{"is_error":true,"result":"limit"}').ok, false);
   assert.equal(readClaudeJson("not json").ok, false);
   assert.equal(readClaudeJson("{}").ok, false);

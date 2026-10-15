@@ -67,6 +67,21 @@ Rules (all server-side; the browser never creates an intake directly):
 - Task and note JSON returned to Todo gain
   `intake: { intakeId, status, verdict } | null`.
 
+Live changes: `GET /api/v1/apps/todo/events` (Todo session, `todo:read`, platform
+app) is a Server-Sent Events stream of the caller's own intake changes. Every
+transition above, plus claim and result (B3), sends
+
+```text
+event: intake
+data: { "kind": "task" | "note", "itemId": "<task or note id>", "intake": { intakeId, status, verdict } | null }
+```
+
+(`null` once withdrawn). The stream opens with `event: ready`, sends a
+`: keep-alive` comment every 25 s and `X-Accel-Buffering: no` for nginx. Events
+reach every dapp instance through the Redis channel `psm:intake-events` when
+`REDIS_URL` is set. Delivery is best effort: a client that reconnects refetches
+rather than expecting a replay.
+
 ## B3 — Executor queue
 
 PSM session plus a header `X-PSM-Executor: <executorId>` (`[a-z0-9-]{1,64}`).

@@ -23,7 +23,7 @@ import { linksFile } from "../links.ts";
 import { loadOverrides, saveOverrides } from "../classify.ts";
 import { loadConfig, workspaceRoot } from "../scan.ts";
 import { LinkError, addLink, describeLinks, removeLink } from "../links.ts";
-import { acceptsPairedOrigins, describeMode, psmMode, scansImplicitly } from "../mode.ts";
+import { acceptsPairedOrigins, describeMode, pairsByMode, psmMode, scansImplicitly, usePairingSwitch } from "../mode.ts";
 import { loadState as loadWorkspaceState, manageAuthority, projectWorkspaceRef, workspaceRouter } from "./workspaces.ts";
 import { machineRouter } from "./machines/api.ts";
 import { MachineService } from "./machines/service.ts";
@@ -86,6 +86,10 @@ import { ensurePreviewProxy } from "./preview.ts";
 import { customCommandId, validateCustomCommands } from "./custom-commands.ts";
 import { BrowseError, browse } from "./browse.ts";
 import { StopError, machineProcesses, stopProcess } from "./machine.ts";
+import { resourceRouter } from "./resources/api.ts";
+import { ResourceStore } from "./resources/store.ts";
+import { projectDatabases } from "./resources/summary.ts";
+import { BLOCK_START as GUIDANCE_START, guidanceFiles, guidanceRows, publishGuidance, renderGuidance } from "./resources/guidance.ts";
 import {
   agentGuard,
   agentIdentity,
@@ -118,8 +122,11 @@ import {
   writeProjectRules,
 } from "./rules.ts";
 import { collectSkillUsage } from "./skills.ts";
-import { runtimeServices, startRuntimeDiscovery } from "./runtime.ts";
-import { executorStatus, startExecutorService } from "./executor/service.ts";
+import { runtimeServices, startRuntimeDiscovery, werewolfApiUrl } from "./runtime.ts";
+import { executorActivity, executorForcedByEnv, executorStatus, setExecutorRunning, startExecutorService } from "./executor/service.ts";
+import { readSwitches, writeSwitches } from "./switches.ts";
+import { executorId, hubClient } from "./executor/client.ts";
+import { createProjectPublisher } from "./executor/publish.ts";
 import {
   account as cloudAccount,
   billingPortal as cloudBillingPortal,
@@ -179,6 +186,8 @@ function getProjects(): ReturnType<typeof scanProjects> {
 
 const app = express();
 app.disable("x-powered-by");
+// The cockpit can turn pairing on in dev mode too; see server/switches.ts.
+usePairingSwitch(() => readSwitches().pairing);
 const deploymentStreamTickets = new DeploymentStreamTicketRegistry();
 
 /**
@@ -203,6 +212,12 @@ app.use(express.json({ limit: "2mb" }));
  * SPA fallback below) and posts the code here, because dapp hands a web client
  * its refresh credential as a cookie and a page on localhost cannot keep one.
  */
+/**
+ * While signed in, psm publishes its projects (id, name, archived) to the hub so
+ * the Todo `@project` picker can list them. PSM_PUBLISH_PROJECTS=0 turns it off.
+ */
+let projectPublisher: ReturnType<typeof createProjectPublisher> | null = null;
+
 app.post("/api/auth/exchange", async (req, res) => {
   try {
     const { user } = await exchangeCode({
@@ -220,6 +235,8 @@ app.post("/api/auth/exchange", async (req, res) => {
       },
     });
     res.json({ ok: true, user });
+    // Signed in: the picker should not wait for the next tick.
+    void projectPublisher?.sync(true);
   } catch (err) {
     const error = err as AuthError;
     res.status(error.status || 400).json({ error: error.message || "Sign-in failed" });
@@ -241,7 +258,7 @@ app.post("/api/auth/logout", async (_req, res) => {
  * so the page can notice it has gone stale and offer a reload rather than
  * failing at whichever button is pressed first.
  */
-const WEB_ASSETS = ["index.html", "privacy.js", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "machines.js", "monitoring.js", "external-links.js", "styles.css"];
+const WEB_ASSETS = ["index.html", "privacy.js", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "machines.js", "resources.js", "executor.js", "monitoring.js", "external-links.js", "styles.css"];
 
 function webAssetVersion(): string {
   const parts: string[] = [];
@@ -1160,6 +1177,7 @@ function findProject(name: string) {
 
 function parseKind(v: unknown): ProcKind {
   if (customCommandId(v)) return v as ProcKind;
+  if (typeof v === "string" && /^script:[0-9a-f]{12}$/.test(v)) return v as ProcKind;
   return v === "deploy:staging" || v === "deploy:production" ? v : "run";
 }
 
@@ -1387,6 +1405,9 @@ local.post("/api/projects/:name/run", (req, res) => {
     return res.status(400).json({ error: "invalid custom command ID" });
   }
   const kind = parseKind(req.body?.kind);
+  // Database scripts start only through /api/resources/scripts/run, which checks
+  // the database's access level; this route would skip that check.
+  if (kind.startsWith("script:")) return res.status(400).json({ error: "Run database scripts from the Data card." });
   const proj = findProject(req.params.name);
   if (!proj) return res.status(404).json({ error: "unknown project" });
   const customId = customCommandId(kind);
@@ -2287,6 +2308,7 @@ configureManagedAgents((scope) => {
   const providerRoots = attachedRefs.size ? currentCatalog().filter((capability) => capability.kind === "mcp" && attachedRefs.has(capability.ref) && capability.providerProject).flatMap((capability) => projects.filter((project) => project.name === capability.providerProject).map((project) => fs.realpathSync(project.path))) : [];
   return { store: agentPermissions, snapshots, mcp: managedMcp, reviews: operationReviews, machines: machineCommands, taskNotes: operationReviews.taskNotes(taskKey(scope.name)), explain: (snapshot: PermissionSnapshot) => projectAccess(snapshot, scope.engine), projectBoundaries: projects.map((project) => fs.realpathSync(project.path)), protectedRoots: [psmCodeRoot, ...providerRoots, path.resolve(databaseFile()), path.resolve(databaseFile()) + "-wal", path.resolve(databaseFile()) + "-shm"] };
 });
+const resourceStore = new ResourceStore(db);
 /** The access explanation for one project, as the operator and the agent both see it. */
 async function projectAccess(snapshot: PermissionSnapshot, engine: string) {
   const project = getProjects().find((entry) => entry.id === snapshot.project.id);
@@ -2296,6 +2318,7 @@ async function projectAccess(snapshot: PermissionSnapshot, engine: string) {
     runner: await taskRunnerStatus(),
     attachedTools: (project?.attachments ?? []).filter((attachment) => currentCatalog().some((capability) => capability.ref === attachment.capabilityRef && capability.kind === "mcp")).length,
     servers: machineCommands?.environments(snapshot.project.id) ?? [],
+    databases: project ? projectDatabases(project, resourceStore) : [],
   });
 }
 local.get("/api/projects/:id/agent-access", async (req, res) => {
@@ -2459,9 +2482,86 @@ local.use(machineRouter({
   actor: () => `local:${os.userInfo().username}`,
 }));
 
+// Resources: databases, containers, servers and folders on this machine, each
+// with the access level you chose. Levels gate the database-script buttons.
+const resourceProjects = () => getProjects().map((project) => ({ name: project.name, path: project.path, port: project.port ?? null }));
+/**
+ * Terminal agents (Claude Code, Codex) learn the levels from one marked block in
+ * the machine-wide instruction files. Written after a change in Resources; on
+ * start only refreshed where the block already exists, so psm never adds it to
+ * someone's files before they have used the panel. PSM_AGENT_GUIDANCE=0 turns it off.
+ */
+const publishResourceGuidance = (onlyExisting = false) => {
+  if (process.env.PSM_AGENT_GUIDANCE === "0") return;
+  const files = guidanceFiles().filter((file) => !onlyExisting || (fs.existsSync(file) && fs.readFileSync(file, "utf8").includes(GUIDANCE_START)));
+  if (!files.length) return;
+  publishGuidance(files, renderGuidance(guidanceRows(resourceStore.list(), resourceProjects())));
+};
+local.use(resourceRouter({
+  store: resourceStore,
+  projects: resourceProjects,
+  localRequest,
+  actor: () => `local:${os.userInfo().username}`,
+  changed: () => publishResourceGuidance(),
+}));
+try {
+  publishResourceGuidance(true);
+} catch (error) {
+  console.warn(`[resources] could not refresh agent guidance: ${(error as Error).message}`);
+}
+
 // The P14 executor, when PSM_EXECUTOR=1: connected / last claim / jobs running.
 local.get("/api/executor", (_req, res) => {
-  res.json(executorStatus());
+  res.json({ ...executorStatus(), projects: projectPublisher?.status() ?? null });
+});
+
+/* ---- switches: executor and pairing, flipped from the cockpit, remembered ---- */
+function switchView() {
+  const saved = readSwitches();
+  return {
+    executor: { on: executorStatus().enabled, saved: saved.executor, forcedByEnv: executorForcedByEnv(), status: executorStatus() },
+    pairing: { on: acceptsPairedOrigins(), saved: saved.pairing, forcedByMode: pairsByMode(), origins: hostedOrigins() },
+  };
+}
+local.get("/api/switches", (_req, res) => res.json(switchView()));
+local.put("/api/switches", async (req, res) => {
+  // Both widen what can act on this machine, so only the local cockpit flips them
+  // — never the paired page itself.
+  if (!localRequest(req)) return res.status(403).json({ error: "Change these from the local cockpit." });
+  const { executor, pairing } = req.body ?? {};
+  if (executor !== undefined && typeof executor !== "boolean") return res.status(400).json({ error: "executor must be true or false" });
+  if (pairing !== undefined && typeof pairing !== "boolean") return res.status(400).json({ error: "pairing must be true or false" });
+  try {
+    writeSwitches({ executor, pairing });
+    if (typeof executor === "boolean") await setExecutorRunning(executor);
+    if (pairing === true) console.log(`  → pairing on: ${hostedOrigins().join(", ") || "no origin configured"} may drive this machine with the pairing token`);
+    res.json(switchView());
+  } catch (error) {
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+// What the executor did, job by job: the note, the prompt, Claude's answer, the verdict.
+local.get("/api/executor/activity", (_req, res) => {
+  const activity = executorActivity();
+  res.json({ revision: activity.revision, status: executorStatus(), jobs: activity.list() });
+});
+local.get("/api/executor/activity/:jobId", (req, res) => {
+  const entry = executorActivity().get(req.params.jobId);
+  if (!entry) return res.status(404).json({ error: "No such job in the executor's history." });
+  res.json(entry);
+});
+
+// The hub's project registry, which the Todo `@project` picker reads.
+local.get("/api/hub/projects", (_req, res) => {
+  res.json(projectPublisher?.status() ?? { enabled: false, state: "off", count: 0, lastPublishedAt: null, lastError: null });
+});
+local.post("/api/hub/projects/publish", async (_req, res) => {
+  if (!projectPublisher) return res.status(409).json({ error: "Publishing is off (PSM_PUBLISH_PROJECTS=0)." });
+  const status = await projectPublisher.sync(true);
+  if (status.state === "signed-out") return res.status(401).json({ ...status, error: "Sign in with Werewolf first." });
+  if (status.state === "error") return res.status(502).json({ ...status, error: status.lastError });
+  res.json(status);
 });
 
 // The one line that decides whether this process can touch the machine.
@@ -2535,6 +2635,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 startRuntimeDiscovery();
-startExecutorService(); // off unless PSM_EXECUTOR=1
+startExecutorService(readSwitches().executor); // off unless PSM_EXECUTOR=1 or switched on in the cockpit
+if (process.env.PSM_PUBLISH_PROJECTS !== "0") {
+  projectPublisher = createProjectPublisher({
+    hub: hubClient({ apiUrl: () => werewolfApiUrl(), token: async () => (await sessionContext()).accessToken, executorId: executorId() }),
+    projects: () => getProjects().map((project) => ({ id: project.id, name: project.name, archived: project.archived })),
+    signedIn: async () => !!(await currentUser()),
+    log: (line) => console.log(`  → ${line}`),
+  });
+  projectPublisher.start();
+}
 setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
 setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();

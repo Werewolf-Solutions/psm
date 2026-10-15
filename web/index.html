@@ -97,6 +97,7 @@
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
         <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
         <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
+        <button id="resources-open" class="btn" title="Databases, containers and folders on this machine, and how much access each one gets">🗄&nbsp;Resources</button>
         <button id="questions-open" class="btn" title="Review pending questions from your sessions" aria-haspopup="dialog">Questions <span id="questions-count" class="questions-count" hidden>0</span></button>
         <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
         <button id="machines-open" class="btn" title="Servers your projects deploy to">🖥&nbsp;Machines</button>
@@ -370,6 +371,7 @@
           </section>
         </div>
         <div class="ws-capabilities" id="ws-capabilities" data-pane="capabilities" hidden>
+          <section id="cap-data" class="agent-permissions res-data" aria-label="Database scripts" hidden data-stream-private></section>
           <section id="agent-permissions" class="agent-permissions" aria-label="Agent permissions"></section>
           <section id="cap-deployment-connections" class="agent-permissions" aria-label="Deployment connections" data-stream-private></section>
           <div class="cap-toolbar">
@@ -730,7 +732,51 @@
           <button class="icon-btn" id="procs-close" aria-label="Close">✕</button>
         </div>
       </div>
+      <div class="switch-row procs-switch" id="executor-switch-row">
+        <div class="switch-text">
+          <strong>Executor</strong>
+          <span id="executor-switch-note">Runs Todo's @project triage on this machine.</span>
+        </div>
+        <div class="switch-actions">
+          <button class="btn" id="executor-activity-open" title="What the executor did with each note: the prompt, Claude's answer, the verdict">Activity</button>
+          <div class="res-levels" id="executor-switch" role="radiogroup" aria-label="Executor"></div>
+        </div>
+      </div>
+      <div class="res-strip" id="procs-resources" hidden data-stream-private></div>
       <div class="modal-body procs-body" id="procs-body" data-stream-private></div>
+    </section>
+
+    <!-- the executor's jobs: note → prompt → Claude's answer → verdict → hub -->
+    <section class="modal modal-wide executor-modal" id="executor-modal" role="dialog" aria-modal="true" aria-labelledby="executor-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="executor-title">Executor activity</h2>
+          <p class="hint" id="executor-summary">Reading…</p>
+        </div>
+        <div class="procs-head-actions">
+          <button class="btn" id="executor-back">Running</button>
+          <button class="icon-btn" id="executor-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="exec-body" data-stream-private>
+        <div class="exec-list" id="executor-list"></div>
+        <div class="exec-detail" id="executor-detail"></div>
+      </div>
+    </section>
+
+    <!-- databases, containers, servers and folders, each with an access level -->
+    <section class="modal modal-wide resources-modal" id="resources-modal" role="dialog" aria-modal="true" aria-labelledby="resources-title" hidden>
+      <div class="modal-head">
+        <div>
+          <h2 id="resources-title">Resources</h2>
+          <p class="hint" id="resources-summary">Reading…</p>
+        </div>
+        <div class="procs-head-actions">
+          <button class="btn" id="resources-refresh">Refresh</button>
+          <button class="icon-btn" id="resources-close" aria-label="Close">✕</button>
+        </div>
+      </div>
+      <div class="modal-body resources-body" id="resources-body" data-stream-private></div>
     </section>
 
     <!-- linked folders: what psm looks at -->
@@ -755,6 +801,13 @@
       </div>
       <div class="modal-body links-body">
         <!-- agent mode only: what a hosted psm needs in order to drive this machine -->
+        <div class="switch-row" id="pairing-switch-row">
+          <div class="switch-text">
+            <strong>Drive this machine from psm.werewolf.solutions</strong>
+            <span id="pairing-switch-note">Off — only this cockpit can reach psm. Turn on to pair the hosted page while this one keeps scanning your workspace.</span>
+          </div>
+          <div class="res-levels" id="pairing-switch" role="radiogroup" aria-label="Hosted pairing"></div>
+        </div>
         <div class="pairing" id="pairing" hidden data-stream-private>
           <div class="pairing-head">
             <h3>Pair the hosted cockpit</h3>
@@ -978,6 +1031,8 @@
     <script src="/deployment-connections.js"></script>
     <script src="/agent-permissions.js"></script>
     <script src="/machines.js"></script>
+    <script src="/resources.js"></script>
+    <script src="/executor.js"></script>
     <script src="/workspaces.js"></script>
     <script src="/monitoring.js"></script>
     <script src="/app.js"></script>

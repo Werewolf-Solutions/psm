@@ -29,6 +29,8 @@ host-helper/host-helper
 .psm-prod.env
 .psm-triage-cache.json
 .psm-executor.json
+.psm-executor-activity.json
+.psm-switches.json
 
 # Stamped by the deploy workflow so the page can spot an out-of-date agent.
 web/version.json
