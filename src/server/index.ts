@@ -2552,6 +2552,23 @@ local.get("/api/executor/activity/:jobId", (req, res) => {
   res.json(entry);
 });
 
+// The hub's whole queue for this user: waiting, being triaged (and by which
+// executor), and done with its verdict. Read through the Werewolf session.
+let cockpitHub: ReturnType<typeof hubClient> | null = null;
+local.get("/api/executor/queue", async (_req, res) => {
+  if (!(await currentUser())) return res.status(401).json({ error: "Sign in with Werewolf to see the queue." });
+  cockpitHub ??= hubClient({ apiUrl: () => werewolfApiUrl(), token: async () => (await sessionContext()).accessToken, executorId: executorId() });
+  try {
+    const names = new Map(getProjects().filter((project) => project.id).map((project) => [project.id!, project.name]));
+    const items = (await cockpitHub.listQueue())
+      .filter((item) => item.status !== "withdrawn")
+      .map((item) => ({ ...item, projectName: names.get(item.projectId) ?? null, mine: item.claim?.executorId === executorStatus().executorId }));
+    res.json({ executorId: executorStatus().executorId, items });
+  } catch (error) {
+    res.status(502).json({ error: `The hub did not answer: ${(error as Error).message}` });
+  }
+});
+
 // The hub's project registry, which the Todo `@project` picker reads.
 local.get("/api/hub/projects", (_req, res) => {
   res.json(projectPublisher?.status() ?? { enabled: false, state: "off", count: 0, lastPublishedAt: null, lastError: null });

@@ -126,8 +126,26 @@ export interface Hub {
   result(jobId: string, outcome: JobOutcome): Promise<void>;
   /** The owner's intake for one project — context for triage. */
   listIntake(projectId: string): Promise<OpenIntake[]>;
+  /** The owner's whole intake queue, newest first (at most 200), for the Queue view. */
+  listQueue(): Promise<QueueItem[]>;
   /** Replace this executor's share of the project registry the `@` picker reads. */
   publishProjects(projects: HubProject[]): Promise<{ count: number; archived: number }>;
+}
+
+/** One intake item as the hub lists it (GET /psm/intake). */
+export interface QueueItem {
+  intakeId: string;
+  projectId: string;
+  source: string;
+  sourceRef: { kind: "task" | "note"; id: string } | null;
+  text: string;
+  status: "new" | "claimed" | "triaged" | "failed" | "withdrawn";
+  claim: { executorId: string; leaseUntil: string } | null;
+  attempts: number;
+  verdict: Verdict | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** One entry of the hub's project registry (contract: p14-hub-contract.md). */
@@ -201,6 +219,11 @@ export function hubClient(options: HubOptions): Hub {
     },
     async result(jobId, outcome) {
       await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/result`, outcome, REQUEST_TIMEOUT_MS);
+    },
+    async listQueue() {
+      const { data } = await call("GET", "/psm/intake", undefined, REQUEST_TIMEOUT_MS);
+      const items: any[] = Array.isArray(data?.intake) ? data.intake : [];
+      return items.filter((item) => item && typeof item.intakeId === "string" && typeof item.status === "string") as QueueItem[];
     },
     async publishProjects(projects) {
       const { data } = await call("PUT", "/psm/projects", { projects }, REQUEST_TIMEOUT_MS);

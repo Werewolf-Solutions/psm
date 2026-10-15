@@ -216,6 +216,116 @@
     }
   }
 
+  /* ---------- Queue: the hub's whole intake for this user ---------- */
+
+  let view = "activity";
+  let queueTimer = null;
+
+  const QUEUE_SECTIONS = [
+    { id: "running", title: "Being triaged now", empty: null },
+    { id: "waiting", title: "Waiting", empty: "Nothing waiting. Tag a Todo task or note with @project to queue it." },
+    { id: "needs_decision", title: "Needs your decision", empty: null },
+    { id: "fits", title: "Fits — ready to implement", note: "Implement jobs (Phase E) are not built yet: a note that fits stops here.", empty: null },
+    { id: "doesnt_fit", title: "Doesn't fit", empty: null },
+    { id: "failed", title: "Failed", empty: null },
+  ];
+
+  function sectionOf(item) {
+    if (item.status === "claimed") return "running";
+    if (item.status === "new") return "waiting";
+    if (item.status === "failed") return "failed";
+    if (item.status === "triaged") return item.verdict?.verdict || "failed";
+    return null;
+  }
+
+  function leaseLeft(iso) {
+    const s = Math.round((new Date(iso).getTime() - Date.now()) / 1000);
+    return s > 0 ? `lease ${s}s left` : "lease expired — goes back to waiting";
+  }
+
+  function queueRow(item, position) {
+    const row = node("div", "", "exec-qrow");
+    const head = node("div", "", "exec-qhead");
+    const name = node("strong", item.projectName || item.projectId);
+    head.append(name);
+    if (position) head.append(node("span", `#${position}`, "exec-qpos"));
+    head.append(node("span", item.sourceRef?.kind === "note" ? "note" : "task", "exec-qkind"));
+    row.append(head, node("div", item.text, "exec-qtext"));
+    const meta = [ago(new Date(item.createdAt).getTime())];
+    if (item.status === "claimed" && item.claim) meta.push(item.mine ? "this machine" : `executor ${item.claim.executorId}`, leaseLeft(item.claim.leaseUntil));
+    if (item.attempts > 1 || (item.status === "new" && item.attempts > 0)) meta.push(`attempt ${item.attempts}${item.status === "new" ? " failed, retrying" : ""}`);
+    if (item.verdict) meta.push(`size ${item.verdict.size}`);
+    row.append(node("div", meta.join(" · "), "exec-qmeta"));
+    if (item.status === "triaged" && item.verdict?.verdict === "needs_decision" && item.verdict.questions?.length) {
+      const ul = node("ul", "", "exec-qquestions");
+      for (const question of item.verdict.questions) ul.append(node("li", question));
+      row.append(ul);
+    } else if (item.verdict?.queue?.note) {
+      row.append(node("div", item.verdict.queue.note, "exec-qnote"));
+    }
+    if (item.error && item.status !== "triaged") row.append(node("div", item.error, "exec-qerror"));
+    if (jobs.some((job) => job.jobId === item.intakeId)) {
+      const open = node("button", "See what the executor did", "btn exec-qopen");
+      open.type = "button";
+      open.onclick = () => {
+        setView("activity");
+        void select(item.intakeId);
+      };
+      row.append(open);
+    }
+    return row;
+  }
+
+  function renderQueue(items, executorId) {
+    const root = ctx.queue;
+    root.replaceChildren();
+    const groups = new Map(QUEUE_SECTIONS.map((section) => [section.id, []]));
+    for (const item of items) groups.get(sectionOf(item))?.push(item);
+    // Claim order is oldest first, so that is the order they will be picked up in.
+    groups.get("waiting").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const counts = QUEUE_SECTIONS.map((section) => `${groups.get(section.id).length} ${section.title.split(" —")[0].toLowerCase()}`).filter((text) => !text.startsWith("0 "));
+    root.append(node("p", `${counts.join(" · ") || "The queue is empty."}${executorId ? ` · this machine is ${executorId}` : ""}`, "exec-qsummary"));
+    for (const section of QUEUE_SECTIONS) {
+      const list = groups.get(section.id);
+      if (!list.length && !section.empty) continue;
+      const block = node("section", "", `exec-qsection exec-q-${section.id}`);
+      block.append(node("h3", `${section.title} (${list.length})`, "procs-group"));
+      if (section.note && list.length) block.append(node("p", section.note, "exec-qsection-note"));
+      if (!list.length) block.append(node("div", section.empty, "procs-empty"));
+      list.forEach((item, index) => block.append(queueRow(item, section.id === "waiting" ? index + 1 : 0)));
+      root.append(block);
+    }
+  }
+
+  async function pollQueue() {
+    if (!ctx || view !== "queue") return;
+    try {
+      const data = await get("/api/executor/queue");
+      renderQueue(data.items || [], data.executorId);
+    } catch (error) {
+      ctx.queue.replaceChildren(node("div", error.message || "Could not read the queue.", "procs-empty"));
+    }
+  }
+
+  function setView(next) {
+    view = next;
+    ctx.activityPane.hidden = next !== "activity";
+    ctx.queue.hidden = next !== "queue";
+    for (const [name, tab] of Object.entries(ctx.tabs)) {
+      tab.classList.toggle("on", name === next);
+      tab.setAttribute("aria-selected", name === next ? "true" : "false");
+    }
+    clearInterval(queueTimer);
+    if (next === "queue") {
+      ctx.queue.replaceChildren(node("div", "Reading the queue from the hub…", "procs-empty"));
+      void pollQueue();
+      queueTimer = setInterval(() => {
+        if (ctx?.isOpen && !ctx.isOpen()) return clearInterval(queueTimer);
+        void pollQueue();
+      }, 3000);
+    }
+  }
+
   window.PsmExecutor = {
     open(options) {
       ctx = options;
@@ -224,6 +334,9 @@
       selectedEntry = null;
       ctx.list.replaceChildren(node("div", "Loading…", "procs-empty"));
       ctx.detail.replaceChildren();
+      ctx.tabs.activity.onclick = () => setView("activity");
+      ctx.tabs.queue.onclick = () => setView("queue");
+      setView(options.view || "activity");
       clearInterval(timer);
       timer = setInterval(() => {
         if (ctx?.isOpen && !ctx.isOpen()) return clearInterval(timer);
@@ -233,7 +346,9 @@
     },
     close() {
       clearInterval(timer);
+      clearInterval(queueTimer);
       timer = null;
+      queueTimer = null;
     },
   };
 })();

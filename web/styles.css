@@ -1267,6 +1267,27 @@ body.auth-open { overflow: hidden; }
 .exec-timeline { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .exec-timeline li { display: flex; gap: 10px; font-size: 12px; }
 .exec-timeline time { color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; flex: 0 0 auto; }
+.exec-tabs { margin-left: auto; margin-right: 12px; }
+.exec-tabs .res-level.on { color: var(--text, inherit); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.exec-body[hidden], .exec-queue[hidden] { display: none; }
+.exec-queue { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 20px 20px; display: flex; flex-direction: column; gap: 6px; }
+.exec-qsummary { margin: 0; color: var(--muted); font-size: 12.5px; }
+.exec-qsection { display: flex; flex-direction: column; gap: 6px; }
+.exec-qsection .procs-group { margin-top: 12px; }
+.exec-qsection-note { margin: 0; color: var(--faint); font-size: 12px; }
+.exec-qrow { display: flex; flex-direction: column; gap: 4px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--card); }
+.exec-q-running .exec-qrow { border-color: color-mix(in srgb, var(--st-utility) 45%, var(--line)); }
+.exec-q-needs_decision .exec-qrow { border-color: color-mix(in srgb, var(--st-paused) 45%, var(--line)); }
+.exec-q-fits .exec-qrow { border-color: color-mix(in srgb, var(--st-active) 40%, var(--line)); }
+.exec-q-failed .exec-qrow { border-color: color-mix(in srgb, #f85149 40%, var(--line)); }
+.exec-qhead { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.exec-qpos, .exec-qkind { font-size: 10.5px; font-weight: 750; color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.exec-qtext { font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.exec-qmeta { font-size: 11px; color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.exec-qnote { font-size: 12px; color: var(--muted); }
+.exec-qquestions { margin: 2px 0 0; padding-left: 18px; font-size: 12.5px; }
+.exec-qerror { font-size: 12px; color: #f0a58a; }
+.exec-qopen { align-self: flex-start; padding: 3px 10px; font-size: 11.5px; }
 @media (max-width: 760px) {
   .exec-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
   .exec-list { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }

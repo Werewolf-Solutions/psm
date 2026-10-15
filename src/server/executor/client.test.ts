@@ -106,7 +106,8 @@ async function fakeHub(): Promise<FakeHub> {
     res.json({ success: true, data: { status: req.body.status } });
   });
   app.get("/api/v1/psm/intake", (req, res) => {
-    res.json({ success: true, data: { intake: hub.intake.filter((item) => item.projectId === req.query.projectId) } });
+    // Like the hub: a projectId narrows the list; without one, everything.
+    res.json({ success: true, data: { intake: hub.intake.filter((item) => !req.query.projectId || item.projectId === req.query.projectId) } });
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
@@ -209,6 +210,8 @@ test("the client sends the session and executor id and reads the envelope", asyn
 
     hub.intake.push({ intakeId: "int_x", projectId: "prj_a", text: "other", status: "new" }, { intakeId: "int_y", projectId: "prj_b", text: "elsewhere" });
     assert.deepEqual(await api.listIntake("prj_a"), [{ intakeId: "int_x", text: "other", status: "new", verdict: null }]);
+    const queue = await api.listQueue();
+    assert.deepEqual(queue.map((item) => item.intakeId), ["int_x"], "the whole queue, minus rows that are not intake items");
   } finally {
     await hub.close();
   }

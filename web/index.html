@@ -750,18 +750,23 @@
     <section class="modal modal-wide executor-modal" id="executor-modal" role="dialog" aria-modal="true" aria-labelledby="executor-title" hidden>
       <div class="modal-head">
         <div>
-          <h2 id="executor-title">Executor activity</h2>
+          <h2 id="executor-title">Executor</h2>
           <p class="hint" id="executor-summary">Reading…</p>
+        </div>
+        <div class="res-levels exec-tabs" role="tablist" aria-label="Executor views">
+          <button class="res-level on" type="button" role="tab" id="executor-tab-activity" aria-selected="true">Activity</button>
+          <button class="res-level" type="button" role="tab" id="executor-tab-queue" aria-selected="false">Queue</button>
         </div>
         <div class="procs-head-actions">
           <button class="btn" id="executor-back">Running</button>
           <button class="icon-btn" id="executor-close" aria-label="Close">✕</button>
         </div>
       </div>
-      <div class="exec-body" data-stream-private>
+      <div class="exec-body" id="executor-activity" data-stream-private>
         <div class="exec-list" id="executor-list"></div>
         <div class="exec-detail" id="executor-detail"></div>
       </div>
+      <div class="exec-queue" id="executor-queue" hidden data-stream-private></div>
     </section>
 
     <!-- databases, containers, servers and folders, each with an access level -->

@@ -9090,6 +9090,9 @@ function openExecutorActivity() {
     list: $("#executor-list"),
     detail: $("#executor-detail"),
     summary: $("#executor-summary"),
+    queue: $("#executor-queue"),
+    activityPane: $("#executor-activity"),
+    tabs: { activity: $("#executor-tab-activity"), queue: $("#executor-tab-queue") },
     isOpen: () => !$("#executor-modal").hidden,
   });
 }
