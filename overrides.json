@@ -146,10 +146,14 @@
   },
   "trading-bot": {
     "category": "Blockchain & DeFi",
-    "status": "paused",
-    "stack": "Express, SQLite, SPA",
+    "status": "active",
+    "stack": "Express, SQLite, SPA, Crypto.com, AI advisor",
     "description": "Trading-bot software for the Werewolf app: Express + SQLite backend running the bots, plus a web SPA to configure strategies, bots, and exchange credentials. Auto-migrating SQLite on first boot.",
-    "next": "Resume from the pre-merge cto sync."
+    "next": "Resume from the pre-merge cto sync.",
+    "pinned": true,
+    "port": 3000,
+    "aiModel": "opus",
+    "aiEffort": "medium"
   },
   "accounting": {
     "category": "Apps, libraries & other",
@@ -470,5 +474,9 @@
     "pinned": true,
     "aiModel": "opus",
     "aiEffort": "medium"
+  },
+  "werewolf-deploy-lab": {
+    "runCommand": "npm run dev",
+    "port": 3001
   }
 }
