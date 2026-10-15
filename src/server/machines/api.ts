@@ -63,6 +63,7 @@ export function machineRouter(options: MachineApiOptions): express.Router {
     res.status(201).json({ machine: service.getMachine(machine.id, ws) });
   }));
   router.get("/api/machines/:id", route(false, (req, res, ws) => res.json({ machine: service.getMachine(req.params.id, ws) })));
+  router.get("/api/machines/:id/snapshot", route(false, async (req, res, ws) => res.json({ snapshot: await service.snapshot(req.params.id, ws) })));
   router.post("/api/machines/:id/confirm-host-key", route(true, (req, res, ws) => {
     service.confirmHostKey(req.params.id, ws, revision(req), req.body?.fingerprint);
     res.json({ machine: service.getMachine(req.params.id, ws) });

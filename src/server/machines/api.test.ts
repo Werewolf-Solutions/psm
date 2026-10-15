@@ -54,6 +54,9 @@ test("register, confirm and plan through the API, with the plan's authority show
   assert.equal(blocked.body.code, "host-key-unverified");
   const confirmed = await call("POST", `/api/machines/${unconfirmed.body.machine.id}/confirm-host-key`, { fingerprint: candidate.fingerprint, revision: unconfirmed.body.machine.revision });
   assert.equal(confirmed.body.machine.trusted, true);
+  const noObserver = await call("GET", `/api/machines/${confirmed.body.machine.id}/snapshot`);
+  assert.equal(noObserver.status, 409);
+  assert.equal(noObserver.body.code, "observer-access-missing");
   const planned = await call("POST", `/api/machines/${confirmed.body.machine.id}/access`, { projectId: "prj_todo", environmentId: "staging", risk: "staging" });
   assert.equal(planned.status, 201);
   assert.ok(planned.body.access.plan.authority.some((line: string) => /No sudo/.test(line)));

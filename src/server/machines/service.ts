@@ -38,6 +38,7 @@ import {
 } from "./plan.ts";
 import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, buildReleaseCiKeyPlan, helperSourceDigest, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan, type ReleaseCiKeyPlan } from "./roles.ts";
 import { MachineTransportError, type MachineTransport, type SshEndpoint } from "./ssh.ts";
+import { OBSERVE_COMMAND, OBSERVE_SCRIPT } from "./observe.ts";
 import {
   MachineStoreError,
   type AccessPlan,
@@ -178,6 +179,27 @@ export class MachineService {
 
   getMachine(id: string, workspaceId: string) {
     return this.view(this.#store.getMachine(id, workspaceId));
+  }
+
+  /** Run only the fixed read-only collector through an existing pinned SSH identity. */
+  async snapshot(id: string, workspaceId: string) {
+    const machine = this.#store.getMachine(id, workspaceId);
+    this.#requireTrusted(machine);
+    const access = this.#store.listAccess(machine.id).find((entry) => entry.role === "command" && entry.state === "ready");
+    const admin = this.#store.listAccess(machine.id).some((entry) => entry.role === "admin" && entry.state === "ready" && entry.connectionId === machine.adminConnectionId);
+    if (!access && !admin) throw new MachineServiceError("Set up command access or administrator access on this machine to observe it.", 409, "observer-access-missing");
+    const endpoint: SshEndpoint = access
+      ? { host: machine.host, port: machine.port, user: access.account, knownHost: machine.knownHost, connectionId: access.connectionId }
+      : this.#adminEndpoint(machine);
+    const result = await this.#transport.run(endpoint, OBSERVE_COMMAND, OBSERVE_SCRIPT, { timeoutMs: 15_000 });
+    if (result.code !== 0) throw new MachineServiceError("Machine observation failed. Check that Python 3 and the standard Linux tools are installed.", 502, "observer-failed");
+    try {
+      const snapshot = JSON.parse(result.stdout);
+      if (!snapshot || !Number.isFinite(snapshot.observedAt) || !Array.isArray(snapshot.processes) || !Array.isArray(snapshot.services)) throw new Error("invalid snapshot");
+      return { machineId: machine.id, machineName: machine.name, observer: endpoint.user, ...snapshot };
+    } catch {
+      throw new MachineServiceError("Machine observation returned an invalid response.", 502, "observer-invalid");
+    }
   }
 
   /** Offer the host keys the network presents, clearly as unverified candidates. */

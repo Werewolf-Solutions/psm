@@ -2026,6 +2026,12 @@ label.ai-question-option span { min-width: 0; color: var(--muted); font-size: 12
 .machine-authority li { color: var(--muted); }
 .machine-script, .machine-command { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: var(--bg); padding: 8px; border-radius: 6px; }
 .machine-command-card { border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.machine-dashboard { display: flex; flex-direction: column; gap: 12px; }
+.machine-metric, .machine-detail { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--card); min-width: 0; }
+.machine-metric h4, .machine-detail h4 { margin: 0 0 8px; }
+.machine-metric svg { width: 100%; height: auto; }
+.machine-detail > input { width: min(100%, 340px); margin: 0 0 8px; }
+.machine-detail-row { display: grid; grid-template-columns: minmax(130px, 2fr) minmax(85px, 1fr) minmax(120px, 2fr); gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
 .machine-job-steps { margin: 0; padding-left: 4px; list-style: none; font-size: 13px; }
 .machine-job-steps .step-failed, .machine-job-steps .step-uncertain { color: var(--st-blocked, #e5534b); }
 .machine-job-steps .step-done { color: var(--text); }

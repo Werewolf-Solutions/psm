@@ -1,7 +1,8 @@
 # Machine observation and approved operations
 
-Status: proposed, 2026-10-13. This defines the next machine feature; it does
-not grant PSM new host authority or change the current production route.
+Status: read-only snapshot and dashboard implemented and validated on werewolf-alpha, 2026-10-14.
+Operations grants and service controls remain proposed. This does not grant PSM
+new host authority or change the current production route.
 
 ## Operator experience
 
@@ -61,11 +62,14 @@ silently create a broader grant. Existing SSH host-key pinning still applies.
 
 ## Delivery sequence and acceptance
 
-1. Add a read-only machine snapshot endpoint and dashboard. Use a bounded
+1. **Implemented locally, 2026-10-14.** Add a read-only machine snapshot endpoint and dashboard. Use a bounded
    collector, redact environment variables and secret-bearing command
    arguments, limit process rows and response size, and distinguish collector
-   failure from zero usage. Validate on a disposable host and on the registered
-   production host without changing either.
+   failure from zero usage. The collector prefers a ready project command identity
+   and uses an existing pinned administrator connection when that is the only
+   ready shell identity, without sudo. A read-only snapshot of werewolf-alpha on
+   2026-10-14 returned CPU, memory, 149 service rows, 61 bounded process rows,
+   15 listening TCP ports and zero collector errors. No host changes were made.
 2. Add a separately installable operations grant for one named PSM-managed
    systemd app or worker unit. Plan, approve, start, stop and restart that unit;
    verify actual unit state and its local health after start/restart. Prove a

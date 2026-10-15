@@ -570,3 +570,21 @@ deployment access. See [docs/roadmaps/workspace-implementation-status.md](docs/r
 [Werewolf Watch](docs/deploy/WEREWOLF-WATCH.md) checks deployed HTTPS services
 independently of PSM and shows health, TLS expiry and incidents in Deploy.
 No external monitoring account is required.
+### Live machine observation
+
+Open **Machines → Monitor machine** to see a registered Linux host's CPU, memory,
+swap, filesystems, systemd services (including workers), busiest processes,
+listening TCP ports and logged-in terminal users. The page refreshes every five
+seconds. CPU uses a fixed 0–100% scale; memory, swap and disk graphs use zero
+to each resource's actual capacity. History is kept in the open browser tab for five minutes. A stale
+or partial reading is labelled; missing data is never shown as zero.
+
+Observation requires a verified host key and a ready project command access or
+administrator identity on that machine. PSM prefers the project identity when
+both exist. The fixed collector runs without sudo, does not read process
+arguments or environment variables, and uses Python 3 plus standard Linux tools
+(`ps`, `df`, `systemctl`, `ss`, `who`). The connected-users list covers terminal
+login sessions, not application or web users. Services and processes are currently
+read-only; start, stop, restart and new-app deployment require the separate
+reviewed operations grant and release workflow described in
+[machine operations](docs/deploy/MACHINE-OPERATIONS.md).

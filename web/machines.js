@@ -29,6 +29,7 @@
   const STEPS = ["Connect", "Choose access", "Set up", "Ready"];
 
   let ctx = null; // { api, root, workspace, projects, project, environment, onBound, toast }
+  let snapshotTimer = null;
 
   async function call(path, init = {}) {
     const response = await ctx.api(path, { ...init, headers: { "Content-Type": "application/json", ...(init.headers || {}) } });
@@ -40,6 +41,7 @@
   const post = (path, body = {}) => call(ws(path), { method: "POST", body: JSON.stringify({ ...body, workspace: ctx.workspace }) });
 
   function frame(title, stepIndex) {
+    if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
     ctx.root.replaceChildren();
     const head = node("div", "", "machine-wizard-head");
     head.append(node("h3", title));
@@ -101,10 +103,113 @@
           }));
           card.append(row);
         }
-        card.append(button("Add a project", () => showAccess(machine.id)));
+        card.append(button("Monitor machine", () => showDashboard(machine), "btn btn-primary"), button("Add a project", () => showAccess(machine.id)));
         view.body.append(card);
       }
     } catch (error) { view.error(error.message); }
+  }
+
+  function size(value) {
+    if (!Number.isFinite(value)) return "Unavailable";
+    const unit = value >= 1073741824 ? "GiB" : "MiB";
+    return `${(value / (unit === "GiB" ? 1073741824 : 1048576)).toFixed(1)} ${unit}`;
+  }
+
+  function metricChart(title, samples, key, maximum, unit) {
+    const card = node("section", "", "machine-metric");
+    card.append(node("h4", title));
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 320 120");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", `${title} over the last five minutes, zero to ${maximum} ${unit}`);
+    const add = (tag, attrs, content) => {
+      const part = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const [name, value] of Object.entries(attrs)) part.setAttribute(name, String(value));
+      if (content !== undefined) part.textContent = content;
+      svg.append(part);
+    };
+    for (const [value, y] of [[maximum, 13], [maximum / 2, 59], [0, 105]]) {
+      add("line", { x1: 43, x2: 316, y1: y, y2: y, class: "mon-grid" });
+      add("text", { x: 39, y: y + 3, "text-anchor": "end", class: "mon-axis" }, `${Number(value.toFixed(1))}${unit}`);
+    }
+    const end = Date.now(), start = end - 300000;
+    const points = samples.filter(sample => Number.isFinite(sample[key]) && sample.at >= start);
+    if (points.length) add("polyline", { points: points.map(sample => `${43 + (sample.at - start) / 300000 * 273},${105 - Math.min(maximum, Math.max(0, sample[key])) / maximum * 92}`).join(" "), class: "mon-line" });
+    card.append(svg, node("p", "Last five minutes · gaps mean no reading", "mon-note"));
+    return card;
+  }
+
+  function showDashboard(machine) {
+    const view = frame(`${machine.name} · live machine`, null);
+    const heading = node("div", "", "machine-card-head");
+    const status = node("p", "Connecting…", "mon-note");
+    heading.append(button("Back to machines", showList), status);
+    const content = node("div", "", "machine-dashboard");
+    view.body.append(heading, content);
+    const history = [];
+    const filters = new Map();
+    let busy = false;
+    const refresh = async () => {
+      if (busy || ctx.root.closest(".modal")?.hidden) return;
+      busy = true;
+      try {
+        const { snapshot: s } = await call(ws(`/api/machines/${encodeURIComponent(machine.id)}/snapshot`));
+        const age = Date.now() - s.observedAt;
+        status.textContent = `${age > 15000 ? "Stale" : "Live"} · ${new Date(s.observedAt).toLocaleTimeString()} · observed as ${s.observer}`;
+        const rootDisk = s.disks?.find(disk => disk.mount === "/") || s.disks?.[0];
+        history.push({ at: s.observedAt, cpu: s.cpuPercent, memory: s.memoryUsedBytes, swap: s.swapUsedBytes, disk: rootDisk?.usedBytes });
+        while (history.length && history[0].at < Date.now() - 300000) history.shift();
+        const focused = content.contains(document.activeElement) && document.activeElement?.getAttribute("aria-label")?.startsWith("Filter ")
+          ? { label: document.activeElement.getAttribute("aria-label"), cursor: document.activeElement.selectionStart } : null;
+        content.replaceChildren();
+        const cards = node("div", "", "mon-cards");
+        const card = (label, value, detail) => { const el = node("section", "", "mon-card"); el.append(node("div", label, "dep-card-label"), node("strong", value), node("p", detail, "mon-note")); cards.append(el); };
+        card("CPU", Number.isFinite(s.cpuPercent) ? `${s.cpuPercent.toFixed(1)}%` : "Unavailable", `${s.cores || "?"} cores · load ${s.load?.map(v => v.toFixed(2)).join(" / ") || "unavailable"}`);
+        card("Memory", `${size(s.memoryUsedBytes)} / ${size(s.memoryTotalBytes)}`, "Used = total − available; cache reclaimable memory is available.");
+        card("Swap", `${size(s.swapUsedBytes)} / ${size(s.swapTotalBytes)}`, "Physical swap use");
+        card("Uptime", Number.isFinite(s.uptimeSeconds) ? `${Math.floor(s.uptimeSeconds / 86400)}d ${Math.floor(s.uptimeSeconds % 86400 / 3600)}h` : "Unavailable", s.hostname);
+        content.append(cards);
+        const graphs = node("div", "", "mon-charts");
+        graphs.append(metricChart("CPU use", history, "cpu", 100, "%"));
+        if (s.memoryTotalBytes > 0) graphs.append(metricChart("Memory used", history.map(p => ({ ...p, memory: p.memory / 1073741824 })), "memory", s.memoryTotalBytes / 1073741824, " GiB"));
+        if (s.swapTotalBytes > 0) graphs.append(metricChart("Swap used", history.map(p => ({ ...p, swap: p.swap / 1073741824 })), "swap", s.swapTotalBytes / 1073741824, " GiB"));
+        if (rootDisk?.totalBytes > 0) graphs.append(metricChart(`Disk used · ${rootDisk.mount}`, history.map(p => ({ ...p, disk: p.disk / 1073741824 })), "disk", rootDisk.totalBytes / 1073741824, " GiB"));
+        content.append(graphs);
+        const section = (title, rows, render) => {
+          const box = node("section", "", "machine-detail");
+          box.append(node("h4", `${title} (${rows.length})`));
+          if (!rows.length) box.append(node("p", "No entries observed.", "mon-note"));
+          const entries = rows.map(render);
+          if (rows.length > 20) {
+            const filter = input("", `Filter ${title.toLowerCase()}`);
+            filter.setAttribute("aria-label", `Filter ${title}`);
+            filter.value = filters.get(title) || "";
+            const applyFilter = () => entries.forEach(entry => { entry.hidden = !entry.textContent.toLowerCase().includes(filter.value.toLowerCase()); });
+            filter.oninput = () => { filters.set(title, filter.value); applyFilter(); };
+            box.append(filter);
+            applyFilter();
+          }
+          box.append(...entries);
+          content.append(box);
+        };
+        const row = (...values) => { const el = node("div", "", "machine-detail-row"); values.forEach(value => el.append(node("span", String(value)))); return el; };
+        section("Filesystems", s.disks || [], disk => row(disk.mount, `${size(disk.usedBytes)} / ${size(disk.totalBytes)}`, disk.totalBytes ? `${(disk.usedBytes / disk.totalBytes * 100).toFixed(1)}%` : "Unavailable"));
+        section("PSM deployment targets", machine.access.filter(access => access.role === "deploy" && access.state === "ready" && access.plan?.target), access => row(`${access.projectName} · ${access.environmentId}`, access.plan.target.unitId, access.plan.target.hostname || "No public hostname"));
+        section("Systemd services (including workers)", s.services || [], service => row(service.unit, `${service.active} · ${service.sub}`, service.description));
+        section("Busiest processes", s.processes || [], proc => row(`${proc.name} · PID ${proc.pid}`, proc.user, `${proc.cpuPercent}% CPU · ${size(proc.rssBytes)} RAM`));
+        section("Listening TCP ports", s.ports || [], port => row(port.local));
+        section("Connected login sessions", s.users || [], user => row(user.user, user.terminal, user.since));
+        if (s.errors?.length) content.prepend(node("p", `Partial snapshot: ${s.errors.join(", ")}`, "machine-error"));
+        content.append(node("p", "Connected users covers terminal logins; application users and worker queue health need app-specific probes. Services and processes are observation only. Start, Stop, Restart and new-app deployment require a reviewed unit grant and release configuration.", "mon-note"));
+        if (focused) {
+          const filter = [...content.querySelectorAll("input")].find(input => input.getAttribute("aria-label") === focused.label);
+          if (filter) { filter.focus(); filter.setSelectionRange(focused.cursor, focused.cursor); }
+        }
+      } catch (error) { status.textContent = `Unavailable · ${error.message}`; view.error(error.message); }
+      finally { busy = false; }
+    };
+    void refresh();
+    snapshotTimer = setInterval(refresh, 5000);
   }
 
   /* ---------- 1. Connect ---------- */
