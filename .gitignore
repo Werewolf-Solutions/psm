@@ -27,6 +27,8 @@ node_modules/
 # `go build` in host-helper/ drops the compiled binary beside its source.
 host-helper/host-helper
 .psm-prod.env
+.psm-triage-cache.json
+.psm-executor.json
 
 # Stamped by the deploy workflow so the page can spot an out-of-date agent.
 web/version.json
