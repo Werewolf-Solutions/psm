@@ -153,7 +153,8 @@
     "pinned": true,
     "port": 3000,
     "aiModel": "opus",
-    "aiEffort": "medium"
+    "aiEffort": "medium",
+    "runCommand": "npm run dev"
   },
   "accounting": {
     "category": "Apps, libraries & other",
