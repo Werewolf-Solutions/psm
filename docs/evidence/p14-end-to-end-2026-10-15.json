@@ -1,0 +1,27 @@
+{
+  "date": "2026-10-15",
+  "what": "First end-to-end P14 run: Todo tag -> hub intake -> PSM executor -> real Claude triage -> verdict back on the hub",
+  "branches": {
+    "werewolf-dapp": "p14/hub 9320ef3 (B0-B3, C1) on dev 67835c1",
+    "psm": "p14/triage 1b7cae4 (D + executor client) on dev 83c2235, rebased from the agent's master-based branch",
+    "todo-app": "p14/project-mention 774e03e (C2/C3) - not exercised in this run (API driven, no browser)"
+  },
+  "setup": "dapp hub branch run locally on :3317 with no .env, throwaway mongo:7 and redis:7-alpine on localhost ports, generated JWT secrets. bootstrap-todo.js and bootstrap-psm.js registered both apps as owner.kind=platform with no business. One test user with real psm and todo sessions from issueSession.",
+  "steps": {
+    "1 publish": "PUT /psm/projects (X-PSM-Executor psm-e2e-desktop) psm prj_b59f38f33cea066492d8 + todo-app -> count 2, archived 0",
+    "2 todo search": "@p -> psm, todo-app; @ps -> psm; @to -> todo-app",
+    "3 tag": "POST /apps/todo/notes with project psm + projectId -> 201, intake { status new } created server-side",
+    "4 executor": "runExecutor + triageJobRunner + claudeEngine (real claude CLI, tools off) claimed, triaged and posted in 12 s",
+    "5 verdict": "hub intake status triaged, attempts 1, verdict fits / size S, dependsOn the P14 executor claim work, queued after the executor implementation and P14 Phase A, no questions, no dates; rationale cites the hub contract commit and current P05/P07 priorities"
+  },
+  "checks": {
+    "dapp p14/hub server suite": "724 tests, 723 pass, 1 fail (bookingSlots 'a booked slot disappears from the list' - also fails on dev 67835c1: 688 tests, 1 fail)",
+    "psm p14/triage on dev": "typecheck clean; 897 tests, 889 pass, 0 fail, 8 skipped",
+    "todo p14/project-mention": "43/43 tests, client typecheck clean"
+  },
+  "notCovered": [
+    "Typing @ in the real Todo UI and watching the badge change (no interactive browser check yet)",
+    "Executor auth that survives restarts (uses an issued session here; psm has no device-token flow yet - B4)",
+    "Nothing merged into dev/master; nothing pushed or deployed"
+  ]
+}
