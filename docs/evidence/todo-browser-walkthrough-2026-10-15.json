@@ -5,7 +5,12 @@
   "method": "ManagedTaskRunner driven directly (no provider agent turn). todo-app granted repo.read, script.run, pkg.install; werewolf-dapp granted repo.read, script.run. Client dependencies installed through the brokered lockfile path. preview_check('dev', 5200, five routes, 'client').",
   "sandbox": {
     "network": "docker network create --internal (no route out)",
-    "containers": ["mongo:7 (tmpfs, empty)", "redis:7-alpine (no persistence)", "werewolf-dapp server: node:22-bookworm-slim, npm run dev, PORT=3000, NODE_ENV=development, .env-free snapshot of server/, host node_modules read-only at /deps, four JWT secrets generated per run, seeded by scripts/preview-seed.js", "psm-task-browser:1.64.0 running Vite with VITE_API_TARGET=http://werewolf-dapp:3000"],
+    "containers": [
+      "mongo:7 (tmpfs, empty)",
+      "redis:7-alpine (no persistence)",
+      "werewolf-dapp server: node:22-bookworm-slim, npm run dev, PORT=3000, NODE_ENV=development, .env-free snapshot of server/, host node_modules read-only at /deps, four JWT secrets generated per run, seeded by scripts/preview-seed.js",
+      "psm-task-browser:1.64.0 running Vite with VITE_API_TARGET=http://werewolf-dapp:3000"
+    ],
     "origin": "http://localhost:5200 (dapp's exact-match registered development origin; 127.0.0.1 gets 403)",
     "cleanup": "no psm-task-* containers or networks remained afterwards"
   },
@@ -24,12 +29,27 @@
   },
   "checks": {
     "typecheck": "pass",
-    "npm test": "848 tests, 841 pass, 0 fail, 7 skipped",
-    "PSM_RUNNER_DOCKER=1 agent-task-runner.docker.test.ts": "4 pass, including the new real-service test (seeded, no .env, generated secret, redis reachable, egress blocked, nothing left behind)"
+    "npm test": "851 tests, 843 pass, 0 fail, 8 skipped",
+    "PSM_RUNNER_DOCKER=1 agent-task-runner.docker.test.ts": "4 pass"
   },
   "notCovered": [
-    "Signed-in journeys (A5): need a seeded user and a session the browser can hold",
     "A provider-driven managed agent turn calling preview_check with both projects in scope",
-    "Nothing is committed in psm, todo-app or werewolf-dapp"
-  ]
+    "Signed-in journeys that create data (adding a task, starting a period) - only rendering was checked"
+  ],
+  "signedIn": {
+    "method": "Same runner, preview_check(..., signedIn=true) on /, /objectives, /notes, /backlog. psm-preview.json declares session { cookie ws_app_rt_todo, path /api/v1/apps/todo/auth, secret PREVIEW_SESSION_TOKEN }. PSM generates the token per run; preview-seed.js creates preview@psm.invalid and a real Todo session via issueSession whose refresh hash matches it. The cookie jar carries from route to route because the token rotates on every refresh.",
+    "result": {
+      "verified": true,
+      "fixturesUsed": "none",
+      "errors": 0,
+      "routes": {
+        "/": "week board 12-10-2026..18-10-2026 with day columns and Add buttons",
+        "/objectives": "'No period yet' with Start the period",
+        "/notes": "Notes editor, General 0",
+        "/backlog": "Later container, 'Nothing waiting for later'"
+      }
+    },
+    "verificationRecorded": "no - a signed-in pass is extra evidence; only the signed-out pass records preview verification"
+  },
+  "mongoFix": "The first signed-in attempts failed because mongo:7 aborted on the 256 MB tmpfs: three preallocated 100 MB WiredTiger journal files filled it, and the next write (FTDC, then an index build) was fatal. The A2-A4 signed-out pass had only been lucky about timing. Fixed with diagnosticDataCollectionEnabled=false, wiredTigerCacheSizeGB 0.25 and log=(file_max=20MB,prealloc=false): ~21 MB used. Signed-out rerun after the fix: verified, 29 s."
 }

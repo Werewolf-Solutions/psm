@@ -182,7 +182,22 @@ apps without a backend keep working.
 cross-project read. The grant shows up as `repo.read` on `werewolf-dapp`
 through the existing grant-request flow, never as a silent widening.
 
-**A5. Seed for signed-in journeys.** Run dapp's `bootstrap:todo` (or a
+**A5 result (2026-10-15): verified locally.**
+- Signed in, `/`, `/objectives`, `/notes` and `/backlog` render against the
+  real dapp with no fixtures and no errors.
+- How the session works:
+  - `psm-preview.json` declares
+    `session { cookie, path, secret }`, where the secret must be one a service
+    declares, so a real token can never live in a repository.
+  - PSM generates the token per run, and `preview-seed.js` issues a real Todo
+    session whose refresh hash matches it.
+  - The probe carries the cookie jar route to route, because tokens rotate.
+- `preview_check` takes `signedIn: true`. Only signed-out passes record
+  verification.
+- Fixed along the way: mongo:7 aborted on the 256 MB tmpfs (preallocated
+  journals). It now uses about 21 MB.
+
+**A5. Seed for signed-in journeys (original sketch).** Run dapp's `bootstrap:todo` (or a
 preview-only seed) against the throwaway Mongo to create one test user, so
 board, objectives, notes and backlog can be checked signed in.
 

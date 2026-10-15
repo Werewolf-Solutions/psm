@@ -310,3 +310,38 @@ test("a preview service outside the task's scope is refused before anything star
   await assert.rejects(runner.preview("dev", 5200, ["/"]), /werewolf-dapp is not in this task's scope/);
   assert.equal(calls.length, 0);
 });
+
+test("a signed-in preview hands the browser the same generated secret the seed received, and never records verification", async (t) => {
+  const h = fixture(t);
+  h.store.change(h.project, "script.run", true, h.store.snapshot(h.project).revision, "operator");
+  fs.writeFileSync(path.join(h.directory, "package.json"), JSON.stringify({ scripts: { dev: "vite" }, devDependencies: { vite: "7" } }));
+  const declaration = (session: boolean) => fs.writeFileSync(path.join(h.directory, "psm-preview.json"), JSON.stringify({
+    schema: "psm.werewolf.solutions/preview/v2", host: "localhost",
+    services: [{ project: "api", script: "dev", port: 3000, secrets: ["PREVIEW_SESSION_TOKEN"] }],
+    ...(session ? { session: { cookie: "ws_app_rt_todo", path: "/api/v1/apps/todo/auth", secret: "PREVIEW_SESSION_TOKEN" } } : {}),
+  }));
+  const apiDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-api-"));
+  t.after(() => fs.rmSync(apiDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(apiDirectory, "node_modules"));
+  fs.writeFileSync(path.join(apiDirectory, "package.json"), JSON.stringify({ scripts: { dev: "node index.js" } }));
+  const apiProject = { id: "prj_api", name: "api", path: apiDirectory };
+  for (const permission of ["repo.read", "script.run"]) h.store.change(apiProject, permission, true, h.store.snapshot(apiProject).revision, "operator");
+  const apiRepo = new RepositoryTools(h.store.snapshot(apiProject), h.store);
+  const calls: string[][] = [];
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => { calls.push(args); return "{\"verified\": true}"; }, undefined, (name) => name === "api" ? apiRepo : undefined);
+  t.after(() => runner.close());
+  declaration(false);
+  await assert.rejects(runner.preview("dev", 5200, ["/"], ".", true), /needs a session/);
+  assert.equal(calls.length, 0);
+  declaration(true);
+  await runner.preview("dev", 5200, ["/"], ".", true);
+  const runs = calls.filter((args) => args[0] === "run");
+  const token = runs[0].find((arg) => arg.startsWith("PREVIEW_SESSION_TOKEN="))!.split("=")[1];
+  assert.match(token, /^[0-9a-f]{64}$/);
+  assert.ok(runs[1].at(-1)!.includes(token), "the browser's cookie is the seed's secret");
+  assert.ok(runs[1].at(-1)!.includes("ws_app_rt_todo"));
+  assert.equal(h.repo.verificationStatus().verified, false, "a signed-in pass is extra evidence, not the recorded verification");
+  await runner.preview("dev", 5200, ["/"]);
+  assert.ok(!calls.filter((args) => args[0] === "run").at(-1)!.at(-1)!.includes(token), "a signed-out check gets no session");
+  assert.equal(h.repo.verificationStatus().verified, true, "the signed-out pass is the one recorded");
+});

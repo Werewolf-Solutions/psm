@@ -25,7 +25,9 @@ export interface PreviewService {
 }
 /** A real 4xx a service is expected to answer, such as a signed-out session refresh. */
 export interface PreviewExpectation { method: string; path: string; status: number }
-export interface PreviewConfig { responses: PreviewFixture[]; services: PreviewService[]; expected: PreviewExpectation[]; env: Record<string, string>; host: "127.0.0.1" | "localhost" }
+/** A signed-in check: the browser holds this cookie, valued by a generated secret a service's seed also received. */
+export interface PreviewSession { cookie: string; path: string; secret: string }
+export interface PreviewConfig { responses: PreviewFixture[]; services: PreviewService[]; expected: PreviewExpectation[]; env: Record<string, string>; host: "127.0.0.1" | "localhost"; session: PreviewSession | null }
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const STORES: PreviewStore[] = ["mongo", "redis"];
@@ -55,17 +57,28 @@ export function parsePreviewConfig(text: string): PreviewConfig {
   if (!isObject(parsed)) fail("expected an object");
   if (parsed.schema === PREVIEW_FIXTURE_SCHEMA) {
     if (Object.keys(parsed).some(key => key !== "schema" && key !== "responses")) fail("only schema and responses are allowed");
-    return { responses: responses(parsed.responses, fail), services: [], expected: [], env: {}, host: "127.0.0.1" };
+    return { responses: responses(parsed.responses, fail), services: [], expected: [], env: {}, host: "127.0.0.1", session: null };
   }
   if (parsed.schema !== PREVIEW_SCHEMA) fail(`schema must be ${PREVIEW_FIXTURE_SCHEMA} or ${PREVIEW_SCHEMA}`);
-  if (Object.keys(parsed).some(key => !["schema", "responses", "services", "expected", "env", "host"].includes(key))) fail("only schema, responses, services, expected, env and host are allowed");
+  if (Object.keys(parsed).some(key => !["schema", "responses", "services", "expected", "env", "host", "session"].includes(key))) fail("only schema, responses, services, expected, env, host and session are allowed");
   if ("host" in parsed && !["127.0.0.1", "localhost"].includes(parsed.host)) fail("host must be 127.0.0.1 or localhost");
   if ("services" in parsed && (!Array.isArray(parsed.services) || parsed.services.length > MAX_SERVICES)) fail(`services must be a list of at most ${MAX_SERVICES}`);
   const services = (parsed.services ?? []).map((entry: unknown, index: number) => service(entry, `services[${index}]`, fail));
   const aliases = new Set<string>();
   for (const { alias } of services) { if (aliases.has(alias) || STORES.includes(alias as PreviewStore)) fail(`service alias ${alias} is used twice`); aliases.add(alias); }
   if ("expected" in parsed && !services.length) fail("expected needs a service; a fixture already answers its own call");
-  return { responses: responses(parsed.responses ?? [], fail), services, expected: expected(parsed.expected ?? [], fail), env: env(parsed.env ?? {}, "env", fail), host: parsed.host ?? "127.0.0.1" };
+  return { responses: responses(parsed.responses ?? [], fail), services, expected: expected(parsed.expected ?? [], fail), env: env(parsed.env ?? {}, "env", fail), host: parsed.host ?? "127.0.0.1", session: "session" in parsed ? session(parsed.session, services, fail) : null };
+}
+
+function session(entry: unknown, services: PreviewService[], fail: Fail): PreviewSession {
+  if (!isObject(entry) || Object.keys(entry).some(key => !["cookie", "path", "secret"].includes(key))) fail("session takes cookie, path and secret");
+  const e = entry as Record<string, any>;
+  if (typeof e.cookie !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(e.cookie)) fail("session.cookie must be a cookie name");
+  const cookiePath = e.path ?? "/";
+  if (typeof cookiePath !== "string" || !/^\/[A-Za-z0-9._~%/-]{0,200}$/.test(cookiePath)) fail("session.path must be a cookie path");
+  // Only a value PSM generated for this run can sign the browser in; a declared literal would be a real credential in the repository.
+  if (typeof e.secret !== "string" || !services.some(service => service.secrets.includes(e.secret))) fail("session.secret must name a secret one of the services declares");
+  return { cookie: e.cookie, path: cookiePath, secret: e.secret };
 }
 
 function expected(list: unknown, fail: Fail): PreviewExpectation[] {

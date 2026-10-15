@@ -85,9 +85,15 @@ export async function downloadLockedPackage(resolved: string, integrity: string,
 
 /** One disposable dependency workspace per project and turn. No output is copied
  * back to the checkout; edits and lockfile changes still use repository tools. */
-/** Disposable data stores a preview service can ask for; each run starts empty. */
+/**
+ * Disposable data stores a preview service can ask for; each run starts empty.
+ * Mongo's defaults do not fit a 256 MB tmpfs that also counts against the
+ * container's memory: three preallocated 100 MB journal files fill it, and the
+ * next write (diagnostic capture, an index build) aborts the server. Small
+ * unpreallocated journal files, a small cache and no diagnostics keep it ~20 MB.
+ */
 const STORE_CONTAINERS = {
-  mongo: { image: () => process.env.PSM_MONGO_IMAGE || "mongo:7", memory: "512m", tmpfs: ["/data/db", "/data/configdb"], command: ["mongod", "--bind_ip_all", "--quiet"], env: { MONGODB_URI: "mongodb://mongo:27017/psm-preview" } },
+  mongo: { image: () => process.env.PSM_MONGO_IMAGE || "mongo:7", memory: "512m", tmpfs: ["/data/db", "/data/configdb"], command: ["mongod", "--bind_ip_all", "--quiet", "--setParameter", "diagnosticDataCollectionEnabled=false", "--wiredTigerCacheSizeGB", "0.25", "--wiredTigerEngineConfigString", "log=(file_max=20MB,prealloc=false)"], env: { MONGODB_URI: "mongodb://mongo:27017/psm-preview" } },
   redis: { image: () => process.env.PSM_REDIS_IMAGE || "redis:7-alpine", memory: "128m", tmpfs: ["/data"], command: ["redis-server", "--save", "", "--appendonly", "no"], env: { REDIS_URL: "redis://redis:6379" } },
 } as const;
 const HARDENED = ["--pull=never", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512"];
@@ -158,8 +164,8 @@ export class ManagedTaskRunner {
    * sandbox, execute app JavaScript and inspect each route inside the
    * container, then stop it. Nothing listens outside the container.
    */
-  preview(script: string, port: number, paths: string[], cwd = "."): Promise<string> { return this.serialize(() => this.runPreview(script, port, paths, cwd)); }
-  private async runPreview(script: string, port: number, paths: string[], cwd: string): Promise<string> {
+  preview(script: string, port: number, paths: string[], cwd = ".", signedIn = false): Promise<string> { return this.serialize(() => this.runPreview(script, port, paths, cwd, signedIn)); }
+  private async runPreview(script: string, port: number, paths: string[], cwd: string, signedIn: boolean): Promise<string> {
     this.store.check(this.repository.snapshot, "script.run");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(script)) throw new Error("Give the name of a script in package.json.");
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Give the port the script listens on (1024–65535).");
@@ -171,21 +177,26 @@ export class ManagedTaskRunner {
     const digest = this.sourceDigest;
     const args = /(?:^|\s)vite(?:\s|$)/.test(scripts[script]) ? ["--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [];
     const config = this.previewConfig(cwd);
+    if (signedIn && !config.session) throw new Error(`A signed-in check needs a session in ${PREVIEW_FIXTURE_FILE}: a cookie whose value is a secret a service declares, which its seed turns into a real session.`);
+    // Generated here rather than per service, so the browser's session cookie and the seed that honours it share one value.
+    const secrets = Object.fromEntries(config.services.flatMap(service => service.secrets).map(name => [name, randomBytes(32).toString("hex")]));
     this.repository.invalidateVerification(cwd, "preview");
-    const options = { host: config.host, expected: config.expected, services: config.services.map(service => ({ name: service.project, url: `http://${service.alias}:${service.port}${service.ready}` })) };
+    const session = signedIn && config.session ? { cookie: config.session.cookie, path: config.session.path, value: secrets[config.session.secret] } : undefined;
+    const options = { host: config.host, expected: config.expected, session, services: config.services.map(service => ({ name: service.project, url: `http://${service.alias}:${service.port}${service.ready}` })) };
     const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script), config.responses, options);
     const output = config.services.length
-      ? await this.withServices(config, network => this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true, { network, env: config.env }))
+      ? await this.withServices(config, secrets, network => this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true, { network, env: config.env }))
       : await this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true, { env: config.env });
     this.store.check(this.repository.snapshot, "script.run");
     // The probe exits nonzero on any page error. A listening server is not a pass.
-    this.repository.recordVerification(cwd, "preview", digest);
+    // Only a signed-out pass is recorded: a signed-in check is extra evidence, never a substitute for it.
+    if (!signedIn) this.repository.recordVerification(cwd, "preview", digest);
     return output;
   }
   /** Read from the checkout the digest covers, so editing a fixture makes an earlier pass stale. */
   private previewConfig(cwd: string): PreviewConfig {
     const file = this.packageFile(cwd, PREVIEW_FIXTURE_FILE);
-    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewConfig(this.repository.read(file)) : { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1" };
+    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewConfig(this.repository.read(file)) : { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null };
   }
   /**
    * Run declared backend services beside the app on a network with no route
@@ -194,7 +205,7 @@ export class ManagedTaskRunner {
    * never contains .env files. Stores start empty and secrets are generated
    * per run, so nothing real is reachable. Everything is removed afterwards.
    */
-  private async withServices<T>(config: PreviewConfig, run: (network: string) => Promise<T>): Promise<T> {
+  private async withServices<T>(config: PreviewConfig, secrets: Record<string, string>, run: (network: string) => Promise<T>): Promise<T> {
     const prepared = config.services.map(service => ({ service, repository: this.serviceRepository(service) }));
     const id = randomUUID().slice(0, 12);
     const network = `psm-task-${id}`;
@@ -218,7 +229,7 @@ export class ManagedTaskRunner {
         if (!fs.existsSync(modules)) throw new Error(`${service.project}/${service.directory} has no installed dependencies. Run npm install there on the PSM host, then check again.`);
         const env: Record<string, string> = { ...service.env, PORT: String(service.port), HOME: "/tmp", npm_config_cache: "/tmp/npm-cache" };
         for (const store of service.stores) Object.assign(env, STORE_CONTAINERS[store].env);
-        for (const secret of service.secrets) env[secret] = randomBytes(32).toString("hex");
+        for (const secret of service.secrets) env[secret] = secrets[secret];
         const target = service.directory === "." ? "/workspace" : `/workspace/${service.directory}`;
         // Mounted outside /workspace and linked in: a mount inside it would make Docker create its parents as root.
         const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); fs.mkdirSync(${JSON.stringify(target)},{recursive:true}); fs.symlinkSync('/deps/node_modules',${JSON.stringify(target + "/node_modules")}); process.chdir(${JSON.stringify(target)}); for (const seed of ${JSON.stringify(service.seed)}) { const r=cp.spawnSync('node',[seed],{stdio:'inherit'}); if (r.error||r.status!==0) { console.error('PSM preview seed failed: '+seed); process.exit(r.status||1); } } const child=cp.spawn('npm',['run',${JSON.stringify(service.script)}],{stdio:'inherit'}); child.on('exit',code=>process.exit(code??1)); for (const signal of ['SIGTERM','SIGINT']) process.on(signal,()=>child.kill(signal));`;
@@ -233,7 +244,11 @@ export class ManagedTaskRunner {
       try { return await run(network); }
       catch (error) {
         const logs: string[] = [];
-        for (const { service } of prepared) logs.push(`--- ${service.project} (last lines) ---\n${(await this.execute(["logs", "--tail", "40", `${network}-${service.alias}`]).catch(() => "")).trim()}`);
+        const stores = [...new Set(config.services.flatMap(service => service.stores))];
+        const sources: Array<[string, string, number]> = [...prepared.map(({ service }): [string, string, number] => [service.project, `${network}-${service.alias}`, 40]), ...stores.map((store): [string, string, number] => [store, `${network}-${store}`, 8])];
+        for (const [label, name, lines] of sources) {
+          logs.push(`--- ${label} (last lines) ---\n${(await this.execute(["logs", "--tail", String(lines), name]).catch(() => "")).trim()}`);
+        }
         throw new Error(`${error instanceof Error ? error.message : String(error)}\n${logs.join("\n")}`);
       }
     } finally {

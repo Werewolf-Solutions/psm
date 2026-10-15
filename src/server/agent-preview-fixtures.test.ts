@@ -52,7 +52,7 @@ test("a v2 file declares a real backend service with stores, generated secrets a
   assert.equal(config.host, "localhost");
   assert.deepEqual(config.services, [{ ...api, alias: "werewolf-dapp", ready: "/", env: { NODE_ENV: "development" }, secrets: ["JWT_SECRET"], stores: ["mongo", "redis"], seed: ["scripts/preview-seed.js"] }]);
   assert.deepEqual(config.expected, [{ method: "POST", path: "/api/v1/apps/todo/auth/refresh", status: 401 }]);
-  assert.deepEqual(parsePreviewConfig(file([])), { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1" }, "v1 files keep working");
+  assert.deepEqual(parsePreviewConfig(file([])), { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null }, "v1 files keep working");
 });
 
 test("a v2 file cannot reach real data, reserved variables or paths outside the service", () => {
@@ -77,4 +77,15 @@ test("the probe loads the app by the declared host and waits for services before
   assert.match(probe, /const origin = 'http:\/\/localhost:5200';/);
   assert.match(probe, /const local = 'http:\/\/127\.0\.0\.1:5200';/);
   assert.ok(probe.indexOf("for (const service of services)") < probe.indexOf("chromium.launch"));
+});
+
+test("a signed-in session cookie can only carry a secret PSM generates for a declared service", () => {
+  const withSecret = { ...api, secrets: ["PREVIEW_SESSION_TOKEN"] };
+  assert.deepEqual(parsePreviewConfig(v2({ services: [withSecret], session: { cookie: "ws_app_rt_todo", path: "/api/v1/apps/todo/auth", secret: "PREVIEW_SESSION_TOKEN" } })).session,
+    { cookie: "ws_app_rt_todo", path: "/api/v1/apps/todo/auth", secret: "PREVIEW_SESSION_TOKEN" });
+  for (const [text, message] of [
+    [v2({ services: [api], session: { cookie: "rt", secret: "PREVIEW_SESSION_TOKEN" } }), /secret one of the services declares/],
+    [v2({ services: [withSecret], session: { cookie: "rt", secret: "PREVIEW_SESSION_TOKEN", value: "real-token" } }), /session takes cookie, path and secret/],
+    [v2({ services: [withSecret], session: { cookie: "a b", secret: "PREVIEW_SESSION_TOKEN" } }), /cookie name/],
+  ] as const) assert.throws(() => parsePreviewConfig(text), message);
 });

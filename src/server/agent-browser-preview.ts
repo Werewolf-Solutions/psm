@@ -8,6 +8,8 @@ export interface ProbeOptions {
   services?: Array<{ name: string; url: string }>;
   /** Real 4xx answers the repository declared as normal; each one used is reported. */
   expected?: PreviewExpectation[];
+  /** A signed-in check: this cookie is set before the first route and the jar carries from route to route. */
+  session?: { cookie: string; path: string; value: string };
 }
 export function browserPreviewProbe(script: string, port: number, paths: string[], args: string[], build = false, fixtures: PreviewFixture[] = [], options: ProbeOptions = {}): string {
   return String.raw`
@@ -18,6 +20,7 @@ const origin = 'http://${options.host ?? "127.0.0.1"}:${port}';
 const fixtures = ${JSON.stringify(fixtures)};
 const services = ${JSON.stringify(options.services ?? [])};
 const expected = ${JSON.stringify(options.expected ?? [])};
+const session = ${JSON.stringify(options.session ?? null)};
 const server = cp.spawn('npm', ['run', ${JSON.stringify(script)}, ...${JSON.stringify(args)}], {
   detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, PORT: '${port}', HOST: '127.0.0.1', BROWSER: 'none' }
@@ -52,8 +55,12 @@ let browser;
     }
     if (!report.listening) throw new Error('The preview server did not start on port ${port}.');
     browser = await chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] });
+    // A session token rotates on use, so each route starts from the jar the previous one left, as a person's browser would.
+    let jar = session ? [{ name: session.cookie, value: session.value, domain: new URL(origin).hostname, path: session.path, httpOnly: true, secure: false, sameSite: 'Lax', expires: -1 }] : [];
+    report.signedIn = !!session;
     for (const route of ${JSON.stringify(paths)}) {
       const context = await browser.newContext({ serviceWorkers: 'block' });
+      if (jar.length) await context.addCookies(jar);
       // A declared fixture answers the app's own API call; its status is the repository's choice, not a failure.
       const answered = new Set();
       const used = [];
@@ -98,6 +105,7 @@ let browser;
         if (!response || response.status() >= 400) addError('Page navigation failed.');
       } catch (e) { addError(String(e)); }
       report.results.push(result);
+      jar = (await context.storageState()).cookies;
       await context.close();
     }
     report.verified = report.results.length > 0 && report.results.every(r => !r.errors.length);
