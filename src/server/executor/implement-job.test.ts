@@ -41,11 +41,15 @@ const job = (over: Partial<ImplementJob> = {}): ImplementJob => ({
 
 function deps(fx: ReturnType<typeof repo>, runAgent: ImplementDeps["runAgent"], activity = new ExecutorActivity()): ImplementDeps {
   return {
-    findProject: (id) => (id === "prj_a" ? { id, name: "real", path: fx.real } : null),
+    findProject: (id) => (id === "prj_a" ? { id, name: "real", path: fx.real, workspaceId: "business:0123456789abcdef01234567" } : null),
     jobsDir: fx.jobsDir,
     store: {} as never,
-    workspaceRules: () => [],
-    protectedRoots: [],
+    workspaceRules: (workspaceId) => {
+      assert.equal(workspaceId, "business:0123456789abcdef01234567");
+      return [];
+    },
+    // The default jobs directory is under PSM's own protected code root.
+    protectedRoots: [fx.root],
     runAgent,
     selectModel: async () => ({ engine: "claude", model: "test-sonnet", effort: null, reason: "test" }),
     activity,
@@ -67,7 +71,12 @@ test("a job works in its own clone on psm/job/<id>, commits, and goes to review;
     assert.equal(fs.existsSync(path.join(cwd, "uncommitted.txt")), false, "a job starts from your last commit, not your working tree");
     event(tool("t1", "run_tests", { script: "test" }));
     event(result("t1", false, "ok 1 - rolls"));
-    fs.writeFileSync(path.join(cwd, "server.js"), "listen(firstFree(3000))\n");
+    const tools = new RepositoryTools(policy.snapshots[0], policy.checker!, policy.protectedRoots);
+    assert.deepEqual(tools.list(), ["server.js"]);
+    assert.equal(tools.read("server.js"), "listen(3000)\n");
+    assert.throws(() => tools.read("../outside"), PermissionError);
+    assert.throws(() => tools.write(".psm/permissions.json", "{}"), PermissionError);
+    tools.write("server.js", "listen(firstFree(3000))\n");
     jobGit(cwd, ["commit", "-q", "-am", "Roll to the next free port"]);
     event({ type: "assistant", message: { content: [{ type: "text", text: "Done: the server now rolls to the next free port." }] } });
   }, activity));

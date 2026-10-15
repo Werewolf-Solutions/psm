@@ -27,6 +27,7 @@ import { implementJobRunner } from "./implement-job.ts";
 import { triageJobRunner } from "./triage-job.ts";
 import { ExecutorActivity } from "./activity.ts";
 import { statePath } from "../../store.ts";
+import { loadState as loadWorkspaceState, projectWorkspaceRef } from "../workspaces.ts";
 
 export interface ExecutorStatus {
   enabled: boolean;
@@ -168,7 +169,7 @@ function launch(): { stop: () => Promise<void> } {
   const runImplementJob = implementJobRunner({
     findProject: (projectId) => {
       const project = getProjects().find((candidate) => candidate.id === projectId);
-      return project ? { id: projectId, name: project.name, path: project.path } : null;
+      return project ? { id: projectId, name: project.name, path: project.path, workspaceId: projectWorkspaceRef(loadWorkspaceState(), projectId) } : null;
     },
     jobsDir: jobsDirectory(),
     store: permissions,

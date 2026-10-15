@@ -245,7 +245,14 @@ export function implementJobRunner(deps: ImplementDeps) {
       checker: new JobPermissions(job.jobId, deps.workspaceRules),
       profile: "implement",
       snapshots: [jobSnapshot(project, realDir, job.jobId)],
-      protectedRoots: deps.protectedRoots,
+      // RepositoryTools already confines every relative path to this ordinary
+      // clone and rejects symlinks and traversal. The default jobs directory
+      // lives under PSM_CODE_ROOT, so an ancestor guard would otherwise make
+      // every file in the clone look like protected PSM authority.
+      protectedRoots: deps.protectedRoots.filter((root) => {
+        const resolved = path.resolve(root);
+        return realDir !== resolved && !realDir.startsWith(resolved + path.sep);
+      }),
       projectBoundaries: [],
     };
     let chosen: ResolvedJobModel;
