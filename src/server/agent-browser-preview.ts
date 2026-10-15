@@ -1,12 +1,23 @@
-import type { PreviewFixture } from "./agent-preview-fixtures.ts";
+import type { PreviewExpectation, PreviewFixture } from "./agent-preview-fixtures.ts";
 
 /** Runs inside the disposable browser container, never against the host dev server. */
-export function browserPreviewProbe(script: string, port: number, paths: string[], args: string[], build = false, fixtures: PreviewFixture[] = []): string {
+export interface ProbeOptions {
+  /** The hostname the browser loads the app by; apps that check Origin may require localhost. */
+  host?: "127.0.0.1" | "localhost";
+  /** Backend services on the task network; no page loads until each answers. */
+  services?: Array<{ name: string; url: string }>;
+  /** Real 4xx answers the repository declared as normal; each one used is reported. */
+  expected?: PreviewExpectation[];
+}
+export function browserPreviewProbe(script: string, port: number, paths: string[], args: string[], build = false, fixtures: PreviewFixture[] = [], options: ProbeOptions = {}): string {
   return String.raw`
 const cp = require('child_process');
 if (${build}) { const built = cp.spawnSync('npm', ['run', 'build'], { stdio: 'inherit' }); if (built.error || built.status !== 0) process.exit(1); }
-const origin = 'http://127.0.0.1:${port}';
+const local = 'http://127.0.0.1:${port}';
+const origin = 'http://${options.host ?? "127.0.0.1"}:${port}';
 const fixtures = ${JSON.stringify(fixtures)};
+const services = ${JSON.stringify(options.services ?? [])};
+const expected = ${JSON.stringify(options.expected ?? [])};
 const server = cp.spawn('npm', ['run', ${JSON.stringify(script)}, ...${JSON.stringify(args)}], {
   detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   env: { ...process.env, PORT: '${port}', HOST: '127.0.0.1', BROWSER: 'none' }
@@ -18,14 +29,24 @@ server.on('error', e => log = (log + String(e)).slice(-4000));
 const stop = () => { try { process.kill(-server.pid, 'SIGKILL'); } catch {} };
 let browser;
 (async () => {
-  const report = { verified: false, listening: false, results: [], serverLog: '' };
+  const report = { verified: false, listening: false, services: [], results: [], serverLog: '' };
   try {
+    for (const service of services) {
+      const started = Date.now();
+      let answered = null;
+      while (Date.now() - started < 120000 && answered === null) {
+        try { const r = await fetch(service.url, { signal: AbortSignal.timeout(2000) }); if (r.status < 500) answered = r.status; else await new Promise(r => setTimeout(r, 500)); }
+        catch { await new Promise(r => setTimeout(r, 500)); }
+      }
+      report.services.push({ name: service.name, ready: answered !== null, status: answered, seconds: Math.round((Date.now() - started) / 1000) });
+      if (answered === null) throw new Error('Service ' + service.name + ' did not answer ' + service.url + ' within 120 seconds.');
+    }
     let chromium;
     try { ({ chromium } = require('/opt/psm-browser/node_modules/playwright')); }
     catch { throw new Error('Browser verification unavailable. Build scripts/task-browser.Dockerfile as psm-task-browser:1.64.0, or set PSM_BROWSER_IMAGE to an image with /opt/psm-browser/node_modules/playwright and Chromium.'); }
     const deadline = Date.now() + 30000;
     while (Date.now() < deadline && !report.listening) {
-      try { await fetch(origin + '/', { signal: AbortSignal.timeout(1000) }); report.listening = true; }
+      try { await fetch(local + '/', { signal: AbortSignal.timeout(1000) }); report.listening = true; }
       catch { await new Promise(r => setTimeout(r, 250)); }
       if (server.exitCode !== null) break;
     }
@@ -51,7 +72,12 @@ let browser;
       const addError = message => { if (errors.length < 20) errors.push(String(message).slice(0, 1000)); };
       page.on('pageerror', e => addError(e.message));
       page.on('console', m => { if (m.type() === 'error' && !(answered.has(m.location().url) && m.text().startsWith('Failed to load resource'))) addError(m.text()); });
-      page.on('response', r => { if (r.url().startsWith(origin + '/') && r.status() >= 400 && !answered.has(r.url()) && !r.url().endsWith('/favicon.ico')) addError('HTTP ' + r.status() + ': ' + r.url()); });
+      page.on('response', r => {
+        const url = new URL(r.url());
+        const match = ['fetch', 'xhr'].includes(r.request().resourceType()) && expected.find(e => e.method === r.request().method() && e.path === url.pathname && e.status === r.status());
+        if (match) { answered.add(r.url()); const label = 'expected ' + match.method + ' ' + match.path + ' -> ' + match.status; if (!used.includes(label)) used.push(label); return; }
+        if (r.url().startsWith(origin + '/') && r.status() >= 400 && !answered.has(r.url()) && !r.url().endsWith('/favicon.ico')) addError('HTTP ' + r.status() + ': ' + r.url());
+      });
       page.on('requestfailed', r => { if (r.url().startsWith(origin + '/') && !r.url().endsWith('/favicon.ico')) addError('Request failed: ' + r.url()); });
       let result = { path: route, status: null, type: null, body: '', fixtures: used, errors };
       try {

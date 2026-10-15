@@ -4,12 +4,15 @@ import { createHash } from "node:crypto";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
 
 const ASSET = /\.(?:jpe?g|png|webp|gif|avif|ico|svg|woff2?|ttf|otf|mp4|webm|mp3|ogg|wav)$/i;
+/** Never copied, even when a project forgets to ignore them: the sandbox gets only generated values. */
+const SECRET = /(?:^|\/)\.env(?:\.(?!example$|sample$|template$)[^/]*)?$/;
 const OUTPUT = /(?:^|\/)(?:node_modules|vendor|dist|build|\.next|coverage)(?:\/|$)/;
 /** Hash every input, including assets, without retaining the whole project in memory. */
-export function taskInputs(repository: RepositoryTools, destination?: string) {
+export function taskInputs(repository: RepositoryTools, destination?: string, directory = ".") {
   const hash = createHash("sha256");
   let total = 0;
-  const files = repository.taskFiles().filter(file => !OUTPUT.test(file) && !file.startsWith(".psm/") && !file.startsWith(".psm-")).sort();
+  const within = directory === "." ? "" : `${directory.replace(/\/+$/, "")}/`;
+  const files = repository.taskFiles().filter(file => file.startsWith(within) && !OUTPUT.test(file) && !SECRET.test(file) && !file.startsWith(".psm/") && !file.startsWith(".psm-")).sort();
   const entries = files.map(file => {
     const source = repository.resolve(file);
     const stat = fs.statSync(source);

@@ -215,3 +215,98 @@ test("nested installs coexist and their builds record verification only on succe
   assert.equal(repo.verificationStatus().verified, false);
   await assert.rejects(runner.install("../outside"), /repository-relative|protected/);
 });
+
+test("preview services run on an internal network from .env-free snapshots, with fresh stores and secrets, and are always removed", async (t) => {
+  const h = fixture(t);
+  h.store.change(h.project, "script.run", true, h.store.snapshot(h.project).revision, "operator");
+  fs.writeFileSync(path.join(h.directory, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+  fs.writeFileSync(path.join(h.directory, "psm-preview.json"), JSON.stringify({
+    schema: "psm.werewolf.solutions/preview/v2", host: "localhost", env: { VITE_API_TARGET: "http://api:3000" },
+    services: [{ project: "api", directory: "server", script: "dev", port: 3000, alias: "api", stores: ["mongo"], secrets: ["JWT_SECRET"], env: { NODE_ENV: "development" }, seed: ["scripts/seed.js"] }],
+    expected: [{ method: "POST", path: "/api/refresh", status: 401 }],
+  }));
+  const apiDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-api-"));
+  t.after(() => fs.rmSync(apiDirectory, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(apiDirectory, "server/node_modules/dep"), { recursive: true });
+  fs.mkdirSync(path.join(apiDirectory, "server/scripts"));
+  fs.writeFileSync(path.join(apiDirectory, "server/package.json"), JSON.stringify({ scripts: { dev: "node index.js" } }));
+  fs.writeFileSync(path.join(apiDirectory, "server/index.js"), "");
+  fs.writeFileSync(path.join(apiDirectory, "server/scripts/seed.js"), "");
+  fs.writeFileSync(path.join(apiDirectory, "server/.env"), "MONGODB_URI=mongodb://real/prod");
+  fs.writeFileSync(path.join(apiDirectory, "server/.env.local"), "JWT_SECRET=real");
+  fs.writeFileSync(path.join(apiDirectory, "client.js"), "outside the service directory");
+  const apiProject = { id: "prj_api", name: "api", path: apiDirectory };
+  const apiRepo = new RepositoryTools(h.store.snapshot(apiProject), h.store);
+  const calls: string[][] = [];
+  let failProbe = false;
+  const executor: TaskExecutor = async (args) => {
+    calls.push(args);
+    if (args[0] === "run" && args.includes("api")) {
+      const source = args.find((arg) => arg.endsWith("target=/source,readonly"))!.split("source=")[1].split(",target=")[0];
+      assert.ok(fs.existsSync(path.join(source, "server/index.js")));
+      for (const secret of ["server/.env", "server/.env.local", "client.js"]) assert.ok(!fs.existsSync(path.join(source, secret)), `${secret} never reaches a service`);
+    }
+    if (args[0] === "run" && args.includes("--rm") && failProbe) throw new Error("Sandbox task failed: probe");
+    if (args[0] === "logs") return "api log line";
+    return "{\"verified\": true}";
+  };
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, executor, undefined, (name) => name === "api" ? apiRepo : undefined);
+  t.after(() => runner.close());
+
+  await assert.rejects(runner.preview("dev", 5200, ["/"]), /not allowed|permission/i, "the service project needs its own grants");
+  assert.equal(calls.length, 0, "nothing starts before every service is authorised");
+  for (const permission of ["repo.read", "script.run"]) h.store.change(apiProject, permission, true, h.store.snapshot(apiProject).revision, "operator");
+  const apiRepoGranted = new RepositoryTools(h.store.snapshot(apiProject), h.store);
+  const granted = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, executor, undefined, (name) => name === "api" ? apiRepoGranted : undefined);
+  t.after(() => granted.close());
+
+  await granted.preview("dev", 5200, ["/"]);
+  const network = calls[0];
+  assert.deepEqual(network.slice(0, 3), ["network", "create", "--internal"]);
+  const name = network[3];
+  const runs = calls.filter((args) => args[0] === "run");
+  assert.equal(runs.length, 3, "mongo, the api and the browser");
+  for (const args of runs) {
+    assert.ok(args.includes(`--network=${name}`));
+    for (const flag of ["--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges"]) assert.ok(args.includes(flag), flag);
+  }
+  const [mongo, api, browser] = runs;
+  assert.ok(mongo.includes("mongo") && mongo.some((arg) => arg.startsWith("/data/db:")));
+  const env = (args: string[]) => Object.fromEntries(args.flatMap((arg, i) => args[i - 1] === "--env" ? [arg.split(/=(.*)/s).slice(0, 2)] : []));
+  const apiEnv = env(api);
+  assert.equal(apiEnv.PORT, "3000");
+  assert.equal(apiEnv.MONGODB_URI, "mongodb://mongo:27017/psm-preview");
+  assert.equal(apiEnv.NODE_ENV, "development");
+  assert.match(apiEnv.JWT_SECRET, /^[0-9a-f]{64}$/);
+  assert.ok(api.some((arg) => arg === `type=bind,source=${path.join(apiDirectory, "server/node_modules")},target=/deps/node_modules,readonly`));
+  assert.match(api.at(-1)!, /scripts\/seed\.js/);
+  assert.match(api.at(-1)!, /symlinkSync\('\/deps\/node_modules',"\/workspace\/server\/node_modules"\)/);
+  assert.equal(env(browser).VITE_API_TARGET, "http://api:3000");
+  assert.match(browser.at(-1)!, /const origin = 'http:\/\/localhost:5200'/);
+  assert.match(browser.at(-1)!, /http:\/\/api:3000\//);
+  const removed = (from: number) => calls.slice(from).filter((args) => args[0] === "rm").map((args) => args[2]);
+  assert.deepEqual(removed(0).filter((entry) => entry.startsWith(name)).sort(), [`${name}-api`, `${name}-mongo`]);
+  assert.deepEqual(calls.at(-1), ["network", "rm", name]);
+
+  const first = calls.length;
+  await granted.preview("dev", 5200, ["/"]);
+  assert.notEqual(env(calls.slice(first).filter((args) => args[0] === "run")[1]).JWT_SECRET, apiEnv.JWT_SECRET, "secrets are new every run");
+
+  const before = calls.length;
+  failProbe = true;
+  await assert.rejects(granted.preview("dev", 5200, ["/"]), /probe[\s\S]*api log line/, "a failure carries the service's last log lines");
+  const failed = calls.slice(before);
+  assert.equal(failed.filter((args) => args[0] === "rm" && args[2].startsWith(failed[0][3])).length, 2);
+  assert.deepEqual(failed.at(-1)!.slice(0, 2), ["network", "rm"]);
+});
+
+test("a preview service outside the task's scope is refused before anything starts", async (t) => {
+  const h = fixture(t); const calls: string[][] = [];
+  h.store.change(h.project, "script.run", true, h.store.snapshot(h.project).revision, "operator");
+  fs.writeFileSync(path.join(h.directory, "package.json"), JSON.stringify({ scripts: { dev: "vite" } }));
+  fs.writeFileSync(path.join(h.directory, "psm-preview.json"), JSON.stringify({ schema: "psm.werewolf.solutions/preview/v2", services: [{ project: "werewolf-dapp", script: "dev", port: 3000 }] }));
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => { calls.push(args); return ""; });
+  t.after(() => runner.close());
+  await assert.rejects(runner.preview("dev", 5200, ["/"]), /werewolf-dapp is not in this task's scope/);
+  assert.equal(calls.length, 0);
+});

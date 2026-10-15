@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-15",
+  "psmSource": "799c58c-based dev working tree plus uncommitted P14 Phase A2-A4 (psm-preview.json v2 services) - not committed",
+  "subject": "todo-app 45454a3 (0.6.6) client, with client/psm-preview.json v2 added (uncommitted); werewolf-dapp e4c267a working tree server, with server/scripts/preview-seed.js added (uncommitted)",
+  "method": "ManagedTaskRunner driven directly (no provider agent turn). todo-app granted repo.read, script.run, pkg.install; werewolf-dapp granted repo.read, script.run. Client dependencies installed through the brokered lockfile path. preview_check('dev', 5200, five routes, 'client').",
+  "sandbox": {
+    "network": "docker network create --internal (no route out)",
+    "containers": ["mongo:7 (tmpfs, empty)", "redis:7-alpine (no persistence)", "werewolf-dapp server: node:22-bookworm-slim, npm run dev, PORT=3000, NODE_ENV=development, .env-free snapshot of server/, host node_modules read-only at /deps, four JWT secrets generated per run, seeded by scripts/preview-seed.js", "psm-task-browser:1.64.0 running Vite with VITE_API_TARGET=http://werewolf-dapp:3000"],
+    "origin": "http://localhost:5200 (dapp's exact-match registered development origin; 127.0.0.1 gets 403)",
+    "cleanup": "no psm-task-* containers or networks remained afterwards"
+  },
+  "result": {
+    "verified": true,
+    "fixturesUsed": "none",
+    "routes": {
+      "/": "verified; signed-out page; real POST /api/v1/apps/todo/auth/refresh -> 401 (declared expected)",
+      "/objectives": "verified; same",
+      "/notes": "verified; same",
+      "/backlog": "verified; same",
+      "/auth/callback": "verified; shows 'This sign-in did not start here. Try again.'"
+    },
+    "durationSeconds": 30,
+    "note": "A first attempt failed: mounting node_modules inside /workspace/server made Docker create server/ as root, so the source copy was refused. Fixed by mounting at /deps/node_modules and symlinking."
+  },
+  "checks": {
+    "typecheck": "pass",
+    "npm test": "848 tests, 841 pass, 0 fail, 7 skipped",
+    "PSM_RUNNER_DOCKER=1 agent-task-runner.docker.test.ts": "4 pass, including the new real-service test (seeded, no .env, generated secret, redis reachable, egress blocked, nothing left behind)"
+  },
+  "notCovered": [
+    "Signed-in journeys (A5): need a seeded user and a session the browser can hold",
+    "A provider-driven managed agent turn calling preview_check with both projects in scope",
+    "Nothing is committed in psm, todo-app or werewolf-dapp"
+  ]
+}

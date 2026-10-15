@@ -1,11 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { taskInputs } from "./agent-task-inputs.ts";
 import { browserPreviewProbe } from "./agent-browser-preview.ts";
-import { PREVIEW_FIXTURE_FILE, parsePreviewFixtures, type PreviewFixture } from "./agent-preview-fixtures.ts";
+import { PREVIEW_FIXTURE_FILE, parsePreviewConfig, type PreviewConfig, type PreviewService } from "./agent-preview-fixtures.ts";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
 import type { AgentPermissionStore } from "./agent-permissions.ts";
 
@@ -85,6 +85,16 @@ export async function downloadLockedPackage(resolved: string, integrity: string,
 
 /** One disposable dependency workspace per project and turn. No output is copied
  * back to the checkout; edits and lockfile changes still use repository tools. */
+/** Disposable data stores a preview service can ask for; each run starts empty. */
+const STORE_CONTAINERS = {
+  mongo: { image: () => process.env.PSM_MONGO_IMAGE || "mongo:7", memory: "512m", tmpfs: ["/data/db", "/data/configdb"], command: ["mongod", "--bind_ip_all", "--quiet"], env: { MONGODB_URI: "mongodb://mongo:27017/psm-preview" } },
+  redis: { image: () => process.env.PSM_REDIS_IMAGE || "redis:7-alpine", memory: "128m", tmpfs: ["/data"], command: ["redis-server", "--save", "", "--appendonly", "no"], env: { REDIS_URL: "redis://redis:6379" } },
+} as const;
+const HARDENED = ["--pull=never", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512"];
+
+/** Finds another project in the task's scope by its registered name. */
+export type ProjectLookup = (name: string) => RepositoryTools | undefined;
+
 export class ManagedTaskRunner {
   private directory: string | null = null;
   private sourceDigest = "";
@@ -96,7 +106,8 @@ export class ManagedTaskRunner {
   }
   constructor(private readonly repository: RepositoryTools, private readonly store: AgentPermissionStore, private readonly signal: AbortSignal,
     private readonly execute: TaskExecutor = dockerTaskExecutor,
-    private readonly download: typeof downloadLockedPackage = downloadLockedPackage) {}
+    private readonly download: typeof downloadLockedPackage = downloadLockedPackage,
+    private readonly findProject: ProjectLookup = () => undefined) {}
   private snapshot(): string {
     this.store.check(this.repository.snapshot, "repo.read");
     const { digest } = taskInputs(this.repository);
@@ -108,14 +119,14 @@ export class ManagedTaskRunner {
     this.sourceDigest = taskInputs(this.repository, path.join(this.directory, "workspace")).digest;
     return this.directory;
   }
-  private async container(directory: string, command: string[], install = false, cwd = ".", browser = false): Promise<string> {
+  private async container(directory: string, command: string[], install = false, cwd = ".", browser = false, extra: { network?: string; env?: Record<string, string> } = {}): Promise<string> {
     if (this.signal.aborted) throw new Error("This turn was stopped.");
     const name = `psm-task-${randomUUID()}`;
     const image = browser ? (process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0") : (process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim");
     const installs = install ? [...this.packagesReady].map(dir => ({ command: ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd: dir })) : [];
     const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...installs, { command, cwd }])}; for(const {command:[cmd,...args],cwd} of commands){const result=cp.spawnSync(cmd,args,{cwd:require('path').join('/workspace',cwd),stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
     try {
-      return await this.execute(["run", "--name", name, "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", image, "node", "-e", bootstrap], this.signal);
+      return await this.execute(["run", "--name", name, "--rm", "--pull=never", `--network=${extra.network ?? "none"}`, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", ...Object.entries(extra.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]), image, "node", "-e", bootstrap], this.signal);
     } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
   }
   tests(script = "test"): Promise<string> { return this.serialize(() => this.runTests(script)); }
@@ -159,18 +170,88 @@ export class ManagedTaskRunner {
     const directory = this.snapshot();
     const digest = this.sourceDigest;
     const args = /(?:^|\s)vite(?:\s|$)/.test(scripts[script]) ? ["--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [];
+    const config = this.previewConfig(cwd);
     this.repository.invalidateVerification(cwd, "preview");
-    const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script), this.previewFixtures(cwd));
-    const output = await this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true);
+    const options = { host: config.host, expected: config.expected, services: config.services.map(service => ({ name: service.project, url: `http://${service.alias}:${service.port}${service.ready}` })) };
+    const probe = browserPreviewProbe(script, port, wanted, args, typeof scripts.build === "string" && ["preview", "start"].includes(script), config.responses, options);
+    const output = config.services.length
+      ? await this.withServices(config, network => this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true, { network, env: config.env }))
+      : await this.container(directory, ["node", "-e", probe], this.packagesReady.size > 0, cwd, true, { env: config.env });
     this.store.check(this.repository.snapshot, "script.run");
     // The probe exits nonzero on any page error. A listening server is not a pass.
     this.repository.recordVerification(cwd, "preview", digest);
     return output;
   }
   /** Read from the checkout the digest covers, so editing a fixture makes an earlier pass stale. */
-  private previewFixtures(cwd: string): PreviewFixture[] {
+  private previewConfig(cwd: string): PreviewConfig {
     const file = this.packageFile(cwd, PREVIEW_FIXTURE_FILE);
-    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewFixtures(this.repository.read(file)) : [];
+    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewConfig(this.repository.read(file)) : { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1" };
+  }
+  /**
+   * Run declared backend services beside the app on a network with no route
+   * out. Each service is another project in the task's scope, needs that
+   * project's own repo.read and script.run, and runs from a snapshot that
+   * never contains .env files. Stores start empty and secrets are generated
+   * per run, so nothing real is reachable. Everything is removed afterwards.
+   */
+  private async withServices<T>(config: PreviewConfig, run: (network: string) => Promise<T>): Promise<T> {
+    const prepared = config.services.map(service => ({ service, repository: this.serviceRepository(service) }));
+    const id = randomUUID().slice(0, 12);
+    const network = `psm-task-${id}`;
+    const containers: string[] = [];
+    const directories: string[] = [];
+    const uid = `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`;
+    await this.execute(["network", "create", "--internal", network], this.signal);
+    try {
+      for (const store of [...new Set(config.services.flatMap(service => service.stores))]) {
+        const spec = STORE_CONTAINERS[store];
+        const name = `${network}-${store}`;
+        containers.push(name);
+        await this.execute(["run", "-d", "--name", name, `--network=${network}`, "--network-alias", store, ...HARDENED, `--memory=${spec.memory}`, "--user", uid,
+          ...spec.tmpfs.flatMap(target => ["--tmpfs", `${target}:rw,nosuid,nodev,size=256m,mode=1777`]), "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777", spec.image(), ...spec.command], this.signal);
+      }
+      for (const { service, repository } of prepared) {
+        const source = fs.mkdtempSync(path.join(os.tmpdir(), "psm-service-"));
+        directories.push(source);
+        taskInputs(repository, source, service.directory);
+        const modules = path.join(repository.snapshot.project.path, service.directory, "node_modules");
+        if (!fs.existsSync(modules)) throw new Error(`${service.project}/${service.directory} has no installed dependencies. Run npm install there on the PSM host, then check again.`);
+        const env: Record<string, string> = { ...service.env, PORT: String(service.port), HOME: "/tmp", npm_config_cache: "/tmp/npm-cache" };
+        for (const store of service.stores) Object.assign(env, STORE_CONTAINERS[store].env);
+        for (const secret of service.secrets) env[secret] = randomBytes(32).toString("hex");
+        const target = service.directory === "." ? "/workspace" : `/workspace/${service.directory}`;
+        // Mounted outside /workspace and linked in: a mount inside it would make Docker create its parents as root.
+        const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); fs.mkdirSync(${JSON.stringify(target)},{recursive:true}); fs.symlinkSync('/deps/node_modules',${JSON.stringify(target + "/node_modules")}); process.chdir(${JSON.stringify(target)}); for (const seed of ${JSON.stringify(service.seed)}) { const r=cp.spawnSync('node',[seed],{stdio:'inherit'}); if (r.error||r.status!==0) { console.error('PSM preview seed failed: '+seed); process.exit(r.status||1); } } const child=cp.spawn('npm',['run',${JSON.stringify(service.script)}],{stdio:'inherit'}); child.on('exit',code=>process.exit(code??1)); for (const signal of ['SIGTERM','SIGINT']) process.on(signal,()=>child.kill(signal));`;
+        const name = `${network}-${service.alias}`;
+        containers.push(name);
+        await this.execute(["run", "-d", "--name", name, `--network=${network}`, "--network-alias", service.alias, ...HARDENED, "--memory=1g", "--cpus=1", "--user", uid,
+          "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777",
+          "--mount", `type=bind,source=${source},target=/source,readonly`, "--mount", `type=bind,source=${modules},target=/deps/node_modules,readonly`,
+          "--workdir", "/workspace", ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+          process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim", "node", "-e", bootstrap], this.signal);
+      }
+      try { return await run(network); }
+      catch (error) {
+        const logs: string[] = [];
+        for (const { service } of prepared) logs.push(`--- ${service.project} (last lines) ---\n${(await this.execute(["logs", "--tail", "40", `${network}-${service.alias}`]).catch(() => "")).trim()}`);
+        throw new Error(`${error instanceof Error ? error.message : String(error)}\n${logs.join("\n")}`);
+      }
+    } finally {
+      for (const name of containers) await this.execute(["rm", "-f", name]).catch(() => {});
+      await this.execute(["network", "rm", network]).catch(() => {});
+      for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  private serviceRepository(service: PreviewService): RepositoryTools {
+    const repository = this.findProject(service.project);
+    if (!repository) throw new Error(`${PREVIEW_FIXTURE_FILE} needs ${service.project} running beside this app, but ${service.project} is not in this task's scope. Add it to the workroom, then check again.`);
+    this.store.check(repository.snapshot, "repo.read");
+    this.store.check(repository.snapshot, "script.run");
+    if (service.directory !== ".") repository.resolve(service.directory);
+    let scripts: Record<string, unknown> = {};
+    try { scripts = JSON.parse(repository.read(service.directory === "." ? "package.json" : `${service.directory}/package.json`)).scripts ?? {}; } catch { throw new Error(`${service.project}/${service.directory} has no readable package.json.`); }
+    if (typeof scripts[service.script] !== "string") throw new Error(`${service.project}/${service.directory} has no script named ${service.script}.`);
+    return repository;
   }
   private packageFile(cwd: string, name: string): string {
     if (cwd === ".") return name;

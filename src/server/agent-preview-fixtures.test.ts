@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PREVIEW_FIXTURE_SCHEMA, parsePreviewFixtures } from "./agent-preview-fixtures.ts";
+import { PREVIEW_FIXTURE_SCHEMA, PREVIEW_SCHEMA, parsePreviewConfig, parsePreviewFixtures } from "./agent-preview-fixtures.ts";
 import { browserPreviewProbe } from "./agent-browser-preview.ts";
 
 const file = (responses: unknown, extra: object = {}) => JSON.stringify({ schema: PREVIEW_FIXTURE_SCHEMA, responses, ...extra });
@@ -37,4 +37,44 @@ test("the browser probe embeds fixtures as data and answers only fetch and XHR r
   assert.doesNotThrow(() => new Function("require", "process", probe));
   assert.match(probe, /\['fetch', 'xhr'\]\.includes/);
   assert.match(browserPreviewProbe("dev", 4173, ["/"], []), /const fixtures = \[\];/);
+});
+
+const v2 = (extra: object) => JSON.stringify({ schema: PREVIEW_SCHEMA, ...extra });
+const api = { project: "werewolf-dapp", directory: "server", script: "dev", port: 3000 };
+
+test("a v2 file declares a real backend service with stores, generated secrets and expected answers", () => {
+  const config = parsePreviewConfig(v2({
+    host: "localhost",
+    env: { VITE_API_TARGET: "http://werewolf-dapp:3000" },
+    services: [{ ...api, env: { NODE_ENV: "development" }, secrets: ["JWT_SECRET"], stores: ["mongo", "redis"], seed: ["scripts/preview-seed.js"] }],
+    expected: [{ method: "POST", path: "/api/v1/apps/todo/auth/refresh", status: 401 }],
+  }));
+  assert.equal(config.host, "localhost");
+  assert.deepEqual(config.services, [{ ...api, alias: "werewolf-dapp", ready: "/", env: { NODE_ENV: "development" }, secrets: ["JWT_SECRET"], stores: ["mongo", "redis"], seed: ["scripts/preview-seed.js"] }]);
+  assert.deepEqual(config.expected, [{ method: "POST", path: "/api/v1/apps/todo/auth/refresh", status: 401 }]);
+  assert.deepEqual(parsePreviewConfig(file([])), { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1" }, "v1 files keep working");
+});
+
+test("a v2 file cannot reach real data, reserved variables or paths outside the service", () => {
+  for (const [text, message] of [
+    [v2({ services: [{ ...api, env: { MONGODB_URI: "mongodb://real-host/prod" } }] }), /MONGODB_URI is set by PSM/],
+    [v2({ services: [{ ...api, env: { PORT: "4317" } }] }), /PORT is set by PSM/],
+    [v2({ env: { REDIS_URL: "redis://real" } }), /REDIS_URL is set by PSM/],
+    [v2({ services: [{ ...api, stores: ["postgres"] }] }), /stores may only list/],
+    [v2({ services: [{ ...api, directory: "../other" }] }), /relative package directory/],
+    [v2({ services: [{ ...api, seed: ["../../escape.js"] }] }), /seed must list/],
+    [v2({ services: [{ ...api, alias: "mongo" }] }), /alias mongo is used twice/],
+    [v2({ services: [{ ...api, image: "evil" }] }), /unknown field/],
+    [v2({ services: [api], expected: [{ path: "/api/x", status: 500 }] }), /a 5xx is never expected/],
+    [v2({ expected: [{ path: "/api/x", status: 401 }] }), /expected needs a service/],
+    [v2({ host: "evil.example" }), /host must be/],
+  ] as const) assert.throws(() => parsePreviewConfig(text), message);
+});
+
+test("the probe loads the app by the declared host and waits for services before any page", () => {
+  const probe = browserPreviewProbe("dev", 5200, ["/"], [], false, [], { host: "localhost", services: [{ name: "werewolf-dapp", url: "http://werewolf-dapp:3000/" }], expected: [{ method: "POST", path: "/api/x", status: 401 }] });
+  assert.doesNotThrow(() => new Function("require", "process", probe));
+  assert.match(probe, /const origin = 'http:\/\/localhost:5200';/);
+  assert.match(probe, /const local = 'http:\/\/127\.0\.0\.1:5200';/);
+  assert.ok(probe.indexOf("for (const service of services)") < probe.indexOf("chromium.launch"));
 });
