@@ -417,6 +417,12 @@
         "name": "Werewolf API",
         "directory": "werewolf-dapp",
         "command": "npm run server"
+      },
+      {
+        "id": "ec901267-f3e8-44a6-bbeb-7d94064acbf5",
+        "name": "werewolf-dapp",
+        "directory": "werewolf-dapp",
+        "command": "npm run dev"
       }
     ],
     "port": 5200,
