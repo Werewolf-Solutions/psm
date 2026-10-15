@@ -22,14 +22,19 @@ All responses use dapp's envelope: `{ success: true, data }` or
 
 ## B1 — Project registry
 
-`PsmProject { owner: User, projectId: "prj_…", name, displayName, archived: bool, lastSeenAt }`.
+`PsmProject { owner: User, projectId: "prj_…", name, displayName, archived: bool, lastSeenAt, sources: [executorId] }`.
 Unique on `(owner, projectId)`.
 
-- `PUT /api/v1/psm/projects`. PSM session (`protectPsm`). Body
-  `{ projects: [{ projectId, name, displayName?, archived? }] }`, at most 500.
-  - Upserts the listed projects.
-  - Projects of this owner that are **not** listed are marked `archived: true`,
-    never deleted.
+- `PUT /api/v1/psm/projects`. PSM session (`protectPsm`) plus the
+  `X-PSM-Executor` header (see B3), which identifies the publishing machine.
+  Body `{ projects: [{ projectId, name, displayName?, archived? }] }`, at most
+  500.
+  - Upserts the listed projects and adds this executorId to their `sources`.
+  - **Revised 2026-10-15:** a project of this owner that is not listed loses
+    this executorId from `sources`. Only a project left with **no** sources is
+    marked `archived: true`, never deleted. Each machine (desktop, VPS) sees
+    only its own folders, so one machine's list must never archive another's
+    projects.
   - Returns `{ count, archived }`.
 - `GET /api/v1/apps/todo/projects?q=&limit=8`. Todo session. Returns
   `{ projects: [{ projectId, name, displayName }] }`, not archived.
@@ -79,7 +84,7 @@ PSM session plus a header `X-PSM-Executor: <executorId>` (`[a-z0-9-]{1,64}`).
   - Otherwise it stays `failed`.
   - Returns `409` if not held.
 - `GET /api/v1/psm/intake?status=&projectId=` lists the owner's intake for the
-  hosted page. At most 200, newest first.
+  hosted page. Returns `{ intake: [PsmIntake] }`, at most 200, newest first.
 
 ## D — Verdict (validated on both sides; invalid = failed run)
 
