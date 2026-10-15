@@ -19,6 +19,7 @@ import {
   setExecutorPaused,
   type ExecutorEvent,
   type ExecutorJob,
+  type TriageJob,
   type JobOutcome,
 } from "./client.ts";
 import { triageJobRunner } from "./triage-job.ts";
@@ -120,7 +121,7 @@ async function fakeHub(): Promise<FakeHub> {
   return hub;
 }
 
-function job(overrides: Partial<ExecutorJob> = {}): ExecutorJob {
+function job(overrides: Partial<TriageJob> = {}): TriageJob {
   const id = overrides.jobId || `int_${Math.random().toString(16).slice(2).padEnd(24, "0").slice(0, 24)}`;
   return {
     jobId: id,

@@ -117,3 +117,43 @@ Rules:
   `needs_decision`.
 - No calendar dates anywhere in a verdict.
 - Each list holds at most 10 entries, each at most 200 characters.
+
+## E — Implement jobs (Go → branch → review)
+
+`PsmJob`:
+
+```text
+{ jobId: "job_<24 hex>", owner, intakeId, projectId, kind: "implement",
+  status: "queued" | "claimed" | "review" | "accepted" | "rejected" | "stalled" | "failed" | "cancelled",
+  claim: { executorId, leaseUntil } | null, attempts, pinnedExecutor: string | null,
+  selection: { mode: "auto" } | { mode: "manual", engine: "claude" | "codex", model: string | null, effort: string | null },
+  revisions: [{ comment, at }], result: ImplementResult | null, error, createdAt, updatedAt }
+```
+
+- **Go** (`POST /api/v1/apps/todo/intake/:intakeId/go`, Todo `todo:write`; or
+  `POST /api/v1/psm/jobs { intakeId, selection }`, executor) queues a job for a `triaged`
+  intake whose verdict is `fits` or `needs_decision`. One active
+  (`queued | claimed | review`) job per intake. Go is the owner's approval for
+  that one job.
+- **Repo lock.** A unique partial index on `{ owner, projectId }` where
+  `status: "claimed"`: at most one running implement job per project, enforced
+  by the database. A claim that hits it moves on to the next project.
+- **Claim** with `kinds: ["implement"]` (triage is claimed first when both are
+  asked for). Oldest `queued` first; a job pinned to another executor is
+  skipped. Payload: `jobId, kind, intakeId, projectId, projectName, text,
+  verdict, selection, revisions, attempt, continueClone, leaseUntil`. Same 120 s lease and
+  heartbeat routes as triage (`job_` ids are dispatched to jobs). An expired
+  lease re-queues; after 2 attempts the job is `stalled`.
+- **Result** (`POST /psm/executor/jobs/job_…/result`):
+  `{ status: "review", result: { branch: "psm/job/<jobId>", baseCommit, headCommit,
+  commits: [{ sha, subject }], diffStat: { files, insertions, deletions },
+  checks: [{ name, ok }], model: { engine, model, effort, reason }, summary } }`, or `{ status: "stalled" | "failed", error }`.
+  `failed` retries once on the same executor. The job is then pinned to that
+  executor: the branch lives only in its clone and is never pushed (D4).
+- **Review**, reported by the pinned executor: `POST /psm/jobs/:jobId/accept`,
+  `/reject`, `/revise { comment }` (re-queues on the same executor, which
+  continues in the same clone). `POST /psm/jobs/:jobId/cancel` and
+  `/apps/todo/jobs/:jobId/cancel` cancel a queued, stalled or failed job.
+  `GET /psm/jobs` lists the owner's jobs.
+- Todo's intake summary gains `job: { jobId, status, branch, summary, error } | null`,
+  and job changes go out on the live intake stream.

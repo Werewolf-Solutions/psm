@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { AgentPermission, PermissionSnapshot } from "./agent-permissions.ts";
-import { AgentPermissionStore, PermissionError } from "./agent-permissions.ts";
+import { PermissionError, type PermissionChecker } from "./agent-permissions.ts";
 import { taskInputs, packageDirectory } from "./agent-task-inputs.ts";
 import { operationDigest } from "./agent-policy.ts";
 import { bumpWorkspaceVersion, compareWorkspaceVersions, type ReleaseBump } from "./deploy/source.ts";
@@ -16,7 +16,7 @@ export class RepositoryTools {
   private readonly verifiedBuilds = new Map<string, string>();
   private readonly verifiedPreviews = new Map<string, string>();
   private readonly staged = new Map<string, { index: string; head: string }>();
-  constructor(readonly snapshot: PermissionSnapshot, private readonly store: AgentPermissionStore, private readonly protectedRoots: readonly string[] = []) {}
+  constructor(readonly snapshot: PermissionSnapshot, private readonly store: PermissionChecker, private readonly protectedRoots: readonly string[] = []) {}
   private allow(permission: AgentPermission): void { this.store.check(this.snapshot, permission); }
   /** Reject aliases rather than relying on a lexical path-prefix check. */
   resolve(relative: string, missing = false, writing = false): string {

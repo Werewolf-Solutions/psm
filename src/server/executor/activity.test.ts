@@ -6,11 +6,11 @@ import test from "node:test";
 
 import { memoryTriageCache, readClaudeJson, type TriageEngine } from "../triage/run.ts";
 import { ExecutorActivity } from "./activity.ts";
-import type { ExecutorJob } from "./client.ts";
+import type { ExecutorJob, TriageJob } from "./client.ts";
 import { triageJobRunner } from "./triage-job.ts";
 
 const VERDICT = { verdict: "fits", size: "S", dependsOn: [], conflictsWith: [], queue: { after: [], note: "" }, questions: [], rationale: "Small UI tweak." };
-const job = (over: Partial<ExecutorJob> = {}): ExecutorJob => ({
+const job = (over: Partial<TriageJob> = {}): TriageJob => ({
   jobId: "job_1", kind: "triage", intakeId: "int_1", projectId: "prj_aaaa", projectName: "todo-app",
   text: "this is a test to see if it is working", attempt: 1, leaseUntil: "", ...over,
 });

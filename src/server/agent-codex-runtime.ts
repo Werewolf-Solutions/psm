@@ -123,8 +123,10 @@ export async function runCodexManaged(input: {
       if (method !== "item/tool/call" || !names.has(params.tool) || params.namespace != null || params.threadId !== threadId || !turnReady || turnFinished || input.signal.signal.aborted) throw new Error("Tool denied");
       const turnId = await turnReady;
       if (params.turnId !== turnId || turnFinished || input.signal.signal.aborted) throw new Error("Tool denied");
-      const result = await client.callTool({ name: params.tool.slice(4), arguments: params.arguments });
       input.event({ type: "assistant", message: { content: [{ type: "tool_use", id: params.callId, name: params.tool, input: params.arguments }] } });
+      if (input.signal.signal.aborted) throw new Error("The managed turn was stopped.");
+      const result = await client.callTool({ name: params.tool.slice(4), arguments: params.arguments });
+      input.event({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: params.callId, is_error: !!result.isError, content: result.content }] } });
       return { success: !result.isError, contentItems: [{ type: "inputText", text: JSON.stringify(result.content) }] };
     };
     await rpc.request("initialize", { clientInfo: { name: "psm", version: "1" }, capabilities: { experimentalApi: true } });

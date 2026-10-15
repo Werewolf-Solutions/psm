@@ -7,7 +7,7 @@ import { taskInputs } from "./agent-task-inputs.ts";
 import { browserPreviewProbe } from "./agent-browser-preview.ts";
 import { PREVIEW_FIXTURE_FILE, parsePreviewConfig, type PreviewConfig, type PreviewService } from "./agent-preview-fixtures.ts";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
-import type { AgentPermissionStore } from "./agent-permissions.ts";
+import type { PermissionChecker } from "./agent-permissions.ts";
 
 export type TaskExecutor = (args: string[], signal?: AbortSignal) => Promise<string>;
 
@@ -110,7 +110,7 @@ export class ManagedTaskRunner {
     const result = this.pending.then(action);
     this.pending = result.catch(() => {}); return result;
   }
-  constructor(private readonly repository: RepositoryTools, private readonly store: AgentPermissionStore, private readonly signal: AbortSignal,
+  constructor(private readonly repository: RepositoryTools, private readonly store: PermissionChecker, private readonly signal: AbortSignal,
     private readonly execute: TaskExecutor = dockerTaskExecutor,
     private readonly download: typeof downloadLockedPackage = downloadLockedPackage,
     private readonly findProject: ProjectLookup = () => undefined) {}

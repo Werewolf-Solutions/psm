@@ -123,7 +123,9 @@ import {
 } from "./rules.ts";
 import { collectSkillUsage } from "./skills.ts";
 import { runtimeServices, startRuntimeDiscovery, werewolfApiUrl } from "./runtime.ts";
-import { executorActivity, executorForcedByEnv, executorStatus, setExecutorRunning, startExecutorService } from "./executor/service.ts";
+import { executorActivity, executorForcedByEnv, executorStatus, jobsDirectory, setExecutorRunning, startExecutorService } from "./executor/service.ts";
+import { clonePath } from "./executor/implement-job.ts";
+import { acceptJob, discardClone, readJobDiff } from "./executor/review.ts";
 import { readSwitches, writeSwitches } from "./switches.ts";
 import { executorId, hubClient } from "./executor/client.ts";
 import { createProjectPublisher } from "./executor/publish.ts";
@@ -2555,9 +2557,11 @@ local.get("/api/executor/activity/:jobId", (req, res) => {
 // The hub's whole queue for this user: waiting, being triaged (and by which
 // executor), and done with its verdict. Read through the Werewolf session.
 let cockpitHub: ReturnType<typeof hubClient> | null = null;
+const hubForCockpit = () =>
+  (cockpitHub ??= hubClient({ apiUrl: () => werewolfApiUrl(), token: async () => (await sessionContext()).accessToken, executorId: executorId() }));
 local.get("/api/executor/queue", async (_req, res) => {
   if (!(await currentUser())) return res.status(401).json({ error: "Sign in with Werewolf to see the queue." });
-  cockpitHub ??= hubClient({ apiUrl: () => werewolfApiUrl(), token: async () => (await sessionContext()).accessToken, executorId: executorId() });
+  const cockpitHub = hubForCockpit();
   try {
     const names = new Map(getProjects().filter((project) => project.id).map((project) => [project.id!, project.name]));
     const items = (await cockpitHub.listQueue())
@@ -2568,6 +2572,89 @@ local.get("/api/executor/queue", async (_req, res) => {
     res.status(502).json({ error: `The hub did not answer: ${(error as Error).message}` });
   }
 });
+
+/* ---- implement jobs (P14 phase E): Go, and review where the branch lives ---- */
+const projectById = (id: string) => getProjects().find((project) => project.id === id) ?? null;
+/** The clone of a job this machine ran, or null. */
+const localClone = (job: { jobId: string; projectId: string }) => {
+  const project = projectById(job.projectId);
+  if (!project) return null;
+  const dir = clonePath(jobsDirectory(), project.name, job.jobId);
+  return fs.existsSync(dir) ? { project, dir } : null;
+};
+const jobRoute = (handler: (req: express.Request, res: express.Response) => Promise<unknown>) => async (req: express.Request, res: express.Response) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Review implement jobs from the local cockpit." });
+  if (!(await currentUser())) return res.status(401).json({ error: "Sign in with Werewolf first." });
+  try {
+    await handler(req, res);
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    res.status(status && status >= 400 && status < 500 ? status : 502).json({ error: (error as Error).message });
+  }
+};
+const findJob = async (jobId: string) => (await hubForCockpit().listJobs()).find((job) => job.jobId === jobId) ?? null;
+
+local.get("/api/executor/jobs", jobRoute(async (_req, res) => {
+  const me = executorStatus().executorId ?? executorId();
+  const jobs = (await hubForCockpit().listJobs()).map((job) => ({
+    ...job,
+    projectName: projectById(job.projectId)?.name ?? null,
+    // Only the machine holding the branch can review it.
+    reviewHere: job.status === "review" && job.pinnedExecutor === me && !!localClone(job),
+  }));
+  res.json({ executorId: me, jobs });
+}));
+local.post("/api/executor/jobs", jobRoute(async (req, res) => {
+  const selection = req.body?.selection ?? { mode: "auto" };
+  if (!selection || selection.mode !== "auto" && selection.mode !== "manual") return res.status(400).json({ error: "Choose Auto or a provider and model." });
+  if (selection.mode === "manual" && (selection.engine !== "claude" && selection.engine !== "codex" || selection.model != null && (typeof selection.model !== "string" || selection.model.length > 120) || selection.effort != null && (typeof selection.effort !== "string" || selection.effort.length > 30))) {
+    return res.status(400).json({ error: "Invalid provider, model or effort." });
+  }
+  res.status(201).json({ job: await hubForCockpit().goJob(String(req.body?.intakeId || ""), selection.mode === "auto" ? { mode: "auto" } : { mode: "manual", engine: selection.engine, model: selection.model || null, effort: selection.effort || null }) });
+}));
+local.get("/api/executor/job-models", jobRoute(async (req, res) => {
+  const engine = req.query.engine;
+  const project = getProjects().find((candidate) => candidate.id === req.query.projectId);
+  if ((engine !== "claude" && engine !== "codex") || !project) return res.status(400).json({ error: "Choose a local project and provider." });
+  res.json(await modelCatalog(engine, project.path));
+}));
+local.get("/api/executor/jobs/:jobId/diff", jobRoute(async (req, res) => {
+  const job = await findJob(req.params.jobId);
+  const clone = job && localClone(job);
+  if (!job || !clone) return res.status(404).json({ error: "This machine does not hold that job's branch." });
+  res.json({ job, diff: readJobDiff(clone.dir, job.jobId) });
+}));
+local.post("/api/executor/jobs/:jobId/accept", jobRoute(async (req, res) => {
+  const job = await findJob(req.params.jobId);
+  const clone = job && localClone(job);
+  if (!job || !clone) return res.status(404).json({ error: "This machine does not hold that job's branch." });
+  if (job.status !== "review") return res.status(409).json({ error: `This job is ${job.status}, not waiting for review.` });
+  const subject = job.result?.commits?.[0]?.subject || "implement job";
+  const merged = acceptJob(clone.project.path, clone.dir, job.jobId, `Merge ${job.result?.branch ?? job.jobId}: ${subject}`);
+  if (!merged.ok) return res.status(409).json({ error: merged.reason, branchKept: merged.branchKept });
+  const saved = await hubForCockpit().reviewJob(job.jobId, "accept");
+  discardClone(clone.dir);
+  res.json({ job: saved, merged });
+}));
+local.post("/api/executor/jobs/:jobId/reject", jobRoute(async (req, res) => {
+  const job = await findJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "No such job." });
+  const saved = await hubForCockpit().reviewJob(job.jobId, "reject");
+  const clone = localClone(job);
+  if (clone) discardClone(clone.dir);
+  res.json({ job: saved });
+}));
+local.post("/api/executor/jobs/:jobId/revise", jobRoute(async (req, res) => {
+  const comment = String(req.body?.comment || "").trim();
+  if (!comment) return res.status(400).json({ error: "Say what to change." });
+  res.json({ job: await hubForCockpit().reviewJob(req.params.jobId, "revise", comment) });
+}));
+local.post("/api/executor/jobs/:jobId/cancel", jobRoute(async (req, res) => {
+  const job = await hubForCockpit().cancelJob(req.params.jobId);
+  const clone = localClone(job);
+  if (clone) discardClone(clone.dir);
+  res.json({ job });
+}));
 
 // The hub's project registry, which the Todo `@project` picker reads.
 local.get("/api/hub/projects", (_req, res) => {

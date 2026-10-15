@@ -77,6 +77,9 @@ function grantRules(snapshot: PermissionSnapshot): PolicyRule[] {
 }
 const workspaceKey = (ref: string) => `ws:${ref.toLowerCase()}`;
 
+/** All the managed tools need of a store; an implement job supplies its own (executor/job-permissions.ts). */
+export type PermissionChecker = Pick<AgentPermissionStore, "check">;
+
 export class AgentPermissionStore {
   constructor(private readonly database: () => DatabaseSync = db) {}
   snapshot(project: PermissionProject): PermissionSnapshot {

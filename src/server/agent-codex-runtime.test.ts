@@ -179,4 +179,6 @@ test("Codex dynamic tools use the shared broker and deny approval requests and s
   assert.equal(fs.readFileSync(path.join(root, "app.txt"), "utf8"), "after");
   assert.ok(!fs.existsSync(path.join(root, ".claude")));
   assert.match(JSON.stringify(events), /Done/);
+  const results = events.flatMap((event: any) => event?.type === "user" ? event.message?.content ?? [] : []).filter((part: any) => part.type === "tool_result");
+  assert.deepEqual(results.map((part: any) => [part.tool_use_id, part.is_error]), [["write", false], ["grant", true]], "stop rules receive Codex check failures");
 });

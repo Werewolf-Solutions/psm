@@ -23,24 +23,77 @@ import os from "node:os";
 import { statePath } from "../../store.ts";
 import type { OpenIntake } from "../triage/context.ts";
 import type { Verdict } from "../triage/verdict.ts";
+import type { JobSelection, ResolvedJobModel } from "./model-selection.ts";
 
-export type JobKind = "triage";
+export type JobKind = "triage" | "implement";
 
-export interface ExecutorJob {
+interface JobBase {
   jobId: string;
-  kind: JobKind;
   intakeId: string;
   projectId: string;
   projectName: string;
+  /** The Todo task or note, as written. */
   text: string;
   attempt: number;
   leaseUntil: string;
 }
 
-export type JobOutcome = { status: "triaged"; verdict: Verdict } | { status: "failed"; error: string };
+export interface TriageJob extends JobBase {
+  kind: "triage";
+}
+
+/** Phase E: implement a triaged item on psm/job/<jobId> in this executor's own clone. */
+export interface ImplementJob extends JobBase {
+  kind: "implement";
+  selection: JobSelection;
+  verdict: Verdict | null;
+  /** Revise comments, oldest first. */
+  revisions: { comment: string; at: string }[];
+  /** A revised job continues in the clone this executor already holds. */
+  continueClone: boolean;
+}
+
+export type ExecutorJob = TriageJob | ImplementJob;
+
+/** What an implement job hands back for review. The branch never leaves this machine. */
+export interface ImplementResult {
+  model: ResolvedJobModel;
+  branch: string;
+  baseCommit: string;
+  headCommit: string;
+  commits: { sha: string; subject: string }[];
+  diffStat: { files: number; insertions: number; deletions: number };
+  checks: { name: string; ok: boolean }[];
+  summary: string;
+}
+
+export type JobOutcome =
+  | { status: "triaged"; verdict: Verdict }
+  | { status: "review"; result: ImplementResult }
+  | { status: "stalled"; error: string }
+  | { status: "failed"; error: string };
+
+/** A hub job as psm lists it (GET /psm/jobs). */
+export interface HubJob {
+  jobId: string;
+  intakeId: string;
+  projectId: string;
+  kind: "implement";
+  selection: JobSelection;
+  status: "queued" | "claimed" | "review" | "accepted" | "rejected" | "stalled" | "failed" | "cancelled";
+  claim: { executorId: string; leaseUntil: string } | null;
+  attempts: number;
+  pinnedExecutor: string | null;
+  revisions: { comment: string; at: string }[];
+  result: ImplementResult | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export const HEARTBEAT_MS = 30_000;
-export const JOB_TIMEOUTS_MS: Record<JobKind, number> = { triage: 5 * 60_000 };
+/** Implement jobs stop themselves at 60 minutes (a stop rule); this is the backstop. */
+export const JOB_TIMEOUTS_MS: Record<JobKind, number> = { triage: 5 * 60_000, implement: 65 * 60_000 };
 export const BACKOFF_BASE_MS = 1_000;
 export const BACKOFF_MAX_MS = 60_000;
 /** The hub long-polls for 25 s; give it room before calling the request dead. */
@@ -126,6 +179,13 @@ export interface Hub {
   result(jobId: string, outcome: JobOutcome): Promise<void>;
   /** The owner's intake for one project — context for triage. */
   listIntake(projectId: string): Promise<OpenIntake[]>;
+  /** Implement jobs (phase E), newest first. */
+  listJobs(): Promise<HubJob[]>;
+  /** Go: queue an implement job for a triaged intake. */
+  goJob(intakeId: string, selection: JobSelection): Promise<HubJob>;
+  /** Report a review decision made here, where the branch is. */
+  reviewJob(jobId: string, action: "accept" | "reject" | "revise", comment?: string): Promise<HubJob>;
+  cancelJob(jobId: string): Promise<HubJob>;
   /** The owner's whole intake queue, newest first (at most 200), for the Queue view. */
   listQueue(): Promise<QueueItem[]>;
   /** Replace this executor's share of the project registry the `@` picker reads. */
@@ -157,13 +217,10 @@ export interface HubProject {
 }
 
 function isJob(value: any): value is ExecutorJob {
-  return (
-    !!value &&
-    typeof value.jobId === "string" &&
-    value.kind === "triage" &&
-    typeof value.projectId === "string" &&
-    typeof value.text === "string"
-  );
+  const base = !!value && typeof value.jobId === "string" && typeof value.projectId === "string" && typeof value.text === "string";
+  if (!base) return false;
+  if (value.kind === "triage") return true;
+  return value.kind === "implement" && /^job_[0-9a-f]{24}$/.test(value.jobId) && Array.isArray(value.revisions ?? []);
 }
 
 export function hubClient(options: HubOptions): Hub {
@@ -219,6 +276,22 @@ export function hubClient(options: HubOptions): Hub {
     },
     async result(jobId, outcome) {
       await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/result`, outcome, REQUEST_TIMEOUT_MS);
+    },
+    async listJobs() {
+      const { data } = await call("GET", "/psm/jobs", undefined, REQUEST_TIMEOUT_MS);
+      return Array.isArray(data?.jobs) ? (data.jobs as HubJob[]) : [];
+    },
+    async goJob(intakeId, selection) {
+      const { data } = await call("POST", "/psm/jobs", { intakeId, selection }, REQUEST_TIMEOUT_MS);
+      return data.job as HubJob;
+    },
+    async reviewJob(jobId, action, comment) {
+      const { data } = await call("POST", `/psm/jobs/${encodeURIComponent(jobId)}/${action}`, comment === undefined ? {} : { comment }, REQUEST_TIMEOUT_MS);
+      return data.job as HubJob;
+    },
+    async cancelJob(jobId) {
+      const { data } = await call("POST", `/psm/jobs/${encodeURIComponent(jobId)}/cancel`, {}, REQUEST_TIMEOUT_MS);
+      return data.job as HubJob;
     },
     async listQueue() {
       const { data } = await call("GET", "/psm/intake", undefined, REQUEST_TIMEOUT_MS);

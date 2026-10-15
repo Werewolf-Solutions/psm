@@ -5,7 +5,7 @@ import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import { GrantRequiredError, ReviewRequiredError, type AgentPermissionStore, type PermissionSnapshot } from "./agent-permissions.ts";
+import { GrantRequiredError, ReviewRequiredError, type AgentPermissionStore, type PermissionChecker, type PermissionSnapshot } from "./agent-permissions.ts";
 import type { OperationReviews } from "./agent-reviews.ts";
 import type { MachineCommands } from "./machines/commands.ts";
 
@@ -23,7 +23,23 @@ export interface ManagedAgentPolicy {
   explain?: (snapshot: PermissionSnapshot) => Promise<unknown>;
   /** The operator's decisions for this task, carried into every turn. */
   taskNotes?: string;
+  /** Checks each operation instead of `store`: an implement job's own grant. */
+  checker?: PermissionChecker;
+  /**
+   * `implement`: an unattended job in its own clone. No push, fetch, merge,
+   * branch switching, server commands or attached integrations — the tools are
+   * not offered at all, on top of the checker refusing them.
+   */
+  profile?: "implement";
 }
+
+/** Tools an implement job never sees. */
+export const IMPLEMENT_EXCLUDED_TOOLS: ReadonlySet<string> = new Set([
+  "git_push", "git_fetch", "git_merge", "git_switch", "git_branch_delete",
+  "server_environments", "server_command",
+  "attached_tools", "request_attached_call", "attached_call_result",
+  "access_status",
+]);
 export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer>, signal: AbortController, resume: string | null = null): Options {
   return {
     env: childEnv(),
@@ -47,10 +63,11 @@ export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer
 }
 export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal: AbortController) {
   const input = { policy, signal };
-  const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, input.policy.store, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))])]));
+  const checker = policy.checker ?? policy.store;
+  const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, checker, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))])]));
   // A preview's backend services may only come from projects already in this session's scope.
   const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name);
-  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, policy.store, signal.signal, undefined, undefined, byName)]));
+  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName)]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");
   const project = z.string().describe("Registered project ID from the session scope");
@@ -75,7 +92,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       return { isError: true, content: [{ type: "text" as const, text: error instanceof Error && !("stderr" in error) ? error.message : message }] };
     }
   };
-  const server = createSdkMcpServer({ name: "psm", version: "1.0.0", tools: [
+  const tools = [
     ...(policy.mcp ? [
       tool("attached_tools", "List reviewed project attachments and their MCP tools.", { project }, ({ project }) => invoke(project, (repo) => policy.mcp!.list(repo.snapshot))),
       tool("request_attached_call", "Request an exact attached MCP call for operator approval in Capabilities. Ask the operator to review, then use attached_call_result.", { project, capability: z.string(), tool: z.string(), arguments: z.record(z.string(), z.unknown()) }, (args) => invoke(args.project, (repo) => policy.mcp!.request(repo.snapshot, args.capability, args.tool, args.arguments))),
@@ -108,7 +125,9 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     tool("git_merge", "Merge a local or remote-tracking branch into the current branch.", { project, ref: z.string() }, ({ project, ref }) => invoke(project, (repo) => repo.merge(ref))),
     tool("git_fetch", "Fetch from an operator-configured Git remote.", { project, remote: z.string().default("origin") }, ({ project, remote }) => invoke(project, (repo) => repo.fetch(remote))),
     tool("git_push", "Push HEAD without force to a named branch on an operator-configured Git remote.", { project, remote: z.string().default("origin"), branch: z.string().optional() }, ({ project, remote, branch }) => invoke(project, (repo) => repo.push(remote, branch))),
-  ] });
+  ];
+  const offered = policy.profile === "implement" ? tools.filter((entry) => !IMPLEMENT_EXCLUDED_TOOLS.has(entry.name)) : tools;
+  const server = createSdkMcpServer({ name: "psm", version: "1.0.0", tools: offered });
   const close = server.instance.close.bind(server.instance);
   server.instance.close = async () => { for (const task of tasks.values()) task.close(); await close(); };
   return server;
@@ -124,7 +143,10 @@ export async function runManagedAgent(input: {
 }): Promise<void> {
   const server = createManagedRepositoryServer(input.policy, input.signal);
   const scope = input.policy.snapshots.map(({ project, grants }) => `${project.name}: ${project.id}; grants: ${Object.entries(grants).filter(([, value]) => value?.granted).map(([name]) => name).join(", ") || "none"}`).join("\n");
-  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nFor code changes, call verification_status, install each required package directory and its dependencies (including server packages used by root scripts), run required builds and use preview_check for frontend routes you changed. Successful dev-server startup does not prove the app works. Recheck after edits. If a check fails or cannot run, keep the work unverified and incomplete; report the concrete blocker, and do not claim completion. Code commits enforce these checks. Use the PSM tools. Grants are enforced outside the conversation. When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.`;
+  const unavailable = input.policy.profile === "implement"
+    ? "If a tool is unavailable, explain the blocker in your final summary; this job cannot request more permissions."
+    : "When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.";
+  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nFor code changes, call verification_status, install each required package directory and its dependencies (including server packages used by root scripts), run required builds and use preview_check for frontend routes you changed. Successful dev-server startup does not prove the app works. Recheck after edits. If a check fails or cannot run, keep the work unverified and incomplete; report the concrete blocker, and do not claim completion. Code commits enforce these checks. Use the PSM tools. Grants are enforced outside the conversation. ${unavailable}`;
   if (input.engine === "codex") return runCodexManaged({ ...input, server, context });
   const stream = query({
     // SDK MCP servers require streaming input, including for a single user turn.

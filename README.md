@@ -110,6 +110,28 @@ stops it in the running psm, in either mode, and is remembered across restarts i
 - `GET /api/executor` reports its state. `PSM_TRIAGE_MODEL` picks the model;
   `PSM_EXECUTOR_CONCURRENCY` (1–2) sizes the pool.
 
+**Implement jobs (P14 phase E).** On a note that fits (or needs your decision), **Go** — in
+Todo's verdict panel or psm's Queue tab — queues an implement job. The executor clones
+your checkout's current commit into `.psm-jobs/<project>/<jobId>` (an ordinary clone, no
+`origin`), and the managed agent works there on `psm/job/<jobId>` with psm's repository
+tools only: no shell, no push, fetch, merge or server commands. Go is the grant for that
+one job (edit, test, build, preview-check, commit); nothing is added to the project's
+Agent permissions, and workspace deny rules still apply. One job per project runs at a
+time (the hub's lock); implement jobs have their own pool (`PSM_IMPLEMENT_CONCURRENCY`,
+default 1) so triage never waits behind them. Stop rules end a job `stalled` with the
+reason: 60 minutes, the same failing check 3 times, the same failure twice with nothing
+changed, or 400 tool calls. Only committed, verified work goes to review. **Running →
+Executor → Activity** shows the agent's live transcript; **Queue → Review the change**
+shows the commits, checks and diff, and **Accept** merges `psm/job/<id>` into your
+checked-out branch (`--no-ff`), **Reject** drops it, **Revise** sends it back with your
+comment. A merge that would overwrite your uncommitted changes or conflicts is aborted
+and the branch is left in your repo to merge by hand. Each **Go** chooses Auto or
+Claude/Codex and a model. Psm offers the provider's live model and effort list;
+Todo accepts a provider and optional model ID. Auto follows the project's AI
+provider and uses the triage size to choose a small, standard, or large model
+tier. It is a size heuristic, not a live price comparison; the chosen provider
+and model are recorded with the result.
+
 **Project registry (on whenever signed in, executor or not).** The Todo app's `@project`
 picker lists the projects the hub knows, and psm tells it: while psm holds a Werewolf
 session it publishes each project's `prj_` id, name and archived flag — nothing else —

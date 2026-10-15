@@ -16,7 +16,14 @@ import { cachedRecap } from "../ai.ts";
 import { werewolfApiUrl } from "../runtime.ts";
 import { sessionContext } from "../session.ts";
 import { claudeEngine, fileTriageCache } from "../triage/run.ts";
-import { executorId, executorPaused, hubClient, runExecutor, type ExecutorEvent } from "./client.ts";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { AgentPermissionStore } from "../agent-permissions.ts";
+import { runManagedAgent } from "../agent-permission-runtime.ts";
+import { databaseFile } from "../db.ts";
+import { executorId, executorPaused, hubClient, runExecutor, type ExecutorEvent, type ExecutorJob, type JobKind, type JobOutcome } from "./client.ts";
+import { implementJobRunner } from "./implement-job.ts";
 import { triageJobRunner } from "./triage-job.ts";
 import { ExecutorActivity } from "./activity.ts";
 import { statePath } from "../../store.ts";
@@ -148,32 +155,72 @@ function launch(): { stop: () => Promise<void> } {
     cache: fileTriageCache(),
     onStep: (job, step) => executorActivity().step(job, step),
   });
-  const run: typeof runJob = async (job, signal) => {
+  const runTriage = async (job: ExecutorJob, signal: AbortSignal): Promise<JobOutcome> => {
+    if (job.kind !== "triage") return { status: "failed", error: `the triage pool cannot run a ${job.kind} job` };
     const outcome = await runJob(job, signal);
     executorActivity().finishing(job.jobId, outcome);
     return outcome;
   };
 
-  const controller = new AbortController();
-  const loop = runExecutor({
-    hub,
-    run,
-    signal: controller.signal,
-    concurrency: concurrency(),
-    killSwitch: () => executorPaused(),
-    onEvent: track,
-    log: (line) => console.log(line),
-  }).catch((err) => {
-    status.state = "stopped";
-    status.lastError = (err as Error).message;
-    console.error(`executor: stopped on an unexpected error: ${(err as Error).message}`);
+  // Implement jobs (phase E): their own pool, so a long job never holds up
+  // triage. Each runs in its own clone under the job's own grant.
+  const permissions = new AgentPermissionStore();
+  const runImplementJob = implementJobRunner({
+    findProject: (projectId) => {
+      const project = getProjects().find((candidate) => candidate.id === projectId);
+      return project ? { id: projectId, name: project.name, path: project.path } : null;
+    },
+    jobsDir: jobsDirectory(),
+    store: permissions,
+    workspaceRules: (workspaceId) => permissions.workspaceRules(workspaceId),
+    protectedRoots: [PSM_CODE_ROOT, path.resolve(databaseFile()), `${path.resolve(databaseFile())}-wal`, `${path.resolve(databaseFile())}-shm`],
+    runAgent: runManagedAgent,
+    projectEngine: (projectId) => getProjects().find((candidate) => candidate.id === projectId)?.aiEngine ?? "claude",
+    activity: executorActivity(),
   });
-  console.log(`  → executor ${id}: claiming triage jobs (pool ${concurrency()})`);
+  const runImplement = async (job: ExecutorJob, signal: AbortSignal): Promise<JobOutcome> => {
+    if (job.kind !== "implement") return { status: "failed", error: `the implement pool cannot run a ${job.kind} job` };
+    const outcome = await runImplementJob(job, signal);
+    executorActivity().finishing(job.jobId, outcome);
+    return outcome;
+  };
+
+  const controller = new AbortController();
+  const loop = (kinds: JobKind[], run: (job: ExecutorJob, signal: AbortSignal) => Promise<JobOutcome>, pool: number) =>
+    runExecutor({
+      hub,
+      run,
+      kinds,
+      signal: controller.signal,
+      concurrency: pool,
+      killSwitch: () => executorPaused(),
+      onEvent: track,
+      log: (line) => console.log(line),
+    }).catch((err) => {
+      status.state = "stopped";
+      status.lastError = (err as Error).message;
+      console.error(`executor: stopped on an unexpected error: ${(err as Error).message}`);
+    });
+  const loops = [loop(["triage"], runTriage, concurrency()), loop(["implement"], runImplement, implementConcurrency())];
+  console.log(`  → executor ${id}: claiming triage (pool ${concurrency()}) and implement jobs (pool ${implementConcurrency()})`);
 
   return {
     stop: async () => {
       controller.abort();
-      await loop;
+      await Promise.all(loops);
     },
   };
 }
+
+/** Implement jobs at once, across projects. One per project always (the hub's lock). */
+function implementConcurrency(): number {
+  const value = Number(process.env.PSM_IMPLEMENT_CONCURRENCY || 1);
+  return Number.isFinite(value) ? Math.min(3, Math.max(1, Math.floor(value))) : 1;
+}
+
+/** Where job clones live. Kept out of the projects themselves. */
+export function jobsDirectory(): string {
+  return process.env.PSM_JOBS_DIR || statePath(".psm-jobs");
+}
+
+const PSM_CODE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
