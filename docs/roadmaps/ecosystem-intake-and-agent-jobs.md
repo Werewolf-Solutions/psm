@@ -464,32 +464,91 @@ The executor's device is registered by the "Create executor" click itself.
 The reboot test is a confirmed button that reboots and verifies reconnection
 without anyone logging in.
 
-### V-keys — SSH key discovery when adding a machine (extends P04)
+### V-keys — Connecting a machine, from "I have no key" to connected (extends P04)
 
-Today "Add machine" offers two options: paste a setup command on the server,
-or paste a private key. New behaviour:
-1. **Discover.** Read the public keys from `~/.ssh/*.pub` and the ssh-agent
-   identities.
-2. **Test each key separately.** Use `BatchMode=yes`, `IdentitiesOnly=yes`,
-   `IdentityAgent=none` with that one key, and the pinned host key. Then check
-   for passwordless sudo with `sudo -n true`.
-3. **If one works:** offer to use it **once** to install PSM's own dedicated
-   access automatically. The operator's private key is never stored.
-4. **If none works:** guide the operator.
-   - Generate a dedicated ed25519 key.
-   - **DigitalOcean:** add it to the account through the API. An existing
-     droplet only accepts it through the web console, so show the exact
-     one-line command.
-   - **Other VPS:** show `ssh-copy-id` (password login) or the steps for the
-     provider's panel.
-   - Re-test until it works.
-5. A passphrase-protected key is detected and the page explains why it cannot
-   be used unattended.
+The operator types an address. Everything after that is one of these paths.
 
-Acceptance: against the LXD test host, with:
-- a working key: setup runs with nothing pasted
-- no working key: the guided path ends with a working key
-- a passphrase-only key: explained, not hung on
+**Step 1: Is this the right server? (host key)**
+- PSM scans the server's host key and shows its fingerprint.
+- For a droplet PSM created itself (V0), the fingerprint is known in advance,
+  so it is compared automatically.
+- Otherwise the operator compares it with the fingerprint shown in the
+  provider's console.
+- A mismatch stops everything. No keys are tried against a server that might
+  be the wrong one.
+
+**Step 2: Can one of my keys log in? (automatic)**
+- PSM lists the key pairs in `~/.ssh` and tries each one on its own:
+  `BatchMode`, `IdentitiesOnly`, agent off, pinned host key. Users tried:
+  `root`, then the operator's own username, then any user typed in.
+- Each key gets one plain answer:
+  - works with sudo
+  - works without sudo
+  - refused
+  - has a passphrase (cannot be used unattended)
+  - server unreachable
+
+**Step 3a: A key works with sudo.**
+- One button: "Use werewolf_mesh_droplet once to set up PSM's access".
+- PSM creates its own account and key on the server, verifies it, and is
+  done. The personal key is never stored.
+
+**Step 3b: A key logs in but sudo needs a password.**
+- PSM shows the one setup command to run in that session, where sudo can
+  ask for the password. Same result as 3a.
+
+**Step 3c: No key works, the "set it up from new" path.**
+1. **Create a key.** One button creates a dedicated ed25519 key for this
+   machine, `psm-<machine>`, kept in PSM's credential store. Only its public
+   key is shown.
+2. **Put the public key on the server.** The page shows only the option that
+   fits:
+   - **DigitalOcean, with an API token saved in PSM:** "Add to my
+     DigitalOcean account" uploads the public key.
+     - A droplet you are about to create gets it at creation.
+     - An existing droplet still has to receive it through the console
+       (next option), because DigitalOcean only injects keys at creation.
+   - **DigitalOcean, no API token yet:** the page links to
+     *API → Generate New Token* and lists the exact scopes to tick
+     (`droplet: create, read`, `ssh_key: create, read`). Once the token is
+     pasted, PSM saves it and continues as above. The token is optional for
+     connecting an existing droplet; it is needed for V0 creation.
+   - **Existing droplet:** *Droplet → Access → Launch Droplet Console*, then
+     paste the one line PSM shows. It appends the public key to the right
+     user's `authorized_keys` with the correct permissions.
+   - **Any other VPS with password login:**
+     `ssh-copy-id -i <psm public key> user@host`, shown ready to copy.
+   - **Any other VPS without password login:** the provider panel's
+     "SSH keys" or recovery console, with the same one line to paste.
+3. **Test again.** Step 2 reruns. When the new key works with sudo, PSM
+   continues as 3a.
+
+**Never:**
+- Ask for or store a passphrase.
+- Copy a personal private key.
+- Try keys after a host-key mismatch.
+
+**Implemented 2026-10-15:** `src/server/machines/keys.ts`, with tests:
+discovery, per-key testing and the next-step decision.
+
+Live check against 46.101.14.20:
+- 9 local keys were tested and `werewolf_mesh_droplet` logs in as root with
+  sudo.
+- `id_ecdsa` was correctly reported as passphrase-only.
+- The decision was "use werewolf_mesh_droplet".
+
+Not yet done: wiring into the Add-machine page (`web/machines.js`,
+`machines/api.ts`), the key-creation and DigitalOcean upload steps, and the
+LXD acceptance run.
+
+**Finding: 46.101.14.20 is not a fresh VPS.**
+- Host: up for over 4 years on Ubuntu 20.04 (EOL), 1 vCPU, 976 MB RAM
+  (330 MB available), no swap.
+- Already running werewolf-mesh, controlroom, nginx (80/443), a Node app on
+  :5000, Tailscale, and Python services on the tailnet.
+- Too small for the executor: one sandboxed preview alone needs about 3.6 GB.
+- Use a new droplet instead: **Ubuntu 24.04, at least 2 vCPU / 4 GB RAM**,
+  created through V0 once it exists, or by hand with one of PSM's keys.
 
 ### V — Executor on the VPS (from D1)
 
