@@ -193,7 +193,7 @@
   function renderImplement(root, entry) {
     root.append(bubble("Todo note", "exec-from-todo", node("p", entry.text)));
     if (entry.prompt) {
-      const sent = bubble("psm → agent", "exec-from-psm", node("p", "One agent in the job's own clone, with psm's repository tools only: no shell, no push."));
+      const sent = bubble("psm → agent", "exec-from-psm", node("p", "One agent with a shell in the job's isolated container. Only its clone is writable; the container has no host files or network."));
       sent.append(collapsible(`Task as sent (${kb(entry.prompt)})`, entry.prompt));
       if (entry.systemPrompt) sent.append(collapsible("Instructions (system prompt)", entry.systemPrompt));
       root.append(sent);

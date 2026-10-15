@@ -5,8 +5,8 @@
  *      checkout (managed Git refuses linked worktrees), objects copied rather
  *      than hard-linked, on branch `psm/job/<jobId>`, with no `origin` — it
  *      has nowhere to push, and the push/fetch tools are not offered anyway.
- *   2. The selected managed agent (Claude or Codex, psm's repository tools
- *      only, no shell) works in that clone under the job's own grant
+ *   2. The selected managed agent (Claude or Codex) can run an unrestricted
+ *      shell inside the isolated job container, alongside PSM check tools,
  *      (job-permissions.ts): edit, test, build, preview-check, commit.
  *   3. The stop rules watch every tool call (stop-rules.ts), and a timer stops
  *      the job at 60 minutes. A stop ends the job `stalled`, with its reason.
@@ -24,6 +24,8 @@ import path from "node:path";
 import type { PolicyRule } from "../agent-policy.ts";
 import type { AgentPermissionStore } from "../agent-permissions.ts";
 import type { ManagedAgentPolicy } from "../agent-permission-runtime.ts";
+import { RepositoryTools } from "../agent-repository-tools.ts";
+import { taskInputs } from "../agent-task-inputs.ts";
 import type { ImplementJob, ImplementResult, JobOutcome } from "./client.ts";
 import { JobPermissions, jobSnapshot } from "./job-permissions.ts";
 import { StopRules, toolName } from "./stop-rules.ts";
@@ -33,6 +35,21 @@ export const IMPLEMENT_TIMEOUT_MS = 60 * 60_000;
 
 /** Git in a job clone: no global or system config, no hooks, no pager, no external diff. */
 export function jobGit(cwd: string, args: string[], options: { maxBuffer?: number; input?: string } = {}): string {
+  // The agent can edit the clone from its container. Treat its Git metadata as
+  // untrusted before the host invokes Git on it.
+  const git = path.join(cwd, ".git");
+  if (!fs.lstatSync(git).isDirectory() || fs.lstatSync(git).isSymbolicLink()) throw new Error("Job clone has invalid Git metadata.");
+  for (const forbidden of ["commondir", "gitdir", path.join("objects", "info", "alternates")]) {
+    if (fs.existsSync(path.join(git, forbidden))) throw new Error("Job clone has external Git metadata.");
+  }
+  const pending = [git];
+  while (pending.length) {
+    const directory = pending.pop()!;
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) throw new Error("Job clone has linked Git metadata.");
+      if (entry.isDirectory()) pending.push(path.join(directory, entry.name));
+    }
+  }
   return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", ...args], {
     cwd,
     encoding: "utf8",
@@ -139,12 +156,12 @@ export function collectResult(dir: string, jobId: string, base: string): { ok: t
 
 export const IMPLEMENT_SYSTEM = `You implement one small, already-triaged change in a software project, unattended.
 
-You work in a private clone of the project, on branch psm/job/<id>. Nothing you do reaches the owner's checkout until they review and accept it. You cannot push, fetch, merge or switch branches, and you have no shell: use the PSM tools.
+You work in a private clone of the project, on branch psm/job/<id>. Nothing you do reaches the owner's checkout until they review and accept it. Use sandbox_shell for unrestricted commands, reading and editing inside /workspace. It has no host files or network. Do not push, fetch, deploy or switch branches. Use PSM's brokered install_packages, run_tests, run_script and preview_check for verification.
 
 Work like this:
 1. Read the relevant code first. Keep the change as small as the task allows; do not refactor unrelated code.
 2. Make the change, then install packages if needed and run the project's tests and build (verification_status says which checks a commit needs; use preview_check for frontend routes you changed).
-3. When the checks pass, stage your files and commit with git_commit, with a clear message. Commit only verified work.
+3. When the checks pass, call verification_status after the last edit. Then commit locally with git in sandbox_shell and a clear message. Only verified work goes to review.
 4. If you cannot finish (a decision only the owner can make, a missing dependency, a check you cannot fix), stop and say exactly why. Do not loop on the same failure.
 
 End with a short summary for the reviewer: what changed, which checks passed, anything they should look at.`;
@@ -189,7 +206,7 @@ export interface ImplementDeps {
 
 /** A short, readable label for a tool call in the transcript. */
 function describeCall(name: string, input: any): string {
-  const arg = input?.file ?? input?.script ?? input?.directory ?? input?.text ?? input?.operation ?? (Array.isArray(input?.files) ? input.files.join(", ") : "");
+  const arg = input?.file ?? input?.script ?? input?.command ?? input?.directory ?? input?.text ?? input?.operation ?? (Array.isArray(input?.files) ? input.files.join(", ") : "");
   return `${name}${arg ? ` ${String(arg).slice(0, 160)}` : ""}`;
 }
 
@@ -255,6 +272,9 @@ export function implementJobRunner(deps: ImplementDeps) {
       }),
       projectBoundaries: [],
     };
+    const repository = new RepositoryTools(policy.snapshots[0], policy.checker!, policy.protectedRoots);
+    const pendingTools = new Map<string, string>();
+    let verifiedDigest: string | null = null;
     let chosen: ResolvedJobModel;
     try {
       chosen = await (deps.selectModel ?? resolveJobModel)({
@@ -281,6 +301,7 @@ export function implementJobRunner(deps: ImplementDeps) {
                 deps.activity?.agentLine(job.jobId, { type: "message", text: part.text.trim() });
               } else if (part?.type === "tool_use") {
                 const name = toolName(String(part.name));
+                pendingTools.set(String(part.id), name);
                 deps.activity?.agentLine(job.jobId, { type: "tool", text: describeCall(name, part.input) });
                 const verdict = stopRules.toolUse(String(part.id), String(part.name), String(part.input?.script ?? ""));
                 if (verdict) stop("rule", verdict.reason);
@@ -291,6 +312,13 @@ export function implementJobRunner(deps: ImplementDeps) {
               if (part?.type !== "tool_result") continue;
               const text = resultText(part.content);
               const isError = part.is_error === true;
+              const name = pendingTools.get(String(part.tool_use_id));
+              pendingTools.delete(String(part.tool_use_id));
+              if (!isError && name === "verification_status") {
+                try {
+                  if (JSON.parse(text).verified === true) verifiedDigest = taskInputs(repository).digest;
+                } catch { /* malformed or unavailable verification does not count */ }
+              }
               deps.activity?.agentLine(job.jobId, { type: "result", text: text.slice(0, 4000), ok: !isError });
               const verdict = stopRules.toolResult(String(part.tool_use_id), isError, text);
               if (verdict) stop("rule", verdict.reason);
@@ -313,6 +341,11 @@ export function implementJobRunner(deps: ImplementDeps) {
 
     const collected = collectResult(realDir, job.jobId, base);
     if (!collected.ok) return { status: "stalled", error: collected.reason };
+    try {
+      if (repository.verificationPackages().length && verifiedDigest !== taskInputs(repository).digest) {
+        return { status: "stalled", error: "The final source has no passing build and browser verification. Run PSM checks, call verification_status after the last edit, then commit." };
+      }
+    } catch (error) { return { status: "stalled", error: `Could not verify the final source: ${(error as Error).message}` }; }
     const checks = [...stopRules.checks].map(([name, ok]) => ({ name: name.replace(":", " "), ok }));
     for (const check of checks) deps.activity?.agentLine(job.jobId, { type: "check", text: check.name, ok: check.ok });
     return {

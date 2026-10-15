@@ -9,7 +9,7 @@ import { RepositoryTools } from "../agent-repository-tools.ts";
 import { PermissionError } from "../agent-permissions.ts";
 import { ExecutorActivity } from "./activity.ts";
 import type { ImplementJob } from "./client.ts";
-import { branchFor, clonePath, implementJobRunner, jobGit, type ImplementDeps } from "./implement-job.ts";
+import { branchFor, clonePath, implementJobRunner, jobGit, prepareClone, type ImplementDeps } from "./implement-job.ts";
 import { JobPermissions, jobSnapshot } from "./job-permissions.ts";
 
 const JOB_ID = "job_0123456789abcdef01234567";
@@ -58,6 +58,18 @@ function deps(fx: ReturnType<typeof repo>, runAgent: ImplementDeps["runAgent"], 
 
 const tool = (id: string, name: string, input: object = {}) => ({ type: "assistant", message: { content: [{ type: "tool_use", id, name: `mcp__psm__${name}`, input }] } });
 const result = (id: string, isError: boolean, text: string) => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: [{ type: "text", text }] }] } });
+
+test("host Git refuses clone metadata that points outside the job", (t) => {
+  const fx = repo(t);
+  const clone = clonePath(fx.jobsDir, "real", JOB_ID);
+  prepareClone(fx.real, clone, JOB_ID);
+  fs.mkdirSync(path.join(clone, ".git", "objects", "info"), { recursive: true });
+  fs.writeFileSync(path.join(clone, ".git", "objects", "info", "alternates"), "/tmp/other-objects\n");
+  assert.throws(() => jobGit(clone, ["status", "--porcelain"]), /external Git metadata/);
+  fs.rmSync(path.join(clone, ".git", "objects", "info", "alternates"));
+  fs.symlinkSync("/tmp/other-objects", path.join(clone, ".git", "objects", "info", "outside"));
+  assert.throws(() => jobGit(clone, ["status", "--porcelain"]), /linked Git metadata/);
+});
 
 test("a job works in its own clone on psm/job/<id>, commits, and goes to review; the real checkout is untouched", async (t) => {
   const fx = repo(t);
@@ -127,6 +139,22 @@ test("finishing without a commit is not something to review", async (t) => {
   const outcome = await run(job(), new AbortController().signal);
   assert.equal(outcome.status, "stalled");
   assert.match((outcome as { error: string }).error, /uncommitted changes/);
+});
+
+test("a sandbox Git commit cannot reach review without verification of the final source", async (t) => {
+  const fx = repo(t);
+  fs.writeFileSync(path.join(fx.real, "package.json"), JSON.stringify({ name: "sample", version: "1.0.0", scripts: { build: "node --check server.js" } }));
+  fx.git("add", "package.json");
+  fx.git("commit", "-q", "-m", "add build");
+  const run = implementJobRunner(deps(fx, async ({ cwd, event }) => {
+    event(tool("v", "verification_status"));
+    event(result("v", false, JSON.stringify({ verified: true })));
+    fs.writeFileSync(path.join(cwd, "server.js"), "listen(firstFree(3000))\n");
+    jobGit(cwd, ["commit", "-q", "-am", "unverified edit"]);
+  }));
+  const outcome = await run(job(), new AbortController().signal);
+  assert.equal(outcome.status, "stalled");
+  assert.match((outcome as { error: string }).error, /final source has no passing build/);
 });
 
 test("the time limit stalls the job", async (t) => {

@@ -113,8 +113,12 @@ stops it in the running psm, in either mode, and is remembered across restarts i
 **Implement jobs (P14 phase E).** On a note that fits (or needs your decision), **Go** — in
 Todo's verdict panel or psm's Queue tab — queues an implement job. The executor clones
 your checkout's current commit into `.psm-jobs/<project>/<jobId>` (an ordinary clone, no
-`origin`), and the managed agent works there on `psm/job/<jobId>` with psm's repository
-tools only: no shell, no push, fetch, merge or server commands. Go is the grant for that
+`origin`), and the managed agent works there on `psm/job/<jobId>`. Its
+`sandbox_shell` runs arbitrary commands in a Docker container with the job clone
+as its only writable mount, no provider login, no Docker socket, and no network.
+Build the local image with `docker build -t psm-agent:1 -f docker/agent/Dockerfile docker/agent`.
+PSM's brokered `install_packages` can fetch locked public npm packages; tests,
+builds and browser previews still run through PSM checks. Go is the grant for that
 one job (edit, test, build, preview-check, commit); nothing is added to the project's
 Agent permissions, and workspace deny rules still apply. One job per project runs at a
 time (the hub's lock); implement jobs have their own pool (`PSM_IMPLEMENT_CONCURRENCY`,

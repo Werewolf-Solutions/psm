@@ -5,6 +5,7 @@ import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
+import { JobSandboxShell } from "./executor/sandbox-shell.ts";
 import { GrantRequiredError, ReviewRequiredError, type AgentPermissionStore, type PermissionChecker, type PermissionSnapshot } from "./agent-permissions.ts";
 import type { OperationReviews } from "./agent-reviews.ts";
 import type { MachineCommands } from "./machines/commands.ts";
@@ -36,6 +37,7 @@ export interface ManagedAgentPolicy {
 /** Tools an implement job never sees. */
 export const IMPLEMENT_EXCLUDED_TOOLS: ReadonlySet<string> = new Set([
   "git_push", "git_fetch", "git_merge", "git_switch", "git_branch_delete",
+  "git_commit", "git_stage", "git_branch",
   "server_environments", "server_command",
   "attached_tools", "request_attached_call", "attached_call_result",
   "access_status",
@@ -93,6 +95,12 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     }
   };
   const tools = [
+    ...(policy.profile === "implement" ? [tool("sandbox_shell", "Run any shell command in the job's isolated Docker clone. The shell can read and edit that clone and commit locally. It has no host filesystem, provider credentials, Docker socket or network. Use install_packages for brokered public npm packages and PSM checks for verification.", { project, command: z.string().min(1).max(20_000), timeoutSeconds: z.number().int().min(1).max(600).optional() }, ({ project, command, timeoutSeconds }) => invoke(project, async (repo) => {
+      // An unrestricted shell cannot honor a partial workspace deny. Require
+      // every capability it can exercise before handing it the clone.
+      for (const permission of ["repo.read", "repo.edit", "repo.delete", "test.run", "script.run", "pkg.install", "git.commit"] as const) checker.check(repo.snapshot, permission);
+      return new JobSandboxShell(repo.snapshot.project.path).run(command, signal.signal, (timeoutSeconds ?? 600) * 1000);
+    }))] : []),
     ...(policy.mcp ? [
       tool("attached_tools", "List reviewed project attachments and their MCP tools.", { project }, ({ project }) => invoke(project, (repo) => policy.mcp!.list(repo.snapshot))),
       tool("request_attached_call", "Request an exact attached MCP call for operator approval in Capabilities. Ask the operator to review, then use attached_call_result.", { project, capability: z.string(), tool: z.string(), arguments: z.record(z.string(), z.unknown()) }, (args) => invoke(args.project, (repo) => policy.mcp!.request(repo.snapshot, args.capability, args.tool, args.arguments))),
@@ -146,7 +154,10 @@ export async function runManagedAgent(input: {
   const unavailable = input.policy.profile === "implement"
     ? "If a tool is unavailable, explain the blocker in your final summary; this job cannot request more permissions."
     : "When an operation is unavailable, call access_status for its concrete cause, then tell the operator exactly that (a grant, a review, a connection, a runner, or unsupported) with the PSM question marker.";
-  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nFor code changes, call verification_status, install each required package directory and its dependencies (including server packages used by root scripts), run required builds and use preview_check for frontend routes you changed. Successful dev-server startup does not prove the app works. Recheck after edits. If a check fails or cannot run, keep the work unverified and incomplete; report the concrete blocker, and do not claim completion. Code commits enforce these checks. Use the PSM tools. Grants are enforced outside the conversation. ${unavailable}`;
+  const commitGuidance = input.policy.profile === "implement"
+    ? "Use sandbox_shell for edits and local Git commits. Final review requires passing checks against the current source; use the PSM tools for those checks."
+    : "Code commits enforce these checks. Use the PSM tools.";
+  const context = `${input.context}\n\nPSM managed project scope:\n${scope}\nFor code changes, call verification_status, install each required package directory and its dependencies (including server packages used by root scripts), run required builds and use preview_check for frontend routes you changed. Successful dev-server startup does not prove the app works. Recheck after edits. If a check fails or cannot run, keep the work unverified and incomplete; report the concrete blocker, and do not claim completion. ${commitGuidance} Grants are enforced outside the conversation. ${unavailable}`;
   if (input.engine === "codex") return runCodexManaged({ ...input, server, context });
   const stream = query({
     // SDK MCP servers require streaming input, including for a single user turn.
