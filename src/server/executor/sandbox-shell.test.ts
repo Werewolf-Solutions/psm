@@ -21,6 +21,8 @@ test("an implement shell mounts only its clone and has no container network", as
   assert.ok(run.includes("--cap-drop=ALL"));
   assert.ok(run.includes(`type=bind,source=${fs.realpathSync(clone)},target=/workspace`));
   assert.ok(run.includes(`type=bind,source=${path.join(fs.realpathSync(clone), ".git", "config")},target=/workspace/.git/config,readonly`));
+  assert.ok(run.includes("GIT_AUTHOR_NAME=PSM Implement Job"));
+  assert.ok(run.includes("GIT_COMMITTER_EMAIL=psm-job@localhost"));
   assert.equal(run.at(-1), "git status && echo ready");
   assert.equal(run.filter((entry) => entry.startsWith("type=bind,")).length, 2);
   assert.deepEqual(calls[1].slice(0, 2), ["rm", "-f"]);
@@ -37,6 +39,7 @@ test("the real Docker shell edits and commits only in its mounted clone", { skip
   git("config", "user.email", "psm-test@example.invalid");
   fs.writeFileSync(path.join(clone, "file.txt"), "before\n");
   git("add", "."); git("commit", "-q", "-m", "start");
+  git("config", "--unset", "user.name"); git("config", "--unset", "user.email");
   fs.writeFileSync(path.join(root, "outside.txt"), "host only\n");
   const output = await new JobSandboxShell(clone).run("test ! -e /workspace/../outside.txt && printf 'after\\n' > file.txt && git add file.txt && git commit -qm change && git status --short && ! curl --max-time 2 -fsS https://example.com >/dev/null 2>&1 && echo isolated", new AbortController().signal);
   assert.match(output, /isolated/);

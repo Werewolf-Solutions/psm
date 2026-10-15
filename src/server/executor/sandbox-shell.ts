@@ -47,6 +47,8 @@ export class JobSandboxShell {
       "--mount", `type=bind,source=${realClone},target=/workspace`,
       "--mount", `type=bind,source=${path.join(git, "config")},target=/workspace/.git/config,readonly`,
       "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "GIT_CONFIG_NOSYSTEM=1", "--env", "GIT_CONFIG_GLOBAL=/dev/null",
+      "--env", "GIT_AUTHOR_NAME=PSM Implement Job", "--env", "GIT_AUTHOR_EMAIL=psm-job@localhost",
+      "--env", "GIT_COMMITTER_NAME=PSM Implement Job", "--env", "GIT_COMMITTER_EMAIL=psm-job@localhost",
       process.env.PSM_AGENT_IMAGE || DEFAULT_IMAGE, "bash", "-lc", command];
     try { return await this.execute(args, controller.signal); }
     finally {

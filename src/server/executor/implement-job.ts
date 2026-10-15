@@ -106,7 +106,69 @@ export function prepareClone(realPath: string, dir: string, jobId: string): stri
     }
     if (value) jobGit(dir, ["config", key, value]);
   }
+  hydrateLocalSubmodules(realPath, dir);
   return base;
+}
+
+/** Copy recorded submodule source from the registered checkout, without remote access. */
+export function hydrateLocalSubmodules(realPath: string, dir: string, verifyOnly = false): void {
+  const modulesFile = path.join(dir, ".gitmodules");
+  if (!fs.existsSync(modulesFile)) return;
+  if (!fs.lstatSync(modulesFile).isFile() || fs.lstatSync(modulesFile).isSymbolicLink()) throw new Error("Job clone has unsafe submodule metadata.");
+  const configured = new Set([...fs.readFileSync(modulesFile, "utf8").matchAll(/^\s*path\s*=\s*(\S+)\s*$/gm)].map(match => match[1]));
+  const entries = jobGit(dir, ["ls-files", "--stage", "-z"]).split("\0").filter(Boolean);
+  for (const entry of entries) {
+    const match = /^160000 ([0-9a-f]{40}) 0\t(.+)$/s.exec(entry);
+    if (!match || !configured.has(match[2])) continue;
+    const [, commit, relative] = match;
+    if (path.isAbsolute(relative) || relative.split("/").some(part => !part || part === "." || part === "..")) throw new Error(`Invalid submodule path ${relative}.`);
+    const source = path.join(realPath, relative);
+    const target = path.join(dir, relative);
+    const realRoot = fs.realpathSync(realPath);
+    if (!fs.existsSync(source) || fs.lstatSync(source).isSymbolicLink() || !fs.lstatSync(source).isDirectory()
+      || !fs.realpathSync(source).startsWith(realRoot + path.sep)
+      || !fs.existsSync(path.join(source, ".git")) || fs.realpathSync(source) !== realGit(source, ["rev-parse", "--show-toplevel"])) {
+      throw new Error(`Submodule ${relative} is not checked out in the registered project. Initialize it there before retrying this job.`);
+    }
+    let tree: string;
+    try { tree = execFileSync("git", ["-C", source, "ls-tree", "-r", "-z", commit], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }); }
+    catch { throw new Error(`Submodule ${relative} does not have the commit recorded by the project. Update it there before retrying this job.`); }
+    let total = 0;
+    const expected = new Set<string>();
+    for (const item of tree.split("\0").filter(Boolean)) {
+      const file = /^(100644|100755) blob [0-9a-f]{40}\t(.+)$/s.exec(item);
+      if (!file) throw new Error(`Submodule ${relative} contains an unsupported link or nested repository.`);
+      const name = file[2];
+      if (path.isAbsolute(name) || name.includes("\\") || name.split("/").some(part => !part || part === "." || part === ".." || part === ".git")) throw new Error(`Invalid file in submodule ${relative}.`);
+      expected.add(name);
+      const bytes = execFileSync("git", ["-C", source, "show", `${commit}:${name}`], { maxBuffer: 32 * 1024 * 1024, timeout: 30_000 });
+      total += bytes.length;
+      if (total > 512 * 1024 * 1024) throw new Error(`Submodule ${relative} exceeds the job snapshot limit.`);
+      const destination = path.join(target, name);
+      let parent = target;
+      for (const segment of name.split("/").slice(0, -1)) {
+        if (fs.existsSync(parent) && (!fs.lstatSync(parent).isDirectory() || fs.lstatSync(parent).isSymbolicLink())) throw new Error(`Submodule ${relative} has an unsafe directory in the job clone.`);
+        parent = path.join(parent, segment);
+      }
+      if (fs.existsSync(parent) && (!fs.lstatSync(parent).isDirectory() || fs.lstatSync(parent).isSymbolicLink())) throw new Error(`Submodule ${relative} has an unsafe directory in the job clone.`);
+      try { if (fs.lstatSync(destination).isSymbolicLink()) throw new Error(`Submodule ${relative} has a linked file in the job clone.`); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      if (fs.existsSync(destination)) {
+        if (!fs.lstatSync(destination).isFile() || !fs.readFileSync(destination).equals(bytes)) throw new Error(`Submodule ${relative} changed inside the job clone; its files cannot be committed here.`);
+      } else if (verifyOnly) throw new Error(`Submodule ${relative} is incomplete in the job clone.`);
+      else { fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, bytes, { mode: file[1] === "100755" ? 0o755 : 0o644 }); }
+    }
+    const scan = (directory: string, prefix = "") => {
+      if (!fs.existsSync(directory)) return;
+      for (const item of fs.readdirSync(directory, { withFileTypes: true })) {
+        const name = `${prefix}${item.name}`;
+        if (item.isSymbolicLink()) throw new Error(`Submodule ${relative} has a linked file in the job clone.`);
+        if (item.isDirectory()) scan(path.join(directory, item.name), `${name}/`);
+        else if (!expected.has(name)) throw new Error(`Submodule ${relative} has an extra file in the job clone; its files cannot be committed here.`);
+      }
+    };
+    scan(target);
+  }
 }
 
 /** HEAD, the diff and the new files: what "nothing changed" is measured against. */
@@ -127,6 +189,13 @@ export function treeState(dir: string): string {
     hash.update(String(Date.now())); // cannot tell: never call it "unchanged"
   }
   return hash.digest("hex");
+}
+
+/** Current files changed by the job, including committed and untracked work. */
+export function jobChangedFiles(dir: string, base: string): string[] {
+  const changed = jobGit(dir, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", base]);
+  const untracked = jobGit(dir, ["ls-files", "--others", "--exclude-standard", "-z"]);
+  return [...new Set(`${changed}${untracked}`.split("\0").filter(Boolean))];
 }
 
 /** The branch as a review result, or why it cannot be one. */
@@ -156,13 +225,14 @@ export function collectResult(dir: string, jobId: string, base: string): { ok: t
 
 export const IMPLEMENT_SYSTEM = `You implement one small, already-triaged change in a software project, unattended.
 
-You work in a private clone of the project, on branch psm/job/<id>. Nothing you do reaches the owner's checkout until they review and accept it. Use sandbox_shell for unrestricted commands, reading and editing inside /workspace. It has no host files or network. Do not push, fetch, deploy or switch branches. Use PSM's brokered install_packages, run_tests, run_script and preview_check for verification.
+You work in a private clone of the project, on branch psm/job/<id>. Nothing you do reaches the owner's checkout until they review and accept it. Use sandbox_shell for unrestricted commands, reading and editing inside /workspace. It has no host files or network. Do not edit copied submodule files; the job cannot commit them. Do not push, fetch, deploy or switch branches. Use PSM's brokered install_packages, run_tests, run_script and preview_check for verification.
 
 Work like this:
 1. Read the relevant code first. Keep the change as small as the task allows; do not refactor unrelated code.
-2. Make the change, then install packages if needed and run the project's tests and build (verification_status says which checks a commit needs; use preview_check for frontend routes you changed).
-3. When the checks pass, call verification_status after the last edit. Then commit locally with git in sandbox_shell and a clear message. Only verified work goes to review.
-4. If you cannot finish (a decision only the owner can make, a missing dependency, a check you cannot fix), stop and say exactly why. Do not loop on the same failure.
+2. Make the change, then install packages if needed, run the project's tests, and run the builds listed by verification_status. Use preview_check for frontend routes you changed.
+3. Treat any nonzero test, build or preview result as a failure, including failures that existed before your edit. Never describe a failing check as passed or the job as ready for review.
+4. When every check passes, call verification_status after the last edit. Then commit locally with git in sandbox_shell and a clear message. Only verified work goes to review. The sandbox already supplies a Git author and committer; do not change Git config.
+5. If you cannot finish (a decision only the owner can make, a missing dependency, a check you cannot fix), stop and say exactly why. Do not loop on the same failure.
 
 End with a short summary for the reviewer: what changed, which checks passed, anything they should look at.`;
 
@@ -227,6 +297,8 @@ export function implementJobRunner(deps: ImplementDeps) {
     let base: string;
     if (job.continueClone && fs.existsSync(baseFile)) {
       base = fs.readFileSync(baseFile, "utf8").trim();
+      try { hydrateLocalSubmodules(project.path, dir); }
+      catch (err) { return { status: "failed", error: `could not prepare submodules: ${(err as Error).message}` }; }
       deps.activity?.note(job.jobId, `Continuing in the job's clone (${job.revisions.length} revision request${job.revisions.length === 1 ? "" : "s"})`);
     } else {
       try {
@@ -260,6 +332,7 @@ export function implementJobRunner(deps: ImplementDeps) {
     const policy: ManagedAgentPolicy = {
       store: deps.store,
       checker: new JobPermissions(job.jobId, deps.workspaceRules),
+      affectedFiles: () => jobChangedFiles(realDir, base),
       profile: "implement",
       snapshots: [jobSnapshot(project, realDir, job.jobId)],
       // RepositoryTools already confines every relative path to this ordinary
@@ -272,7 +345,7 @@ export function implementJobRunner(deps: ImplementDeps) {
       }),
       projectBoundaries: [],
     };
-    const repository = new RepositoryTools(policy.snapshots[0], policy.checker!, policy.protectedRoots);
+    const repository = new RepositoryTools(policy.snapshots[0], policy.checker!, policy.protectedRoots, policy.affectedFiles);
     const pendingTools = new Map<string, string>();
     let verifiedDigest: string | null = null;
     let chosen: ResolvedJobModel;
@@ -341,6 +414,10 @@ export function implementJobRunner(deps: ImplementDeps) {
 
     const collected = collectResult(realDir, job.jobId, base);
     if (!collected.ok) return { status: "stalled", error: collected.reason };
+    try { hydrateLocalSubmodules(project.path, realDir, true); }
+    catch (error) { return { status: "stalled", error: `Submodule verification failed: ${(error as Error).message}` }; }
+    const failedChecks = [...stopRules.checks].filter(([, ok]) => !ok).map(([name]) => name.replace(":", " "));
+    if (failedChecks.length) return { status: "stalled", error: `Checks still fail: ${failedChecks.join(", ")}. A failed test, build or preview cannot be reported as verified.` };
     try {
       if (repository.verificationPackages().length && verifiedDigest !== taskInputs(repository).digest) {
         return { status: "stalled", error: "The final source has no passing build and browser verification. Run PSM checks, call verification_status after the last edit, then commit." };

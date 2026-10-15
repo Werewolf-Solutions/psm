@@ -118,7 +118,9 @@ your checkout's current commit into `.psm-jobs/<project>/<jobId>` (an ordinary c
 as its only writable mount, no provider login, no Docker socket, and no network.
 Build the local image with `docker build -t psm-agent:1 -f docker/agent/Dockerfile docker/agent`.
 PSM's brokered `install_packages` can fetch locked public npm packages; tests,
-builds and browser previews still run through PSM checks. Go is the grant for that
+builds and browser previews still run through PSM checks. Recorded submodules are
+copied from the registered checkout when already available locally; initialize a
+missing submodule there before retrying a job. Go is the grant for that
 one job (edit, test, build, preview-check, commit); nothing is added to the project's
 Agent permissions, and workspace deny rules still apply. One job per project runs at a
 time (the hub's lock); implement jobs have their own pool (`PSM_IMPLEMENT_CONCURRENCY`,

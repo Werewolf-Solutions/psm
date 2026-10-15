@@ -26,6 +26,8 @@ export interface ManagedAgentPolicy {
   taskNotes?: string;
   /** Checks each operation instead of `store`: an implement job's own grant. */
   checker?: PermissionChecker;
+  /** Files changed by an implement job, used to select package checks. */
+  affectedFiles?: () => string[];
   /**
    * `implement`: an unattended job in its own clone. No push, fetch, merge,
    * branch switching, server commands or attached integrations — the tools are
@@ -66,7 +68,7 @@ export function managedAgentOptions(server: ReturnType<typeof createSdkMcpServer
 export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal: AbortController) {
   const input = { policy, signal };
   const checker = policy.checker ?? policy.store;
-  const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, checker, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))])]));
+  const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, checker, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))], input.policy.affectedFiles)]));
   // A preview's backend services may only come from projects already in this session's scope.
   const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name);
   const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName)]));

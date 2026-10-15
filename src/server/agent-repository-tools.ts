@@ -16,7 +16,7 @@ export class RepositoryTools {
   private readonly verifiedBuilds = new Map<string, string>();
   private readonly verifiedPreviews = new Map<string, string>();
   private readonly staged = new Map<string, { index: string; head: string }>();
-  constructor(readonly snapshot: PermissionSnapshot, private readonly store: PermissionChecker, private readonly protectedRoots: readonly string[] = []) {}
+  constructor(readonly snapshot: PermissionSnapshot, private readonly store: PermissionChecker, private readonly protectedRoots: readonly string[] = [], private readonly affectedFiles?: () => string[]) {}
   private allow(permission: AgentPermission): void { this.store.check(this.snapshot, permission); }
   /** Reject aliases rather than relying on a lexical path-prefix check. */
   resolve(relative: string, missing = false, writing = false): string {
@@ -75,13 +75,22 @@ export class RepositoryTools {
     this.allow("repo.read");
     const dotGit = path.join(this.snapshot.project.path, ".git");
     if (!fs.existsSync(dotGit) || !fs.lstatSync(dotGit).isDirectory()) return this.list();
-    return this.git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+    const tracked = this.git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"])
       .split("\0")
       .filter(Boolean)
       .filter((file) => {
         try { return fs.statSync(this.resolve(file)).isFile(); }
         catch { return false; }
       });
+    // A job clone contains plain, locally copied files for recorded submodules.
+    // Parent Git reports only the gitlink, so include those files in test inputs.
+    const modulesFile = path.join(this.snapshot.project.path, ".gitmodules");
+    if (!fs.existsSync(modulesFile)) return tracked;
+    const configured = new Set([...fs.readFileSync(modulesFile, "utf8").matchAll(/^\s*path\s*=\s*(\S+)\s*$/gm)].map(match => match[1]));
+    const gitlinks = this.git(["ls-files", "--stage", "-z"]).split("\0").filter(Boolean)
+      .map(entry => /^160000 [0-9a-f]{40} 0\t(.+)$/s.exec(entry)?.[1]).filter((file): file is string => !!file && configured.has(file));
+    if (!gitlinks.length) return tracked;
+    return [...new Set([...tracked, ...this.list().filter(file => gitlinks.some(link => file.startsWith(`${link}/`)) )])];
   }
   search(text: string): Array<{ file: string; line: number; text: string }> {
     this.allow("repo.read");
@@ -276,12 +285,17 @@ export class RepositoryTools {
     return { verified: packages.every(pkg => (!pkg.build || this.verifiedBuilds.get(pkg.directory) === digest) && (!pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest)), packages: packages.map(pkg => ({ ...pkg, buildVerified: !pkg.build || this.verifiedBuilds.get(pkg.directory) === digest, browserVerified: !pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest })) };
   }
   verificationPackages(): Array<{ directory: string; build: boolean; browser: boolean }> {
-    return taskInputs(this).entries.filter(({ file }) => path.posix.basename(file) === "package.json").map(({ file }) => {
+    const packages = taskInputs(this).entries.filter(({ file }) => path.posix.basename(file) === "package.json").map(({ file }) => {
       const pkg = JSON.parse(this.read(file));
       const deps = { ...pkg.dependencies, ...pkg.devDependencies };
       const browser = ["react", "vue", "@angular/core", "svelte", "next", "nuxt", "vite"].some(name => name in deps);
       return { directory: packageDirectory(file), build: typeof pkg.scripts?.build === "string", browser };
-    }).filter(pkg => pkg.build || pkg.browser);
+    });
+    const changed = this.affectedFiles?.();
+    const affected = changed ? new Set(changed.map(file => packages
+      .filter(pkg => pkg.directory === "." || file.startsWith(`${pkg.directory}/`))
+      .sort((a, b) => b.directory.length - a.directory.length)[0]?.directory)) : null;
+    return packages.filter(pkg => (pkg.build || pkg.browser) && (!affected || affected.has(pkg.directory)));
   }
   private requireVerification(): void {
     const names = this.stagedNames();
