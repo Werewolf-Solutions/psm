@@ -81,6 +81,23 @@ The reason it is shaped this way: **a page served from the internet cannot read 
 so the something local is the agent, and the page is just a page. Your code, logs and AI
 output never reach a server.
 
+### The executor (P14, opt-in)
+
+`npm run executor` (or `PSM_EXECUTOR=1` with either mode) also runs the **executor**: it
+claims triage jobs from the PSM hub in werewolf-dapp, runs one tool-less `claude` call per
+job in the project's folder, and posts back a validated verdict
+([contract](docs/roadmaps/p14-hub-contract.md)). It is off by default.
+
+- It uses psm's Werewolf session, so it claims nothing until you **Continue with Werewolf**
+  on the local cockpit, and it waits again after a restart.
+- It only triages projects this machine has, matched by their `prj_` id.
+- Stop rules: five minutes per triage, one job per project, hub errors back off up to
+  60 s. **Kill switch:** `PSM_EXECUTOR_PAUSED=1`, or `"paused": true` in
+  `.psm-executor.json` (read live). A stopped or paused job posts nothing; its lease
+  expires and the hub hands it out again.
+- `GET /api/executor` reports its state. `PSM_TRIAGE_MODEL` picks the model;
+  `PSM_EXECUTOR_CONCURRENCY` (1–2) sizes the pool.
+
 ## Linked folders — what psm looks at
 
 Dev mode scans `workspaceRoot` from `psm.config.json`, as it always has. Everywhere

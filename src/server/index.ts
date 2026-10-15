@@ -119,6 +119,7 @@ import {
 } from "./rules.ts";
 import { collectSkillUsage } from "./skills.ts";
 import { runtimeServices, startRuntimeDiscovery } from "./runtime.ts";
+import { executorStatus, startExecutorService } from "./executor/service.ts";
 import {
   account as cloudAccount,
   billingPortal as cloudBillingPortal,
@@ -2458,6 +2459,11 @@ local.use(machineRouter({
   actor: () => `local:${os.userInfo().username}`,
 }));
 
+// The P14 executor, when PSM_EXECUTOR=1: connected / last claim / jobs running.
+local.get("/api/executor", (_req, res) => {
+  res.json(executorStatus());
+});
+
 // The one line that decides whether this process can touch the machine.
 app.use(local);
 
@@ -2529,5 +2535,6 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 }
 
 startRuntimeDiscovery();
+startExecutorService(); // off unless PSM_EXECUTOR=1
 setTimeout(() => runDueBackups(getProjects()), 30_000).unref();
 setInterval(() => runDueBackups(getProjects()), 60 * 60 * 1000).unref();
