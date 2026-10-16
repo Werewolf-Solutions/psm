@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { memoryTriageCache, readClaudeJson, type TriageEngine } from "../triage/run.ts";
-import { ExecutorActivity } from "./activity.ts";
+import { activityLog, ExecutorActivity } from "./activity.ts";
 import type { ExecutorJob, TriageJob } from "./client.ts";
 import { triageJobRunner } from "./triage-job.ts";
 
@@ -90,4 +90,24 @@ test("claude's JSON output yields the model, cost and time", () => {
   const answer = readClaudeJson(JSON.stringify({ result: "{}", total_cost_usd: 0.02, duration_ms: 3000, usage: { input_tokens: 10, output_tokens: 5 }, modelUsage: { "claude-opus-5-5": {} } }));
   assert.ok(answer.ok);
   assert.deepEqual(answer.ok && answer.meta, { model: "claude-opus-5-5", costUsd: 0.02, durationMs: 3000, inputTokens: 10, outputTokens: 5 });
+});
+
+test("a job's log is plain text with tool output expanded, prompts only on request", () => {
+  const activity = new ExecutorActivity();
+  activity.claimed({ ...job(), kind: "implement" } as unknown as ExecutorJob);
+  activity.started("job_1", "SYSTEM RULES", "TASK TEXT");
+  activity.agentLine("job_1", { type: "message", text: "Let me run the tests." });
+  activity.agentLine("job_1", { type: "tool", text: "run_tests" });
+  const output = `TAP version 13\n${"ok 1 - fine\n".repeat(2000)}# fail 13\n# pass 59`;
+  activity.agentLine("job_1", { type: "result", ok: false, text: output });
+
+  const log = activityLog(activity.get("job_1")!);
+  assert.match(log, /project: todo-app \(prj_aaaa\)/);
+  assert.match(log, /AGENT\nLet me run the tests\./);
+  assert.match(log, /→ run_tests/);
+  assert.match(log, /✗ result\n```\nTAP version 13/);
+  assert.match(log, /# fail 13\n# pass 59\n```/, "the end of long command output survives the cap");
+  assert.match(log, /characters cut/);
+  assert.doesNotMatch(log, /TASK TEXT/);
+  assert.match(activityLog(activity.get("job_1")!, { full: true }), /## Prompt as sent\n```\nTASK TEXT/);
 });

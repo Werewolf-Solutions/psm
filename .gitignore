@@ -19,6 +19,7 @@ node_modules/
 .psm-cloud-device.json
 .psm-cloud.json
 .psm-agent.json
+.psm-native-cache/
 .psm-links.json
 .psm-data/
 .psm-credentials/

@@ -20,6 +20,9 @@
     preparing: ["Preparing its clone", "busy"],
     implementing: ["Implementing", "busy"],
     review: ["Ready for review", "ok"],
+    merged: ["Merged", "ok"],
+    rejected: ["Rejected", "warn"],
+    revising: ["Sent back", "busy"],
     stalled: ["Stalled", "warn"],
     failed: ["Failed", "bad"],
     abandoned: ["Stopped", "warn"],
@@ -140,7 +143,9 @@
     const head = node("div", "", "exec-detail-head");
     const title = node("div");
     title.append(node("h3", entry.projectName), node("div", `claimed ${time(entry.claimedAt)}${entry.attempt > 1 ? ` · attempt ${entry.attempt}` : ""} · job ${entry.jobId}`, "exec-sub"));
-    head.append(title, badge(entry.state));
+    const actions = node("div", "", "exec-detail-actions");
+    actions.append(copyLogButton(entry.jobId, "Copy log", false), copyLogButton(entry.jobId, "+ prompts", true), badge(entry.state));
+    head.append(title, actions);
     root.append(head);
     if (entry.kind === "implement") return renderImplement(root, entry);
 
@@ -221,19 +226,21 @@
         }
       }
       root.append(list);
-    } else if (!["review", "stalled", "failed", "abandoned"].includes(entry.state)) {
+    } else if (!["review", "merged", "rejected", "revising", "stalled", "failed", "abandoned"].includes(entry.state)) {
       root.append(bubble("Agent", "exec-from-claude exec-pending", node("p", entry.state === "preparing" ? "Preparing the job's own clone…" : "Starting…")));
     }
     if (entry.result) {
       const r = entry.result;
-      const card = node("div", "", "exec-verdict exec-verdict-fits");
+      const card = node("div", "", `exec-verdict exec-verdict-${entry.state === "rejected" ? "doesnt_fit" : "fits"}`);
       const headline = node("div", "", "exec-verdict-head");
-      headline.append(node("strong", "Ready for review"), node("span", `${r.commits.length} commit${r.commits.length === 1 ? "" : "s"} · ${r.diffStat.files} files · +${r.diffStat.insertions} −${r.diffStat.deletions}`, "exec-size"));
+      headline.append(node("strong", STATE[entry.state]?.[0] || "Ready for review"), node("span", `${r.commits.length} commit${r.commits.length === 1 ? "" : "s"} · ${r.diffStat.files} files · +${r.diffStat.insertions} −${r.diffStat.deletions}`, "exec-size"));
       card.append(headline, node("p", r.summary));
-      const review = node("button", "Review the change", "btn btn-primary exec-qopen");
-      review.type = "button";
-      review.onclick = () => openReview(entry.jobId);
-      card.append(review);
+      if (entry.state === "review") {
+        const review = node("button", "Review the change", "btn btn-primary exec-qopen");
+        review.type = "button";
+        review.onclick = () => openReview(entry.jobId);
+        card.append(review);
+      }
       root.append(card);
     }
     if (entry.error) root.append(node("div", entry.error, "exec-error"));
@@ -245,6 +252,28 @@
       timeline.append(li);
     }
     root.append(timeline);
+  }
+
+  /** The job as plain text, to paste into a conversation instead of screenshots. */
+  function copyLogButton(jobId, label, full) {
+    const button = node("button", label, "btn btn-small");
+    button.type = "button";
+    button.title = full ? "Copy the log including the prompts psm sent" : "Copy the job's whole log as text: transcript, tool output, result, timeline";
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        const response = await ctx.api(`/api/executor/activity/${encodeURIComponent(jobId)}/log${full ? "?full=1" : ""}`);
+        const text = await response.text();
+        if (!response.ok) throw new Error(text.trim() || `Request failed (${response.status})`);
+        if (!await copyText(text)) throw new Error("The browser refused clipboard access");
+        toast(`Copied the job log (${kb(text)})`);
+      } catch (error) {
+        toast(error.message || "Could not copy the log");
+      } finally {
+        button.disabled = false;
+      }
+    };
+    return button;
   }
 
   async function select(jobId) {

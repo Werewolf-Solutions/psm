@@ -23,7 +23,9 @@ import { AgentPermissionStore } from "../agent-permissions.ts";
 import { runManagedAgent } from "../agent-permission-runtime.ts";
 import { databaseFile } from "../db.ts";
 import { executorId, executorPaused, hubClient, runExecutor, type ExecutorEvent, type ExecutorJob, type JobKind, type JobOutcome } from "./client.ts";
+import { runBaseline } from "./baseline.ts";
 import { implementJobRunner } from "./implement-job.ts";
+import { stepReporter } from "./progress.ts";
 import { triageJobRunner } from "./triage-job.ts";
 import { ExecutorActivity } from "./activity.ts";
 import { statePath } from "../../store.ts";
@@ -166,6 +168,7 @@ function launch(): { stop: () => Promise<void> } {
   // Implement jobs (phase E): their own pool, so a long job never holds up
   // triage. Each runs in its own clone under the job's own grant.
   const permissions = new AgentPermissionStore();
+  const steps = stepReporter((jobId, step) => hub.heartbeat(jobId, step), (line) => console.log(line));
   const runImplementJob = implementJobRunner({
     findProject: (projectId) => {
       const project = getProjects().find((candidate) => candidate.id === projectId);
@@ -175,13 +178,16 @@ function launch(): { stop: () => Promise<void> } {
     store: permissions,
     workspaceRules: (workspaceId) => permissions.workspaceRules(workspaceId),
     protectedRoots: [PSM_CODE_ROOT, path.resolve(databaseFile()), `${path.resolve(databaseFile())}-wal`, `${path.resolve(databaseFile())}-shm`],
+    baseline: runBaseline,
     runAgent: runManagedAgent,
     projectEngine: (projectId) => getProjects().find((candidate) => candidate.id === projectId)?.aiEngine ?? "claude",
+    progress: (jobId, step) => steps.report(jobId, step),
     activity: executorActivity(),
   });
   const runImplement = async (job: ExecutorJob, signal: AbortSignal): Promise<JobOutcome> => {
     if (job.kind !== "implement") return { status: "failed", error: `the implement pool cannot run a ${job.kind} job` };
     const outcome = await runImplementJob(job, signal);
+    steps.forget(job.jobId);
     executorActivity().finishing(job.jobId, outcome);
     return outcome;
   };

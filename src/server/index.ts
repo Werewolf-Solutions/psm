@@ -123,6 +123,7 @@ import {
 } from "./rules.ts";
 import { collectSkillUsage } from "./skills.ts";
 import { runtimeServices, startRuntimeDiscovery, werewolfApiUrl } from "./runtime.ts";
+import { activityLog } from "./executor/activity.ts";
 import { executorActivity, executorForcedByEnv, executorStatus, jobsDirectory, setExecutorRunning, startExecutorService } from "./executor/service.ts";
 import { clonePath } from "./executor/implement-job.ts";
 import { acceptJob, discardClone, readJobDiff } from "./executor/review.ts";
@@ -2553,6 +2554,12 @@ local.get("/api/executor/activity/:jobId", (req, res) => {
   if (!entry) return res.status(404).json({ error: "No such job in the executor's history." });
   res.json(entry);
 });
+// The same job as plain text to paste into a conversation; ?full=1 adds the prompts.
+local.get("/api/executor/activity/:jobId/log", (req, res) => {
+  const entry = executorActivity().get(req.params.jobId);
+  if (!entry) return res.status(404).type("text/plain").send("No such job in the executor's history.\n");
+  res.type("text/plain").send(activityLog(entry, { full: req.query.full === "1" }));
+});
 
 // The hub's whole queue for this user: waiting, being triaged (and by which
 // executor), and done with its verdict. Read through the Werewolf session.
@@ -2632,6 +2639,8 @@ local.post("/api/executor/jobs/:jobId/accept", jobRoute(async (req, res) => {
   const subject = job.result?.commits?.[0]?.subject || "implement job";
   const merged = acceptJob(clone.project.path, clone.dir, job.jobId, `Merge ${job.result?.branch ?? job.jobId}: ${subject}`);
   if (!merged.ok) return res.status(409).json({ error: merged.reason, branchKept: merged.branchKept });
+  // Recorded before telling the hub: the merge happened whatever the hub says.
+  executorActivity().reviewed(job.jobId, "accept", `${merged.into} (${merged.mergeCommit.slice(0, 8)})`);
   const saved = await hubForCockpit().reviewJob(job.jobId, "accept");
   discardClone(clone.dir);
   res.json({ job: saved, merged });
@@ -2640,6 +2649,7 @@ local.post("/api/executor/jobs/:jobId/reject", jobRoute(async (req, res) => {
   const job = await findJob(req.params.jobId);
   if (!job) return res.status(404).json({ error: "No such job." });
   const saved = await hubForCockpit().reviewJob(job.jobId, "reject");
+  executorActivity().reviewed(job.jobId, "reject");
   const clone = localClone(job);
   if (clone) discardClone(clone.dir);
   res.json({ job: saved });
@@ -2647,7 +2657,9 @@ local.post("/api/executor/jobs/:jobId/reject", jobRoute(async (req, res) => {
 local.post("/api/executor/jobs/:jobId/revise", jobRoute(async (req, res) => {
   const comment = String(req.body?.comment || "").trim();
   if (!comment) return res.status(400).json({ error: "Say what to change." });
-  res.json({ job: await hubForCockpit().reviewJob(req.params.jobId, "revise", comment) });
+  const saved = await hubForCockpit().reviewJob(req.params.jobId, "revise", comment);
+  executorActivity().reviewed(req.params.jobId, "revise", comment.slice(0, 300));
+  res.json({ job: saved });
 }));
 local.post("/api/executor/jobs/:jobId/cancel", jobRoute(async (req, res) => {
   const job = await hubForCockpit().cancelJob(req.params.jobId);

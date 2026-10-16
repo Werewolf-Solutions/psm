@@ -27,6 +27,9 @@ export type ActivityState =
   | "posting"
   | "triaged"
   | "review"
+  | "merged"
+  | "rejected"
+  | "revising"
   | "stalled"
   | "failed"
   | "abandoned";
@@ -76,8 +79,16 @@ const MAX_PROMPT = 96 * 1024;
 const MAX_ANSWER = 32 * 1024;
 const MAX_AGENT_LINES = 400;
 const MAX_AGENT_TEXT = 4000;
+const MAX_RESULT_TEXT = 12000;
 
 const cap = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n…[cut at ${max} characters]` : text);
+/** Command output ends with what matters (failures, totals): keep its head and its tail. */
+const capMiddle = (text: string, max: number) => {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.3);
+  const tail = max - head;
+  return `${text.slice(0, head)}\n…[${text.length - max} characters cut]…\n${text.slice(-tail)}`;
+};
 
 export class ExecutorActivity {
   #entries: ActivityEntry[] = [];
@@ -180,7 +191,8 @@ export class ExecutorActivity {
   agentLine(jobId: string, line: Omit<AgentLine, "at">): void {
     const entry = this.#find(jobId);
     if (!entry) return;
-    entry.agent.push({ ...line, at: this.now(), text: cap(line.text, MAX_AGENT_TEXT) });
+    const text = line.type === "result" ? capMiddle(line.text, MAX_RESULT_TEXT) : cap(line.text, MAX_AGENT_TEXT);
+    entry.agent.push({ ...line, at: this.now(), text });
     if (entry.agent.length > MAX_AGENT_LINES) entry.agent.splice(0, entry.agent.length - MAX_AGENT_LINES);
     this.#revision++;
     this.#save();
@@ -192,7 +204,7 @@ export class ExecutorActivity {
     if (!entry) return;
     entry.systemPrompt = cap(systemPrompt, MAX_PROMPT);
     entry.prompt = cap(prompt, MAX_PROMPT);
-    this.#touch(entry, "Started the agent in the job's own clone (psm's repository tools only, no push)", "implementing");
+    this.#touch(entry, "Started the agent in the job's own clone (a shell in an isolated container, no network, no push)", "implementing");
   }
 
   step(job: ExecutorJob, step: JobStep): void {
@@ -265,6 +277,17 @@ export class ExecutorActivity {
     this.#touch(entry, label, state);
   }
 
+  /** The owner reviewed the job in psm: merged, rejected, or sent back with a comment. */
+  reviewed(jobId: string, action: "accept" | "reject" | "revise", detail = ""): void {
+    const entry = this.#find(jobId);
+    if (!entry) return;
+    const [label, state]: [string, ActivityState] =
+      action === "accept" ? [`Merged into ${detail || "your branch"}`, "merged"]
+      : action === "reject" ? ["Rejected: the branch was dropped, nothing reached your repo", "rejected"]
+      : [`Sent back for changes: ${detail}`, "revising"];
+    this.#touch(entry, label, state);
+  }
+
   abandoned(jobId: string, reason: string): void {
     const entry = this.#find(jobId);
     if (!entry) return;
@@ -282,4 +305,56 @@ export class ExecutorActivity {
     const entry = this.#find(jobId);
     return entry ? structuredClone(entry) : null;
   }
+}
+
+const stamp = (ms: number) => new Date(ms).toISOString().replace("T", " ").replace(/\.\d+Z$/, "Z");
+const fence = (text: string) => `\`\`\`\n${text.replace(/\n+$/, "")}\n\`\`\``;
+
+/**
+ * One job as plain text, to paste into a conversation instead of screenshots:
+ * the note, the agent's whole transcript with tool output expanded, the
+ * result or error, and the timeline. `full` adds the prompts psm sent.
+ */
+export function activityLog(entry: ActivityEntry, { full = false } = {}): string {
+  const out: string[] = [];
+  out.push(`# psm executor job ${entry.jobId}`);
+  out.push(
+    [
+      `project: ${entry.projectName} (${entry.projectId})`,
+      `kind: ${entry.kind}`,
+      `state: ${entry.state}`,
+      `attempt: ${entry.attempt}`,
+      `claimed: ${stamp(entry.claimedAt)}`,
+      `finished: ${entry.finishedAt ? stamp(entry.finishedAt) : "not yet"}`,
+      entry.meta?.model ? `model: ${entry.meta.model}` : null,
+      entry.meta?.costUsd != null ? `cost: $${entry.meta.costUsd.toFixed(4)}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  );
+  out.push(`## Todo note\n${entry.text}`);
+  if (entry.agent.length) {
+    const lines = entry.agent.map((line) => {
+      const at = stamp(line.at).slice(11, 19);
+      if (line.type === "message") return `[${at}] AGENT\n${line.text}`;
+      if (line.type === "tool") return `[${at}] → ${line.text}`;
+      if (line.type === "result") return `[${at}] ${line.ok ? "✓" : "✗"} result\n${fence(line.text)}`;
+      if (line.type === "check") return `[${at}] check ${line.ok ? "passed" : "FAILED"}: ${line.text}`;
+      return `[${at}] STOP: ${line.text}`;
+    });
+    out.push(`## Agent transcript (${entry.agent.length} lines)\n${lines.join("\n\n")}`);
+  }
+  if (entry.answer) out.push(`## Claude's answer\n${fence(entry.answer)}`);
+  if (entry.verdict) out.push(`## Verdict\n${fence(JSON.stringify(entry.verdict, null, 2))}`);
+  if (entry.result) {
+    const r = entry.result;
+    out.push(`## Result\nmodel: ${r.model.engine} ${r.model.model ?? "default"}${r.model.effort ? ` (${r.model.effort})` : ""} — ${r.model.reason}\nbranch: ${r.branch}\ncommits: ${r.commits.length}\nfiles: ${r.diffStat.files} (+${r.diffStat.insertions} −${r.diffStat.deletions})\n\n${r.summary}`);
+  }
+  if (entry.error) out.push(`## Error\n${entry.error}`);
+  out.push(`## Timeline\n${entry.timeline.map((event) => `[${stamp(event.at).slice(11, 19)}] ${event.label}`).join("\n")}`);
+  if (full) {
+    if (entry.systemPrompt) out.push(`## System prompt\n${fence(entry.systemPrompt)}`);
+    if (entry.prompt) out.push(`## Prompt as sent\n${fence(entry.prompt)}`);
+  }
+  return `${out.join("\n\n")}\n`;
 }

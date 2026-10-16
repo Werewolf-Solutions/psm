@@ -175,7 +175,8 @@ export interface HubOptions {
 
 export interface Hub {
   claim(kinds: JobKind[], signal?: AbortSignal): Promise<ExecutorJob | null>;
-  heartbeat(jobId: string): Promise<{ leaseUntil: string }>;
+  /** Extend the lease; `step` also tells the hub (and Todo) what the job is doing now. */
+  heartbeat(jobId: string, step?: string): Promise<{ leaseUntil: string }>;
   result(jobId: string, outcome: JobOutcome): Promise<void>;
   /** The owner's intake for one project — context for triage. */
   listIntake(projectId: string): Promise<OpenIntake[]>;
@@ -270,8 +271,8 @@ export function hubClient(options: HubOptions): Hub {
       if (!isJob(data.job)) throw new HubError("Hub returned a job this executor cannot read", 502, "bad_job");
       return data.job;
     },
-    async heartbeat(jobId) {
-      const { data } = await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/heartbeat`, {}, REQUEST_TIMEOUT_MS);
+    async heartbeat(jobId, step) {
+      const { data } = await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/heartbeat`, step ? { step } : {}, REQUEST_TIMEOUT_MS);
       return { leaseUntil: String(data?.leaseUntil || "") };
     },
     async result(jobId, outcome) {

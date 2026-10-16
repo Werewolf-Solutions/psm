@@ -15,6 +15,8 @@ const IGNORED = new Set(["node_modules", "vendor", "dist", "build", ".next", "co
 export class RepositoryTools {
   private readonly verifiedBuilds = new Map<string, string>();
   private readonly verifiedPreviews = new Map<string, string>();
+  /** The latest run_tests outcome; a red run keeps the work unverified until tests pass again. */
+  private lastTests: { digest: string; ok: boolean } | null = null;
   private readonly staged = new Map<string, { index: string; head: string }>();
   constructor(readonly snapshot: PermissionSnapshot, private readonly store: PermissionChecker, private readonly protectedRoots: readonly string[] = [], private readonly affectedFiles?: () => string[]) {}
   private allow(permission: AgentPermission): void { this.store.check(this.snapshot, permission); }
@@ -279,10 +281,16 @@ export class RepositoryTools {
   invalidateVerification(directory: string, kind: "build" | "preview"): void {
     (kind === "build" ? this.verifiedBuilds : this.verifiedPreviews).delete(directory);
   }
+  recordTests(digest: string, ok: boolean): void {
+    this.lastTests = { digest, ok };
+  }
   verificationStatus() {
     const packages = this.verificationPackages();
     const digest = taskInputs(this).digest;
-    return { verified: packages.every(pkg => (!pkg.build || this.verifiedBuilds.get(pkg.directory) === digest) && (!pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest)), packages: packages.map(pkg => ({ ...pkg, buildVerified: !pkg.build || this.verifiedBuilds.get(pkg.directory) === digest, browserVerified: !pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest })) };
+    const tests = this.lastTests
+      ? { ran: true, passed: this.lastTests.ok, current: this.lastTests.digest === digest }
+      : { ran: false, passed: null, current: false };
+    return { verified: (!this.lastTests || this.lastTests.ok) && packages.every(pkg => (!pkg.build || this.verifiedBuilds.get(pkg.directory) === digest) && (!pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest)), packages: packages.map(pkg => ({ ...pkg, buildVerified: !pkg.build || this.verifiedBuilds.get(pkg.directory) === digest, browserVerified: !pkg.browser || this.verifiedPreviews.get(pkg.directory) === digest })), tests, note: tests.ran && !tests.passed ? "The latest run_tests failed, so this work is not verified, whatever caused the failure." : tests.ran ? "" : "run_tests has not been run in this session; this status covers builds and browser checks only." };
   }
   verificationPackages(): Array<{ directory: string; build: boolean; browser: boolean }> {
     const packages = taskInputs(this).entries.filter(({ file }) => path.posix.basename(file) === "package.json").map(({ file }) => {

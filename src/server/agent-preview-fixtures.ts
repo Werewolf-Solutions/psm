@@ -41,7 +41,9 @@ const HOSTNAME = /^[a-z][a-z0-9-]{0,62}$/;
 const RELATIVE = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9._-][A-Za-z0-9._/-]{0,200}$/;
 
 type Fail = (message: string) => never;
-const failer = (): Fail => message => { throw new Error(`${PREVIEW_FIXTURE_FILE} is invalid: ${message}. Verification has not run.`); };
+/** A whole valid file, so one error is enough to write it right instead of fixing it field by field. */
+const PREVIEW_EXAMPLE = `{"schema": "${PREVIEW_FIXTURE_SCHEMA}", "responses": [{"method": "GET", "path": "/api/items", "status": 200, "json": {"items": []}}]} — each response takes method (default GET), path, status, and json or text (optional contentType)`;
+const failer = (): Fail => message => { throw new Error(`${PREVIEW_FIXTURE_FILE} is invalid: ${message}. Verification has not run. A valid file looks like ${PREVIEW_EXAMPLE}.`); };
 const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === "object" && !Array.isArray(value);
 
 /**
@@ -101,7 +103,7 @@ function responses(list: unknown, fail: Fail): PreviewFixture[] {
   return (list as any[]).map((entry: any, index: number) => {
     const at = `responses[${index}]`;
     if (!isObject(entry)) fail(`${at} must be an object`);
-    if (Object.keys(entry).some(key => !["method", "path", "status", "json", "text", "contentType"].includes(key))) fail(`${at} has an unknown field`);
+    if (Object.keys(entry).some(key => !["method", "path", "status", "json", "text", "contentType"].includes(key))) fail(`${at} has an unknown field (${Object.keys(entry).filter(key => !["method", "path", "status", "json", "text", "contentType"].includes(key)).join(", ")})`);
     const method = entry.method ?? "GET";
     if (!METHODS.includes(method)) fail(`${at}.method must be one of ${METHODS.join(", ")}`);
     if (typeof entry.path !== "string" || !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{1,300}$/.test(entry.path)) fail(`${at}.path must be an exact pathname without a query`);
@@ -132,7 +134,7 @@ function env(value: unknown, at: string, fail: Fail): Record<string, string> {
 function service(entry: unknown, at: string, fail: Fail): PreviewService {
   if (!isObject(entry)) fail(`${at} must be an object`);
   const e = entry as Record<string, any>;
-  if (Object.keys(e).some(key => !["project", "directory", "script", "port", "alias", "ready", "env", "secrets", "stores", "seed"].includes(key))) fail(`${at} has an unknown field`);
+  if (Object.keys(e).some(key => !["project", "directory", "script", "port", "alias", "ready", "env", "secrets", "stores", "seed"].includes(key))) fail(`${at} has an unknown field (${Object.keys(entry).filter(key => !["method", "path", "status", "json", "text", "contentType"].includes(key)).join(", ")})`);
   if (typeof e.project !== "string" || !/^[A-Za-z0-9._-]{1,100}$/.test(e.project)) fail(`${at}.project must be a registered project name`);
   const directory = e.directory ?? ".";
   if (directory !== "." && (typeof directory !== "string" || !RELATIVE.test(directory))) fail(`${at}.directory must be a relative package directory`);

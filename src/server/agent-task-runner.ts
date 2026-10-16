@@ -8,6 +8,7 @@ import { browserPreviewProbe } from "./agent-browser-preview.ts";
 import { PREVIEW_FIXTURE_FILE, parsePreviewConfig, type PreviewConfig, type PreviewService } from "./agent-preview-fixtures.ts";
 import type { RepositoryTools } from "./agent-repository-tools.ts";
 import type { PermissionChecker } from "./agent-permissions.ts";
+import { statePath } from "../store.ts";
 
 export type TaskExecutor = (args: string[], signal?: AbortSignal) => Promise<string>;
 
@@ -69,7 +70,11 @@ export async function downloadLockedPackage(resolved: string, integrity: string,
   const url = new URL(resolved);
   if (url.protocol !== "https:" || url.hostname !== "registry.npmjs.org" || url.port || url.username || url.password || url.search || url.hash) throw new Error("Managed installs require public registry.npmjs.org tarballs in package-lock.json.");
   const match = /^sha512-([A-Za-z0-9+/]+={0,2})$/.exec(integrity);
-  if (!match) throw new Error("Every locked package must have one SHA-512 integrity value.");
+  if (!match) {
+    const name = decodeURIComponent(url.pathname.split("/-/")[0].replace(/^\//, ""));
+    const kind = integrity.split("-")[0] || "no integrity value";
+    throw new Error(`Every locked package must have one SHA-512 integrity value; ${name} has ${kind}. Old lockfiles carry SHA-1 hashes: regenerate package-lock.json with a current npm.`);
+  }
   const response = await fetch(url, { redirect: "error", signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000) });
   if (!response.ok || !response.body) throw new Error(`Package download failed (${response.status}).`);
   const parts: Uint8Array[] = []; let size = 0;
@@ -101,10 +106,35 @@ const HARDENED = ["--pull=never", "--read-only", "--cap-drop=ALL", "--security-o
 /** Finds another project in the task's scope by its registered name. */
 export type ProjectLookup = (name: string) => RepositoryTools | undefined;
 
+const NPM_CI = ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"];
+
+export interface TaskRunnerOptions {
+  /** Compiled native addons, kept across jobs. Defaults to psm's state directory. */
+  nativeCache?: string;
+  /**
+   * Also put the installed packages in the checkout's own node_modules. Only
+   * for an implement job's clone, whose shell can already write anywhere in
+   * it: without them `npm run dev` or `npx vite` in that shell finds nothing.
+   */
+  checkoutDeps?: boolean;
+}
+
+/** A package with a lifecycle script, by its lockfile path and its compiled-output cache key. */
+interface NativeAddon { path: string; key: string }
+
+const defaultNativeCache = () => process.env.PSM_NATIVE_CACHE || statePath(".psm-native-cache");
+
 export class ManagedTaskRunner {
   private directory: string | null = null;
   private sourceDigest = "";
-  private packagesReady = new Set<string>();
+  /**
+   * Installed package directories: the hash of the real lockfile they were
+   * installed from, and the private lockfile pointing at /packages. They
+   * survive source edits — a new snapshot keeps them while the lockfile is
+   * unchanged — so an agent does not reinstall after every edit.
+   */
+  private installed = new Map<string, { lockHash: string; privateLock: string; natives: NativeAddon[] }>();
+  private get packagesReady(): ReadonlySet<string> { return new Set(this.installed.keys()); }
   private pending: Promise<unknown> = Promise.resolve();
   private serialize<T>(action: () => Promise<T>): Promise<T> {
     const result = this.pending.then(action);
@@ -113,26 +143,45 @@ export class ManagedTaskRunner {
   constructor(private readonly repository: RepositoryTools, private readonly store: PermissionChecker, private readonly signal: AbortSignal,
     private readonly execute: TaskExecutor = dockerTaskExecutor,
     private readonly download: typeof downloadLockedPackage = downloadLockedPackage,
-    private readonly findProject: ProjectLookup = () => undefined) {}
+    private readonly findProject: ProjectLookup = () => undefined,
+    private readonly options: TaskRunnerOptions = {}) {}
   private snapshot(): string {
     this.store.check(this.repository.snapshot, "repo.read");
     const { digest } = taskInputs(this.repository);
     if (this.directory && digest === this.sourceDigest) return this.directory;
-    this.close(); this.directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-")); this.sourceDigest = "";
-    fs.mkdirSync(path.join(this.directory, "workspace")); fs.mkdirSync(path.join(this.directory, "packages"));
+    const previous = this.directory;
+    const kept = this.installed;
+    this.directory = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-")); this.sourceDigest = ""; this.installed = new Map();
+    fs.mkdirSync(path.join(this.directory, "workspace"));
+    // Verified tarballs carry over to the new snapshot; the source does not.
+    if (previous && fs.existsSync(path.join(previous, "packages"))) fs.renameSync(path.join(previous, "packages"), path.join(this.directory, "packages"));
+    else fs.mkdirSync(path.join(this.directory, "packages"));
+    if (previous) fs.rmSync(previous, { recursive: true, force: true });
     // Hash the bytes actually copied, so a concurrent host edit cannot certify
     // different content from the disposable source snapshot.
     this.sourceDigest = taskInputs(this.repository, path.join(this.directory, "workspace")).digest;
+    for (const [cwd, install] of kept) {
+      const lockFile = this.packageFile(cwd, "package-lock.json");
+      let current: string;
+      try { current = this.repository.read(lockFile); } catch { continue; }
+      if (createHash("sha256").update(current).digest("hex") !== install.lockHash) continue; // changed lockfile: install again
+      fs.writeFileSync(path.join(this.directory, "workspace", lockFile), install.privateLock);
+      this.installed.set(cwd, install);
+    }
     return this.directory;
   }
-  private async container(directory: string, command: string[], install = false, cwd = ".", browser = false, extra: { network?: string; env?: Record<string, string> } = {}): Promise<string> {
+  private async container(directory: string, command: string[], install = false, cwd = ".", browser = false, extra: { network?: string; env?: Record<string, string>; mounts?: string[] } = {}): Promise<string> {
     if (this.signal.aborted) throw new Error("This turn was stopped.");
     const name = `psm-task-${randomUUID()}`;
     const image = browser ? (process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0") : (process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim");
-    const installs = install ? [...this.packagesReady].map(dir => ({ command: ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"], cwd: dir })) : [];
+    // Lifecycle scripts never run here; compiled addons are copied in from /packages/native instead.
+    const installs = install ? [...this.installed].flatMap(([dir, entry]) => [
+      { command: NPM_CI, cwd: dir },
+      ...entry.natives.map(native => ({ command: ["cp", "-R", `/packages/native/${native.key}/.`, native.path], cwd: dir })),
+    ]) : [];
     const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...installs, { command, cwd }])}; for(const {command:[cmd,...args],cwd} of commands){const result=cp.spawnSync(cmd,args,{cwd:require('path').join('/workspace',cwd),stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
     try {
-      return await this.execute(["run", "--name", name, "--rm", "--pull=never", `--network=${extra.network ?? "none"}`, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", ...Object.entries(extra.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]), image, "node", "-e", bootstrap], this.signal);
+      return await this.execute(["run", "--name", name, "--rm", "--pull=never", `--network=${extra.network ?? "none"}`, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, ...(extra.mounts ?? []).flatMap(mount => ["--mount", mount]), "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", ...Object.entries(extra.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]), image, "node", "-e", bootstrap], this.signal);
     } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
   }
   tests(script = "test"): Promise<string> { return this.serialize(() => this.runTests(script)); }
@@ -140,7 +189,15 @@ export class ManagedTaskRunner {
     this.store.check(this.repository.snapshot, "test.run");
     if (script !== "node --test" && !/^test(?::[a-zA-Z0-9_-]+)*$/.test(script)) throw new Error("Choose node --test or a package script named test or test:….");
     const directory = this.snapshot();
-    const output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady.size > 0);
+    const digest = this.sourceDigest;
+    let output: string;
+    try {
+      output = await this.container(directory, script === "node --test" ? ["node", "--test"] : ["npm", "run", script], this.packagesReady.size > 0);
+    } catch (error) {
+      if (/^Sandbox task failed/.test((error as Error).message)) this.repository.recordTests(digest, false);
+      throw error;
+    }
+    this.repository.recordTests(digest, true);
     this.store.check(this.repository.snapshot, "test.run"); return output;
   }
   /** Any package.json script — build, typecheck, lint — in the same offline sandbox. */
@@ -278,8 +335,9 @@ export class ManagedTaskRunner {
     this.store.check(this.repository.snapshot, "pkg.install");
     const lockFile = this.packageFile(cwd, "package-lock.json");
     const directory = this.snapshot();
-    this.packagesReady.delete(cwd);
-    const lock = JSON.parse(this.repository.read(lockFile));
+    this.installed.delete(cwd);
+    const realLock = this.repository.read(lockFile);
+    const lock = JSON.parse(realLock);
     if (![2, 3].includes(lock.lockfileVersion) || !lock.packages) throw new Error("Managed installs require package-lock.json version 2 or 3.");
     const entries = Object.entries(lock.packages) as [string, any][];
     if (entries.length > 2000) throw new Error("Lockfile exceeds the managed package limit.");
@@ -298,13 +356,100 @@ export class ManagedTaskRunner {
       fs.writeFileSync(path.join(directory, "packages", filename), bytes);
       entry.resolved = `file:/packages/${filename}`;
     }
-    fs.writeFileSync(path.join(directory, "workspace", lockFile), JSON.stringify(lock));
+    const privateLock = JSON.stringify(lock);
+    fs.writeFileSync(path.join(directory, "workspace", lockFile), privateLock);
     // This private lockfile changes tarball locations only. The real lockfile
     // and checkout are never writable by npm or by package lifecycle scripts.
-    const output = await this.container(directory, ["npm", "ci", "--offline", "--ignore-scripts", "--no-audit", "--no-fund", "--legacy-peer-deps"], false, cwd);
+    const output = await this.container(directory, NPM_CI, false, cwd);
     this.store.check(this.repository.snapshot, "pkg.install");
-    this.packagesReady.add(cwd);
-    return `Installed dependencies in this turn's sandbox. Tests can use them until repository inputs change.\n${output}`;
+    const native = await this.nativeAddons(directory, entries, cwd);
+    this.installed.set(cwd, { lockHash: createHash("sha256").update(realLock).digest("hex"), privateLock, natives: native.addons });
+    const checkout = this.options.checkoutDeps ? await this.installInCheckout(directory, cwd) : "";
+    return `Installed dependencies in this turn's sandbox. Tests, scripts and previews keep using them after your edits, until ${lockFile} changes.${checkout}${native.note}\n${output}`;
   }
-  close(): void { if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true }); this.directory = null; this.sourceDigest = ""; this.packagesReady.clear(); }
+  /**
+   * Packages are installed with lifecycle scripts off, so a native addon
+   * (better-sqlite3, sqlite3, bcrypt…) arrives without its compiled binary and
+   * the app crashes the moment it loads it. Compile each one once, offline, in
+   * the agent image (which has a compiler and Node's headers), and keep the
+   * .node files by tarball integrity so later installs — any job, any project —
+   * only copy them in. Packages whose script is not a node-gyp build are
+   * remembered as such and skipped.
+   */
+  private async nativeAddons(directory: string, entries: [string, any][], cwd: string): Promise<{ addons: NativeAddon[]; note: string }> {
+    const image = process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim";
+    const candidates: NativeAddon[] = entries.filter(([name, entry]) => name && entry.hasInstallScript)
+      .map(([name, entry]) => ({ path: name, key: createHash("sha256").update(`${entry.integrity}\0${image}`).digest("hex").slice(0, 32) }));
+    if (!candidates.length) return { addons: [], note: "" };
+    const cache = this.options.nativeCache ?? defaultNativeCache();
+    fs.mkdirSync(cache, { recursive: true, mode: 0o700 });
+    const missing = candidates.filter(({ key }) => !fs.existsSync(path.join(cache, key)) && !fs.existsSync(path.join(cache, `${key}.none`)));
+    const failed: string[] = [];
+    let log = "";
+    if (missing.length) {
+      const out = fs.mkdtempSync(path.join(directory, "native-"));
+      try {
+        try { log = await this.compileAddons(directory, out, cwd, missing); }
+        catch (error) { log = (error as Error).message; }
+        for (const { path: name, key } of missing) {
+          if (fs.existsSync(path.join(out, `${key}.none`))) { fs.writeFileSync(path.join(cache, `${key}.none`), ""); continue; }
+          if (!fs.existsSync(path.join(out, key))) { failed.push(name.replace(/^.*node_modules\//, "")); continue; }
+          const staging = fs.mkdtempSync(path.join(cache, ".staging-"));
+          fs.cpSync(path.join(out, key), staging, { recursive: true });
+          fs.renameSync(staging, path.join(cache, key));
+        }
+      } finally { fs.rmSync(out, { recursive: true, force: true }); }
+    }
+    const addons = candidates.filter(({ key }) => fs.existsSync(path.join(cache, key)));
+    for (const { key } of addons) fs.cpSync(path.join(cache, key), path.join(directory, "packages", "native", key), { recursive: true });
+    const note = failed.length
+      ? `\nCould not compile the native addon${failed.length === 1 ? "" : "s"} ${failed.join(", ")}; code that loads ${failed.length === 1 ? "it" : "them"} will fail in this sandbox. That is a psm sandbox limit, not a fault in the project.\n${log.slice(-3000)}`
+      : addons.length ? `\nNative addons ready: ${addons.map(({ path: name }) => name.replace(/^.*node_modules\//, "")).join(", ")}.` : "";
+    return { addons, note };
+  }
+  private async compileAddons(directory: string, out: string, cwd: string, addons: NativeAddon[]): Promise<string> {
+    if (this.signal.aborted) throw new Error("This turn was stopped.");
+    const name = `psm-native-${randomUUID()}`;
+    const script = `const fs=require('fs'),cp=require('child_process'),path=require('path');
+fs.cpSync('/source','/workspace',{recursive:true});
+const root=path.join('/workspace',${JSON.stringify(cwd)});
+const [npm,...args]=${JSON.stringify(NPM_CI)};
+const r=cp.spawnSync(npm,args,{cwd:root,stdio:'inherit'}); if(r.error||r.status!==0) process.exit(r.status||1);
+const gyp='/usr/local/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js';
+for (const {path:p,key} of ${JSON.stringify(addons)}) {
+  const dir=path.join(root,p);
+  if (!fs.existsSync(path.join(dir,'binding.gyp'))) { fs.writeFileSync('/out/'+key+'.none',''); continue; }
+  console.log('psm: compiling '+p);
+  const b=cp.spawnSync('node',[gyp,'rebuild','--release'],{cwd:dir,stdio:'inherit',env:{...process.env,npm_config_nodedir:'/usr/local'}});
+  const release=path.join(dir,'build','Release');
+  const built=b.status===0&&fs.existsSync(release)?fs.readdirSync(release).filter(f=>f.endsWith('.node')):[];
+  if (!built.length) { console.log('psm: could not compile '+p); continue; }
+  fs.mkdirSync('/out/'+key+'/build/Release',{recursive:true});
+  for (const f of built) fs.copyFileSync(path.join(release,f),'/out/'+key+'/build/Release/'+f);
+}`;
+    try {
+      return await this.execute(["run", "--name", name, "--rm", ...HARDENED, "--network=none", "--memory=2g", "--cpus=2", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`,
+        "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777",
+        "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`,
+        "--mount", `type=bind,source=${out},target=/out`, "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache",
+        process.env.PSM_AGENT_IMAGE || "psm-agent:1", "node", "-e", script], this.signal);
+    } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
+  }
+  /** Copy this directory's installed node_modules into the checkout (an implement job's clone), Git-excluded. */
+  private async installInCheckout(directory: string, cwd: string): Promise<string> {
+    const checkout = fs.realpathSync(this.repository.snapshot.project.path);
+    const git = path.join(checkout, ".git");
+    if (!fs.existsSync(git) || !fs.lstatSync(git).isDirectory()) return "";
+    const exclude = path.join(git, "info", "exclude");
+    const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, "utf8") : "";
+    if (!/^node_modules\/$/m.test(current)) { fs.mkdirSync(path.dirname(exclude), { recursive: true }); fs.writeFileSync(exclude, `${current}${current && !current.endsWith("\n") ? "\n" : ""}node_modules/\n`); }
+    const copy = `const fs=require('fs'),path=require('path');const to=path.join('/checkout',${JSON.stringify(cwd)},'node_modules');fs.rmSync(to,{recursive:true,force:true});fs.cpSync(path.join(process.cwd(),'node_modules'),to,{recursive:true,verbatimSymlinks:true});`;
+    try {
+      await this.container(directory, ["node", "-e", copy], true, cwd, false, { mounts: [`type=bind,source=${checkout},target=/checkout`] });
+      return ` They are also in ${cwd === "." ? "" : `${cwd}/`}node_modules in the job's clone, so sandbox_shell can run them.`;
+    } catch (error) {
+      return ` They could not be copied into the job's clone for sandbox_shell: ${(error as Error).message.slice(-500)}`;
+    }
+  }
+  close(): void { if (this.directory) fs.rmSync(this.directory, { recursive: true, force: true }); this.directory = null; this.sourceDigest = ""; this.installed.clear(); }
 }

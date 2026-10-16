@@ -77,6 +77,87 @@ test("package installation uses verified downloads offline, preserves the checko
   const failing = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => { calls.push(args); if (args[0] === "run") throw new Error("sandbox unavailable"); return ""; }); t.after(() => failing.close());
   await assert.rejects(failing.tests(), /sandbox unavailable/); assert.equal(calls.at(-1)![0], "rm");
 });
+test("installed packages survive source edits and are dropped only when the lockfile changes", async (t) => {
+  const h = fixture(t);
+  const runs: { bootstrap: string; packages: string[]; lock: string }[] = [];
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => {
+    if (args[0] !== "run") return "";
+    const mount = (target: string) => args.find((arg) => arg.endsWith(`target=${target},readonly`))!.split("source=")[1].split(",target=")[0];
+    runs.push({ bootstrap: args.at(-1)!, packages: fs.readdirSync(mount("/packages")), lock: fs.readFileSync(path.join(mount("/source"), "package-lock.json"), "utf8") });
+    return "ok";
+  }, async () => Buffer.from("fake verified tarball")); t.after(() => runner.close());
+  await runner.install();
+  fs.writeFileSync(path.join(h.directory, "server.js"), "// the agent's edit\n");
+  await runner.tests();
+  const afterEdit = runs.at(-1)!;
+  assert.match(afterEdit.bootstrap, /"npm","ci","--offline"/, "the edit kept the install");
+  assert.equal(afterEdit.packages.length, 1, "the verified tarball carried over");
+  assert.match(afterEdit.lock, /file:\/packages\//, "the snapshot uses the private lockfile");
+
+  const lock = JSON.parse(fs.readFileSync(path.join(h.directory, "package-lock.json"), "utf8"));
+  lock.name = "changed";
+  fs.writeFileSync(path.join(h.directory, "package-lock.json"), JSON.stringify(lock));
+  await runner.tests();
+  assert.doesNotMatch(runs.at(-1)!.bootstrap, /"npm","ci"/, "a changed lockfile needs a new install");
+  assert.doesNotMatch(runs.at(-1)!.lock, /file:\/packages\//);
+});
+test("native addons are compiled once, offline, cached by integrity and copied into every later sandbox", async (t) => {
+  const h = fixture(t);
+  const cache = fs.mkdtempSync(path.join(os.tmpdir(), "psm-native-test-"));
+  t.after(() => fs.rmSync(cache, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(h.directory, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": {},
+    "node_modules/better-sqlite3": { resolved: "https://registry.npmjs.org/better-sqlite3/-/better-sqlite3-11.3.0.tgz", integrity: "sha512-sqlite", hasInstallScript: true },
+    "node_modules/esbuild": { resolved: "https://registry.npmjs.org/esbuild/-/esbuild-0.21.0.tgz", integrity: "sha512-esbuild", hasInstallScript: true },
+    "node_modules/plain": { resolved: "https://registry.npmjs.org/plain/-/plain-1.tgz", integrity: "sha512-plain" } } }));
+  const compiles: string[][] = [];
+  const runs: { bootstrap: string; natives: string[] }[] = [];
+  const executor: TaskExecutor = async (args) => {
+    if (args[0] !== "run") return "";
+    if (args.includes("psm-agent:1")) {
+      compiles.push(args);
+      assert.ok(args.includes("--network=none") && args.includes("--read-only") && args.includes("--cap-drop=ALL"));
+      const out = args.find((arg) => arg.endsWith("target=/out"))!.split("source=")[1].split(",target=")[0];
+      const addons = JSON.parse(/of (\[.*?\])\)/.exec(args.at(-1)!)![1]) as { path: string; key: string }[];
+      const sqlite = addons.find((addon) => addon.path.endsWith("better-sqlite3"))!;
+      fs.mkdirSync(path.join(out, sqlite.key, "build/Release"), { recursive: true });
+      fs.writeFileSync(path.join(out, sqlite.key, "build/Release/better_sqlite3.node"), "binary");
+      fs.writeFileSync(path.join(out, `${addons.find((addon) => addon.path.endsWith("esbuild"))!.key}.none`), "");
+      return "compiled";
+    }
+    const packages = args.find((arg) => arg.endsWith("target=/packages,readonly"))!.split("source=")[1].split(",target=")[0];
+    runs.push({ bootstrap: args.at(-1)!, natives: fs.existsSync(path.join(packages, "native")) ? fs.readdirSync(path.join(packages, "native")) : [] });
+    return "ok";
+  };
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, executor, async () => Buffer.from("tarball"), undefined, { nativeCache: cache });
+  t.after(() => runner.close());
+  assert.match(await runner.install(), /Native addons ready: better-sqlite3\./);
+  assert.equal(compiles.length, 1);
+  await runner.tests();
+  const last = runs.at(-1)!;
+  assert.equal(last.natives.length, 1, "only the compiled addon is offered");
+  assert.match(last.bootstrap, new RegExp(`"cp","-R","/packages/native/${last.natives[0]}/\\.","node_modules/better-sqlite3"`));
+  assert.ok(last.bootstrap.indexOf('"npm","ci"') < last.bootstrap.indexOf('"cp","-R"'), "copied in after the install");
+
+  const again = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, executor, async () => Buffer.from("tarball"), undefined, { nativeCache: cache });
+  t.after(() => again.close());
+  await again.install();
+  assert.equal(compiles.length, 1, "the cache answers both the addon and the non-native script");
+});
+
+test("an implement job's clone gets the installed packages too, kept out of Git", async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const h = fixture(t);
+  execFileSync("git", ["init"], { cwd: h.directory, stdio: "ignore" });
+  const mounts: string[] = [];
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async (args) => {
+    if (args[0] === "run") mounts.push(...args.filter((arg) => arg.includes("target=/checkout")));
+    return "ok";
+  }, async () => Buffer.from("tarball"), undefined, { checkoutDeps: true });
+  t.after(() => runner.close());
+  assert.match(await runner.install(), /node_modules in the job's clone/);
+  assert.deepEqual(mounts, [`type=bind,source=${fs.realpathSync(h.directory)},target=/checkout`]);
+  assert.match(fs.readFileSync(path.join(h.directory, ".git/info/exclude"), "utf8"), /^node_modules\/$/m);
+});
 test("package downloads reject credentials, alternate hosts and unverified tarballs before fetching", async () => {
   for (const url of ["http://registry.npmjs.org/a", "https://127.0.0.1/a", "https://registry.npmjs.org.evil/a", "https://secret@registry.npmjs.org/a"]) await assert.rejects(downloadLockedPackage(url, "sha512-AAAA"), /public registry/);
   await assert.rejects(downloadLockedPackage("https://registry.npmjs.org/a", "sha1-bad"), /SHA-512/);

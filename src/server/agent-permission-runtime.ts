@@ -71,7 +71,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
   const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, checker, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))], input.policy.affectedFiles)]));
   // A preview's backend services may only come from projects already in this session's scope.
   const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name);
-  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName)]));
+  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName, { checkoutDeps: policy.profile === "implement" })]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");
   const project = z.string().describe("Registered project ID from the session scope");
@@ -97,7 +97,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
     }
   };
   const tools = [
-    ...(policy.profile === "implement" ? [tool("sandbox_shell", "Run any shell command in the job's isolated Docker clone. The shell can read and edit that clone and commit locally. It has no host filesystem, provider credentials, Docker socket or network. Use install_packages for brokered public npm packages and PSM checks for verification.", { project, command: z.string().min(1).max(20_000), timeoutSeconds: z.number().int().min(1).max(600).optional() }, ({ project, command, timeoutSeconds }) => invoke(project, async (repo) => {
+    ...(policy.profile === "implement" ? [tool("sandbox_shell", "Run any shell command in the job's isolated Docker clone. The shell can read and edit that clone and commit locally. It has no host filesystem, provider credentials, Docker socket or network, so it cannot download packages: the clone's node_modules already holds the project's packages (install_packages refreshes them after a lockfile change). Use PSM checks for verification.", { project, command: z.string().min(1).max(20_000), timeoutSeconds: z.number().int().min(1).max(600).optional() }, ({ project, command, timeoutSeconds }) => invoke(project, async (repo) => {
       // An unrestricted shell cannot honor a partial workspace deny. Require
       // every capability it can exercise before handing it the clone.
       for (const permission of ["repo.read", "repo.edit", "repo.delete", "test.run", "script.run", "pkg.install", "git.commit"] as const) checker.check(repo.snapshot, permission);

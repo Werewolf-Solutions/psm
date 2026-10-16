@@ -253,3 +253,45 @@ test("the job's own grant refuses push, fetch and server commands even if a tool
   const denied = new JobPermissions(JOB_ID, () => [{ id: "w", permission: "repo.delete", effect: "deny", scope: {}, expiresAt: null, remainingUses: null, source: "custom", actor: "me", at: 0 }]);
   assert.throws(() => denied.check(jobSnapshot({ id: "prj_a", name: "real" }, fx.real, JOB_ID), "repo.delete"), /workspace policy/i);
 });
+
+test("tests that already fail at the starting commit stall the job before any agent runs", async (t) => {
+  const fx = repo(t);
+  const activity = new ExecutorActivity();
+  let agentRan = false;
+  const run = implementJobRunner({
+    ...deps(fx, async () => { agentRan = true; }, activity),
+    baseline: async () => ({ status: "fail", stage: "tests", summary: "1 test failing, 79 passing", failing: ["buildDashboard: returns running bots"], output: "not ok 9 - buildDashboard: returns running bots" }),
+  });
+  activity.claimed(job());
+  const outcome = await run(job(), new AbortController().signal);
+  assert.equal(agentRan, false);
+  assert.equal(outcome.status, "stalled");
+  assert.match((outcome as { error: string }).error, /tests already fail before any change \(1 test failing, 79 passing\)\. Failing: buildDashboard/);
+  assert.match(activity.get(JOB_ID)!.agent.at(-1)!.text, /psm's test run at the starting commit/);
+});
+
+test("green tests at the start are passed to the agent; a revision skips the check", async (t) => {
+  const fx = repo(t);
+  let prompt = "";
+  let checked = 0;
+  const run = implementJobRunner({
+    ...deps(fx, async ({ message }) => { prompt = message; }),
+    baseline: async () => { checked++; return { status: "pass", summary: "80 tests pass" }; },
+  });
+  await run(job(), new AbortController().signal);
+  assert.equal(checked, 1);
+  assert.match(prompt, /psm ran the project's tests at the starting commit: 80 tests pass\. .*install_packages before run_tests/);
+  await run(job({ continueClone: true, revisions: [{ comment: "also log the port" }] as never }), new AbortController().signal);
+  assert.equal(checked, 1, "a revision builds on the agent's own commits");
+});
+
+test("red tests do not block a task whose point is to fix them", async (t) => {
+  const fx = repo(t);
+  let prompt = "";
+  const run = implementJobRunner({
+    ...deps(fx, async ({ message }) => { prompt = message; }),
+    baseline: async () => ({ status: "fail", stage: "tests", summary: "1 test failing, 79 passing", failing: ["buildDashboard: returns running bots"], output: "" }),
+  });
+  await run(job({ text: "fix the failing buildDashboard test" }), new AbortController().signal);
+  assert.match(prompt, /they fail \(1 test failing, 79 passing\)\. Failing: buildDashboard: returns running bots\. This task is about making them pass/);
+});
