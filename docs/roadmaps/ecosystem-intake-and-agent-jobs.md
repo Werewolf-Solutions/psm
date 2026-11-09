@@ -414,6 +414,8 @@ in the existing handoff format.
 - **D5. Feedback-hub deferred.** It is the embeddable widget/MCP feedback
   product. Its intake comes after the Todo ↔ PSM connection and the
   per-project implementation queue work.
+  **Lifted 2026-11-09:** planned as [P16](p16-feedback-intake.md), after the
+  implement path is proven end to end (P16 Gate 0).
 
 ### B0 — Platform apps vs business apps (from D2)
 

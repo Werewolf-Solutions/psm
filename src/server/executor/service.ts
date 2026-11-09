@@ -174,6 +174,10 @@ function launch(): { stop: () => Promise<void> } {
       const project = getProjects().find((candidate) => candidate.id === projectId);
       return project ? { id: projectId, name: project.name, path: project.path, workspaceId: projectWorkspaceRef(loadWorkspaceState(), projectId) } : null;
     },
+    findProjectByName: (name) => {
+      const project = getProjects().find((candidate) => candidate.name === name && candidate.id);
+      return project?.id ? { id: project.id, name: project.name, path: project.path, workspaceId: projectWorkspaceRef(loadWorkspaceState(), project.id) } : null;
+    },
     jobsDir: jobsDirectory(),
     store: permissions,
     workspaceRules: (workspaceId) => permissions.workspaceRules(workspaceId),

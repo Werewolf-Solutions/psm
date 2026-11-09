@@ -52,7 +52,7 @@ test("a v2 file declares a real backend service with stores, generated secrets a
   assert.equal(config.host, "localhost");
   assert.deepEqual(config.services, [{ ...api, alias: "werewolf-dapp", ready: "/", env: { NODE_ENV: "development" }, secrets: ["JWT_SECRET"], stores: ["mongo", "redis"], seed: ["scripts/preview-seed.js"] }]);
   assert.deepEqual(config.expected, [{ method: "POST", path: "/api/v1/apps/todo/auth/refresh", status: 401 }]);
-  assert.deepEqual(parsePreviewConfig(file([])), { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null }, "v1 files keep working");
+  assert.deepEqual(parsePreviewConfig(file([])), { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null, port: null }, "v1 files keep working");
 });
 
 test("a v2 file cannot reach real data, reserved variables or paths outside the service", () => {
@@ -88,4 +88,12 @@ test("a signed-in session cookie can only carry a secret PSM generates for a dec
     [v2({ services: [withSecret], session: { cookie: "rt", secret: "PREVIEW_SESSION_TOKEN", value: "real-token" } }), /session takes cookie, path and secret/],
     [v2({ services: [withSecret], session: { cookie: "a b", secret: "PREVIEW_SESSION_TOKEN" } }), /cookie name/],
   ] as const) assert.throws(() => parsePreviewConfig(text), message);
+});
+
+test("a v2 preview can pin the port its sign-in origin is registered with", () => {
+  const v2 = (extra: object) => JSON.stringify({ schema: "psm.werewolf.solutions/preview/v2", host: "localhost", ...extra });
+  assert.equal(parsePreviewConfig(v2({ port: 5200 })).port, 5200);
+  assert.equal(parsePreviewConfig(v2({})).port, null);
+  assert.throws(() => parsePreviewConfig(v2({ port: 80 })), /port must be 1024-65535/);
+  assert.throws(() => parsePreviewConfig(v2({ port: "5200" })), /port must be 1024-65535/);
 });

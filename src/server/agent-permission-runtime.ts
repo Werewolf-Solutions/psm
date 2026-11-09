@@ -6,7 +6,7 @@ import { z } from "zod";
 import { childEnv } from "./procs.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
 import { JobSandboxShell } from "./executor/sandbox-shell.ts";
-import { GrantRequiredError, ReviewRequiredError, type AgentPermissionStore, type PermissionChecker, type PermissionSnapshot } from "./agent-permissions.ts";
+import { GrantRequiredError, PermissionError, ReviewRequiredError, type AgentPermissionStore, type PermissionChecker, type PermissionSnapshot } from "./agent-permissions.ts";
 import type { OperationReviews } from "./agent-reviews.ts";
 import type { MachineCommands } from "./machines/commands.ts";
 
@@ -29,11 +29,28 @@ export interface ManagedAgentPolicy {
   /** Files changed by an implement job, used to select package checks. */
   affectedFiles?: () => string[];
   /**
+   * Projects a preview may start as backend services, beside the scoped ones.
+   * Never tool targets: the agent gets no files or shell in them, and only
+   * repo.read and script.run are honoured on them.
+   */
+  previewServices?: PermissionSnapshot[];
+  /**
    * `implement`: an unattended job in its own clone. No push, fetch, merge,
    * branch switching, server commands or attached integrations — the tools are
    * not offered at all, on top of the checker refusing them.
    */
   profile?: "implement";
+}
+
+/** What a preview may do in a project it only starts as a backend service. */
+const PREVIEW_SERVICE_PERMISSIONS: ReadonlySet<string> = new Set(["repo.read", "script.run"]);
+export function previewServiceChecker(checker: PermissionChecker): PermissionChecker {
+  return {
+    check(snapshot, permission, ...rest) {
+      if (!PREVIEW_SERVICE_PERMISSIONS.has(permission)) throw new PermissionError(`${snapshot.project.name} is only a preview service here: it can be read and started, not changed.`);
+      return checker.check(snapshot, permission, ...rest);
+    },
+  };
 }
 
 /** Tools an implement job never sees. */
@@ -69,8 +86,12 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
   const input = { policy, signal };
   const checker = policy.checker ?? policy.store;
   const repositories = new Map(input.policy.snapshots.map((snapshot) => [snapshot.project.id, new RepositoryTools(snapshot, checker, [...input.policy.protectedRoots, ...(input.policy.projectBoundaries ?? []).filter((root) => root.startsWith(snapshot.project.path + "/"))], input.policy.affectedFiles)]));
-  // A preview's backend services may only come from projects already in this session's scope.
-  const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name);
+  // A preview's backend services come from projects in this session's scope, or
+  // from the read-only preview services the policy names.
+  const serviceChecker = previewServiceChecker(checker);
+  const services = (input.policy.previewServices ?? []).map((snapshot) => new RepositoryTools(snapshot, serviceChecker, input.policy.protectedRoots));
+  const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name)
+    ?? services.find((repo) => repo.snapshot.project.name === name);
   const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName, { checkoutDeps: policy.profile === "implement" })]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");

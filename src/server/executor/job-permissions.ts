@@ -75,3 +75,17 @@ export function jobSnapshot(project: { id: string; name: string; workspaceId?: s
     task: `job:${jobId}`,
   };
 }
+
+/**
+ * A project a job's preview starts as a backend service: your real checkout,
+ * read and started only. PSM copies its tracked files (never .env) into the
+ * preview sandbox; the agent gets no tools in it.
+ */
+export function previewServiceSnapshot(project: { id: string; name: string; path: string; workspaceId?: string }, jobId: string): PermissionSnapshot {
+  return {
+    project: { id: project.id, name: project.name, path: project.path, ...(project.workspaceId ? { workspaceId: project.workspaceId } : {}) },
+    revision: 0,
+    grants: { "repo.read": { granted: true, actor: "go", at: 0 }, "script.run": { granted: true, actor: "go", at: 0 } },
+    task: `job:${jobId}:preview-service`,
+  };
+}

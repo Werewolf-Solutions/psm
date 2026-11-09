@@ -225,6 +225,9 @@ export class ManagedTaskRunner {
   private async runPreview(script: string, port: number, paths: string[], cwd: string, signedIn: boolean): Promise<string> {
     this.store.check(this.repository.snapshot, "script.run");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9:_.-]{0,99}$/.test(script)) throw new Error("Give the name of a script in package.json.");
+    const config = this.previewConfig(cwd);
+    // An app whose sign-in origin is registered with a port must be served on it.
+    if (config.port) port = config.port;
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("Give the port the script listens on (1024–65535).");
     const wanted = (paths.length ? paths : ["/"]).slice(0, 10);
     if (wanted.some(entry => !/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]{0,300}$/.test(entry))) throw new Error("Paths start with / and contain no spaces.");
@@ -233,7 +236,6 @@ export class ManagedTaskRunner {
     const directory = this.snapshot();
     const digest = this.sourceDigest;
     const args = /(?:^|\s)vite(?:\s|$)/.test(scripts[script]) ? ["--", "--host", "127.0.0.1", "--port", String(port), "--strictPort"] : [];
-    const config = this.previewConfig(cwd);
     if (signedIn && !config.session) throw new Error(`A signed-in check needs a session in ${PREVIEW_FIXTURE_FILE}: a cookie whose value is a secret a service declares, which its seed turns into a real session.`);
     // Generated here rather than per service, so the browser's session cookie and the seed that honours it share one value.
     const secrets = Object.fromEntries(config.services.flatMap(service => service.secrets).map(name => [name, randomBytes(32).toString("hex")]));
@@ -253,7 +255,7 @@ export class ManagedTaskRunner {
   /** Read from the checkout the digest covers, so editing a fixture makes an earlier pass stale. */
   private previewConfig(cwd: string): PreviewConfig {
     const file = this.packageFile(cwd, PREVIEW_FIXTURE_FILE);
-    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewConfig(this.repository.read(file)) : { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null };
+    return fs.existsSync(this.repository.resolve(file, true)) ? parsePreviewConfig(this.repository.read(file)) : { responses: [], services: [], expected: [], env: {}, host: "127.0.0.1", session: null, port: null };
   }
   /**
    * Run declared backend services beside the app on a network with no route

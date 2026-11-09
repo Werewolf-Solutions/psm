@@ -27,7 +27,9 @@ export interface PreviewService {
 export interface PreviewExpectation { method: string; path: string; status: number }
 /** A signed-in check: the browser holds this cookie, valued by a generated secret a service's seed also received. */
 export interface PreviewSession { cookie: string; path: string; secret: string }
-export interface PreviewConfig { responses: PreviewFixture[]; services: PreviewService[]; expected: PreviewExpectation[]; env: Record<string, string>; host: "127.0.0.1" | "localhost"; session: PreviewSession | null }
+export interface PreviewConfig { responses: PreviewFixture[]; services: PreviewService[]; expected: PreviewExpectation[]; env: Record<string, string>; host: "127.0.0.1" | "localhost"; session: PreviewSession | null;
+  /** The port the app must be served on, when its sign-in origin is registered with one. Overrides the port a check asks for. */
+  port: number | null }
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
 const STORES: PreviewStore[] = ["mongo", "redis"];
@@ -59,17 +61,18 @@ export function parsePreviewConfig(text: string): PreviewConfig {
   if (!isObject(parsed)) fail("expected an object");
   if (parsed.schema === PREVIEW_FIXTURE_SCHEMA) {
     if (Object.keys(parsed).some(key => key !== "schema" && key !== "responses")) fail("only schema and responses are allowed");
-    return { responses: responses(parsed.responses, fail), services: [], expected: [], env: {}, host: "127.0.0.1", session: null };
+    return { responses: responses(parsed.responses, fail), services: [], expected: [], env: {}, host: "127.0.0.1", session: null, port: null };
   }
   if (parsed.schema !== PREVIEW_SCHEMA) fail(`schema must be ${PREVIEW_FIXTURE_SCHEMA} or ${PREVIEW_SCHEMA}`);
-  if (Object.keys(parsed).some(key => !["schema", "responses", "services", "expected", "env", "host", "session"].includes(key))) fail("only schema, responses, services, expected, env, host and session are allowed");
+  if (Object.keys(parsed).some(key => !["schema", "responses", "services", "expected", "env", "host", "session", "port"].includes(key))) fail("only schema, responses, services, expected, env, host, session and port are allowed");
+  if ("port" in parsed && (!Number.isInteger(parsed.port) || parsed.port < 1024 || parsed.port > 65535)) fail("port must be 1024-65535");
   if ("host" in parsed && !["127.0.0.1", "localhost"].includes(parsed.host)) fail("host must be 127.0.0.1 or localhost");
   if ("services" in parsed && (!Array.isArray(parsed.services) || parsed.services.length > MAX_SERVICES)) fail(`services must be a list of at most ${MAX_SERVICES}`);
   const services = (parsed.services ?? []).map((entry: unknown, index: number) => service(entry, `services[${index}]`, fail));
   const aliases = new Set<string>();
   for (const { alias } of services) { if (aliases.has(alias) || STORES.includes(alias as PreviewStore)) fail(`service alias ${alias} is used twice`); aliases.add(alias); }
   if ("expected" in parsed && !services.length) fail("expected needs a service; a fixture already answers its own call");
-  return { responses: responses(parsed.responses ?? [], fail), services, expected: expected(parsed.expected ?? [], fail), env: env(parsed.env ?? {}, "env", fail), host: parsed.host ?? "127.0.0.1", session: "session" in parsed ? session(parsed.session, services, fail) : null };
+  return { responses: responses(parsed.responses ?? [], fail), services, expected: expected(parsed.expected ?? [], fail), env: env(parsed.env ?? {}, "env", fail), host: parsed.host ?? "127.0.0.1", session: "session" in parsed ? session(parsed.session, services, fail) : null, port: parsed.port ?? null };
 }
 
 function session(entry: unknown, services: PreviewService[], fail: Fail): PreviewSession {

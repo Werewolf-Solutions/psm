@@ -26,8 +26,9 @@ import type { AgentPermissionStore } from "../agent-permissions.ts";
 import type { ManagedAgentPolicy } from "../agent-permission-runtime.ts";
 import { RepositoryTools } from "../agent-repository-tools.ts";
 import { taskInputs } from "../agent-task-inputs.ts";
+import { PREVIEW_FIXTURE_FILE, parsePreviewConfig } from "../agent-preview-fixtures.ts";
 import type { ImplementJob, ImplementResult, JobOutcome } from "./client.ts";
-import { JobPermissions, jobSnapshot } from "./job-permissions.ts";
+import { JobPermissions, jobSnapshot, previewServiceSnapshot } from "./job-permissions.ts";
 import { baselineProblem, fixesTests, type Baseline } from "./baseline.ts";
 import { stepForLine } from "./progress.ts";
 import { StopRules, toolName } from "./stop-rules.ts";
@@ -74,6 +75,25 @@ export function jobGit(cwd: string, args: string[], options: { maxBuffer?: numbe
 /** Git on your real checkout, as you: read-only questions here (branch, HEAD, author). */
 export function realGit(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 }).trim();
+}
+
+/**
+ * The backend projects the project's committed preview files declare, read
+ * from your real checkout at the job's starting commit. The agent can edit the
+ * clone's copy, but that cannot widen what a preview may start.
+ */
+export function declaredPreviewServices(source: string, commit: string): string[] {
+  let files: string[];
+  try { files = realGit(source, ["ls-tree", "-r", "--name-only", commit]).split("\n"); }
+  catch { return []; }
+  const names = new Set<string>();
+  for (const file of files) {
+    if (path.posix.basename(file) !== PREVIEW_FIXTURE_FILE) continue;
+    try {
+      for (const service of parsePreviewConfig(realGit(source, ["show", `${commit}:${file}`])).services) names.add(service.project);
+    } catch { /* an invalid preview file declares nothing; preview_check reports it */ }
+  }
+  return [...names];
 }
 
 export const branchFor = (jobId: string) => `psm/job/${jobId}`;
@@ -264,6 +284,8 @@ export function implementPrompt(job: ImplementJob, projectName: string, baseline
 
 export interface ImplementDeps {
   findProject: (projectId: string) => { id: string; name: string; path: string; workspaceId?: string } | null;
+  /** A project by its directory name, for the preview services a job may start. */
+  findProjectByName?: (name: string) => { id: string; name: string; path: string; workspaceId?: string } | null;
   jobsDir: string;
   store: AgentPermissionStore;
   workspaceRules: (workspaceId?: string) => PolicyRule[];
@@ -355,6 +377,12 @@ export function implementJobRunner(deps: ImplementDeps) {
         return realDir !== resolved && !realDir.startsWith(resolved + path.sep);
       }),
       projectBoundaries: [],
+      previewServices: declaredPreviewServices(project.path, base)
+        .filter((name) => name !== project.name)
+        .flatMap((name) => {
+          const service = deps.findProjectByName?.(name);
+          return service ? [previewServiceSnapshot(service, job.jobId)] : [];
+        }),
     };
     const repository = new RepositoryTools(policy.snapshots[0], policy.checker!, policy.protectedRoots, policy.affectedFiles);
     // A red or untestable starting point can never reach review: say so now,

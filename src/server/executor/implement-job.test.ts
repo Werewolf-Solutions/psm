@@ -10,8 +10,9 @@ import { taskInputs } from "../agent-task-inputs.ts";
 import { PermissionError } from "../agent-permissions.ts";
 import { ExecutorActivity } from "./activity.ts";
 import type { ImplementJob } from "./client.ts";
-import { branchFor, clonePath, hydrateLocalSubmodules, implementJobRunner, jobGit, prepareClone, type ImplementDeps } from "./implement-job.ts";
-import { JobPermissions, jobSnapshot } from "./job-permissions.ts";
+import { branchFor, clonePath, declaredPreviewServices, hydrateLocalSubmodules, implementJobRunner, jobGit, prepareClone, type ImplementDeps } from "./implement-job.ts";
+import { JobPermissions, jobSnapshot, previewServiceSnapshot } from "./job-permissions.ts";
+import { previewServiceChecker } from "../agent-permission-runtime.ts";
 
 const JOB_ID = "job_0123456789abcdef01234567";
 
@@ -294,4 +295,44 @@ test("red tests do not block a task whose point is to fix them", async (t) => {
   });
   await run(job({ text: "fix the failing buildDashboard test" }), new AbortController().signal);
   assert.match(prompt, /they fail \(1 test failing, 79 passing\)\. Failing: buildDashboard: returns running bots\. This task is about making them pass/);
+});
+
+const preview = (project: string) => JSON.stringify({
+  schema: "psm.werewolf.solutions/preview/v2", host: "localhost",
+  services: [{ project, directory: "server", script: "dev", port: 3000, ready: "/" }],
+});
+
+test("preview services come from the committed preview file, not the clone's or working tree's copy", (t) => {
+  const fx = repo(t);
+  fs.mkdirSync(path.join(fx.real, "client"));
+  fs.writeFileSync(path.join(fx.real, "client", "psm-preview.json"), preview("werewolf-dapp"));
+  fx.git("add", ".");
+  fx.git("commit", "-q", "-m", "preview");
+  const commit = fx.git("rev-parse", "HEAD");
+  // An uncommitted edit (or one an agent makes in its clone) cannot add a service.
+  fs.writeFileSync(path.join(fx.real, "client", "psm-preview.json"), preview("secret-project"));
+  assert.deepEqual(declaredPreviewServices(fx.real, commit), ["werewolf-dapp"]);
+  assert.deepEqual(declaredPreviewServices(fx.real, "0000000000000000000000000000000000000000"), []);
+});
+
+test("a preview service can be read and started, never changed", () => {
+  const snapshot = previewServiceSnapshot({ id: "prj_dapp", name: "werewolf-dapp", path: "/nowhere" }, JOB_ID);
+  const checker = previewServiceChecker(new JobPermissions(JOB_ID, () => []));
+  assert.equal(checker.check(snapshot, "repo.read").effect, "allow");
+  assert.equal(checker.check(snapshot, "script.run").effect, "allow");
+  for (const permission of ["repo.edit", "repo.delete", "git.commit", "pkg.install", "test.run"] as const) {
+    assert.throws(() => checker.check(snapshot, permission), PermissionError);
+  }
+});
+
+test("an implement job offers its declared preview services, and only those that exist", async (t) => {
+  const fx = repo(t);
+  fs.writeFileSync(path.join(fx.real, "psm-preview.json"), preview("werewolf-dapp"));
+  fx.git("add", "psm-preview.json");
+  fx.git("commit", "-q", "-m", "preview");
+  let seen: string[] | null = null;
+  const base = deps(fx, async ({ policy }) => { seen = (policy.previewServices ?? []).map((snapshot) => snapshot.project.name); });
+  const run = implementJobRunner({ ...base, findProjectByName: (name) => (name === "werewolf-dapp" ? { id: "prj_dapp", name, path: fx.root } : null) });
+  await run(job(), new AbortController().signal);
+  assert.deepEqual(seen, ["werewolf-dapp"]);
 });
