@@ -57,12 +57,23 @@ export function machineRouter(options: MachineApiOptions): express.Router {
   const revision = (req: Request) => Number(req.body?.revision);
 
   router.get("/api/machines", route(false, (_req, res, ws) => res.json({ machines: service.listMachines(ws) })));
+  router.get("/api/machine-bootstrap-keys", route(false, (_req, res, ws) => res.json({ keys: service.listBootstrapKeys(ws) })));
+  router.post("/api/machine-bootstrap-keys", route(true, async (req, res, ws) => res.status(201).json({ key: await service.createBootstrapKey(ws, req.body?.name) })));
+  router.delete("/api/machine-bootstrap-keys/:id", route(true, async (req, res, ws) => { await service.removeBootstrapKey(ws, req.params.id); res.json({ ok: true }); }));
   router.post("/api/machines/discover", route(true, async (req, res) => res.json(await service.discover(req.body?.host, req.body?.port))));
   router.post("/api/machines", route(true, (req, res, ws) => {
     const machine = service.register({ workspaceId: ws, name: req.body?.name, host: req.body?.host, port: req.body?.port, knownHost: req.body?.knownHost, confirmFingerprint: req.body?.confirmFingerprint, fromConnectionId: req.body?.fromConnectionId });
     res.status(201).json({ machine: service.getMachine(machine.id, ws) });
   }));
   router.get("/api/machines/:id", route(false, (req, res, ws) => res.json({ machine: service.getMachine(req.params.id, ws) })));
+  router.post("/api/machines/:id/bootstrap-access", route(true, async (req, res, ws) => res.json({ machine: await service.attachBootstrapKey(req.params.id, ws, req.body?.connectionId, req.body?.user) })));
+  router.post("/api/machines/:id/firewall-review", route(true, async (req, res, ws) => res.json({ plan: await service.reviewFirewall(req.params.id, ws) })));
+  router.post("/api/machines/:id/firewall-apply", route(true, async (req, res, ws) => res.json(await service.applyFirewall(req.params.id, ws, req.body?.digest))));
+  router.post("/api/machines/:id/security-audit", route(true, async (req, res, ws) => {
+    const scope = req.body?.scope;
+    if (scope !== "internal" && scope !== "agent-external") return res.status(400).json({ error: "Choose internal or agent-external audit.", code: "audit-scope" });
+    res.json({ report: await service.auditMachine(req.params.id, ws, scope) });
+  }));
   router.get("/api/machines/:id/snapshot", route(false, async (req, res, ws) => res.json({ snapshot: await service.snapshot(req.params.id, ws) })));
   router.post("/api/machines/:id/confirm-host-key", route(true, (req, res, ws) => {
     service.confirmHostKey(req.params.id, ws, revision(req), req.body?.fingerprint);
@@ -113,6 +124,7 @@ export function machineRouter(options: MachineApiOptions): express.Router {
   }));
   router.get("/api/machine-access/:id", route(false, (req, res, ws) => res.json({ access: service.accessView(service.getAccess(req.params.id, ws)) })));
   router.get("/api/machine-access/:id/script", route(false, (req, res, ws) => res.json(service.setupScript(req.params.id, ws))));
+  router.post("/api/machine-access/:id/repair-target", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.planDeployTargetRepair(req.params.id, ws)) })));
   router.post("/api/machine-access/:id/ci-key", route(true, async (req, res, ws) => res.status(201).json({ access: service.accessView(await service.planCiKey(req.params.id, ws)) })));
   router.post("/api/machine-access/:id/replace", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.planReplacement(req.params.id, ws)) })));
   router.post("/api/machine-access/:id/revoke", route(true, async (req, res, ws) => res.json({ access: service.accessView(await service.revokeAccess(req.params.id, ws, revision(req))) })));

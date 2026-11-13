@@ -121,6 +121,8 @@ export interface DeployAccessPlan extends BasePlan {
   /** Public halves of the two keys, so the plan can be rebuilt unchanged except for what is reviewed again. */
   publicKey: string;
   release: { account: string; publicKeyFingerprint: string; publicKey: string };
+  /** An unbound, inactive target this reviewed plan retires after enrolling its replacement. */
+  retireTarget?: { targetId: string; file: string; digest: string; root: string };
   target: {
     targetId: string;
     unitId: string;
@@ -427,6 +429,14 @@ inspect() {
   account_state "$PSM_INFRA" "$PSM_INFRA_AUTHORIZED" infra
   account_state "$PSM_RELEASE" "$PSM_RELEASE_AUTHORIZED" release
   service_state
+  if [[ -n "$PSM_RETIRE_TARGET_FILE" ]]; then
+    if [[ -L "$PSM_RETIRE_TARGET_FILE" ]]; then conflict "retire-target-symlink:$PSM_RETIRE_TARGET_FILE"
+    elif [[ -e "$PSM_RETIRE_TARGET_FILE" ]]; then
+      [[ $(file_sha "$PSM_RETIRE_TARGET_FILE") == "$PSM_RETIRE_TARGET_SHA" ]] || conflict "retire-target-changed:$PSM_RETIRE_TARGET_FILE"
+      [[ ! -e "$PSM_RETIRE_ROOT/current" && ! -L "$PSM_RETIRE_ROOT/current" ]] || conflict "retire-target-active:$PSM_RETIRE_ROOT"
+      report retire_target present
+    else report retire_target absent; fi
+  fi
   if [[ -L "$PSM_TARGET_FILE" ]]; then report target conflict; conflict "symlink:$PSM_TARGET_FILE"
   elif [[ ! -e "$PSM_TARGET_FILE" ]]; then report target absent
   else
@@ -545,6 +555,12 @@ if [[ "$target_state" == replace ]]; then
   cp -p -- "$PSM_TARGET_FILE" "${REPLACED_DIR}/target.$(file_sha "$PSM_TARGET_FILE").json"
 fi
 ${HELPER_BINARY} enroll < "$contract" >/dev/null
+if [[ -n "$PSM_RETIRE_TARGET_FILE" && -e "$PSM_RETIRE_TARGET_FILE" ]]; then
+  [[ ! -L "$PSM_RETIRE_TARGET_FILE" && $(file_sha "$PSM_RETIRE_TARGET_FILE") == "$PSM_RETIRE_TARGET_SHA" ]] || { report result retire-target-changed; exit 65; }
+  [[ ! -e "$PSM_RETIRE_ROOT/current" && ! -L "$PSM_RETIRE_ROOT/current" ]] || { report result retire-target-active; exit 65; }
+  install -d -o root -g root -m 0700 ${REPLACED_DIR}
+  mv -- "$PSM_RETIRE_TARGET_FILE" "${REPLACED_DIR}/target.$PSM_RETIRE_TARGET_SHA.json"
+fi
 inspect
 if (( \${#conflicts[@]} )); then report result conflict; exit 65; fi
 report result applied
@@ -569,6 +585,7 @@ export interface DeployAccessRequest {
   replacesTarget?: unknown;
   /** Present for a Node service target: enrolled into the contract's service block. */
   service?: unknown;
+  retireTarget?: { targetId: string; file: string; digest: string; root: string };
   now?: number;
 }
 
@@ -625,6 +642,15 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
   template.revision = revision;
   const file = `/etc/psm-deploy/targets/${createHash("sha256").update(targetId).digest("hex")}.json`;
   const replacesTarget = replacementDigest(request.replacesTarget, "replacesTarget");
+  const retireTarget = request.retireTarget;
+  if (retireTarget) {
+    validateId(retireTarget.targetId, "retireTarget.targetId");
+    if (retireTarget.targetId === targetId) throw new MachinePlanError("A retired target must differ from the new target.", "retireTarget.targetId");
+    const expectedFile = `/etc/psm-deploy/targets/${createHash("sha256").update(retireTarget.targetId).digest("hex")}.json`;
+    if (retireTarget.file !== expectedFile) throw new MachinePlanError("The retired target file does not match its ID.", "retireTarget.file");
+    replacementDigest(retireTarget.digest, "retireTarget.digest");
+    canonicalPath(retireTarget.root, "retireTarget.root");
+  }
   const forced = (key: { line: string }, account: string) => `command="${HELPER_CLIENT}",restrict ${key.line} ${account}`;
   const script = deployAccessScript({
     PSM_PLAN: `${machine.id}:${projectId}:${environmentId}:deploy`,
@@ -638,6 +664,9 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     PSM_REVISION: revision,
     PSM_CONTRACT_B64: Buffer.from(JSON.stringify(template)).toString("base64"),
     PSM_REPLACE_TARGET: replacesTarget,
+    PSM_RETIRE_TARGET_FILE: retireTarget?.file ?? "",
+    PSM_RETIRE_TARGET_SHA: retireTarget?.digest ?? "",
+    PSM_RETIRE_ROOT: retireTarget?.root ?? "",
     PSM_SERVICE: serviceAccount ?? "",
     PSM_SERVICE_SWITCHING: settings?.switching ? "yes" : "no",
   });
@@ -658,11 +687,13 @@ export function buildDeployAccessPlan(request: DeployAccessRequest): DeployAcces
     publicKeyFingerprint: infraKey.fingerprint,
     publicKey: infraKey.line,
     release: { account: release, publicKeyFingerprint: releaseKey.fingerprint, publicKey: releaseKey.line },
+    ...(retireTarget ? { retireTarget } : {}),
     target: {
       targetId, unitId, hostname, canonicalRoot, allowedRootPrefix, certbotEmail, revision, file, ...(replacesTarget ? { replaces: replacesTarget } : {}),
       ...(settings && serviceAccount && unitName ? { service: { ...settings, account: serviceAccount, unitName } } : {}),
     },
     operations: [
+      ...(retireTarget ? [`After enrolling ${targetId}, archive inactive target ${retireTarget.targetId} only if its contract still has SHA-256 ${retireTarget.digest}; leave its files in ${retireTarget.root} untouched. Stop if a release is active.`] : []),
       ...(replacesTarget ? [`Replace the contract already enrolled for ${targetId} (sha256 ${replacesTarget.slice(0, 16)}…), which names other accounts; those accounts lose access to it. The previous contract is kept in ${REPLACED_DIR}.`] : []),
       `Create ${infra} (infrastructure) and ${release} (release), each with its own group, no password and no sudo, in psm-deploy.`,
       `Authorize one PSM-generated key per account, forced to the host-helper client (${infraKey.fingerprint}, ${releaseKey.fingerprint}).`,

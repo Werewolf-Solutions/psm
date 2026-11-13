@@ -27,6 +27,20 @@
   };
   const STEP_ICON = { pending: "○", running: "◐", done: "●", skipped: "–", failed: "✕", uncertain: "?" };
   const STEPS = ["Connect", "Choose access", "Set up", "Ready"];
+  const confirmAction = (message, title) => ctx.confirm ? ctx.confirm(message, title) : window.psmConfirm(message, title);
+
+  function deployCandidate(machine, { projectId, environmentId, targetId, hostname }) {
+    if (!targetId) return { access: null, reason: "This environment has no manifest deployment target." };
+    if (!machine.trusted) return { access: null, reason: "Confirm this machine's host key." };
+    if (!machine.helper || machine.helperOutdated) return { access: null, reason: machine.helperOutdated ? "Update the host helper." : "Install the host helper." };
+    const access = (machine.access || []).find((entry) => entry.role === "deploy" && entry.state === "ready"
+      && entry.projectId === projectId && entry.environmentId === environmentId && entry.plan?.target?.targetId === targetId
+      && (!hostname || entry.plan?.target?.hostname === hostname));
+    const other = (machine.access || []).find((entry) => entry.role === "deploy" && entry.state === "ready"
+      && entry.projectId === projectId && entry.environmentId !== environmentId);
+    return access ? { access, reason: `Verified for target ${targetId}.` }
+      : { access: null, reason: other ? `Used for ${other.environmentId}; ${environmentId} needs its own deploy access.` : `Set up deploy access for ${environmentId}.` };
+  }
 
   let ctx = null; // { api, root, workspace, projects, project, environment, onBound, toast }
   let snapshotTimer = null;
@@ -39,6 +53,10 @@
   }
   const ws = (path) => `${path}${path.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(ctx.workspace)}`;
   const post = (path, body = {}) => call(ws(path), { method: "POST", body: JSON.stringify({ ...body, workspace: ctx.workspace }) });
+  const deployTarget = async (projectId, environmentId) => (await call(ws(`/api/machine-deploy-target?projectId=${encodeURIComponent(projectId)}&environmentId=${encodeURIComponent(environmentId)}`))).target;
+  const matchesTarget = (access, target) => !!target && access?.plan?.target?.targetId === target.targetId
+    && access.plan.target.canonicalRoot === target.root && (!target.hostname || access.plan.target.hostname === target.hostname);
+  const setupDeployment = (projectId) => ctx.onDeploymentSetup?.(projectId);
 
   function frame(title, stepIndex) {
     if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
@@ -60,18 +78,38 @@
   /* ---------- inventory ---------- */
 
   async function showList() {
-    const view = frame("Machines", null);
+    const scoped = ctx.project?.id && ctx.environment;
+    const view = frame(scoped ? `Machines for ${ctx.project.name} · ${ctx.environment}` : "Machines", null);
     view.body.append(node("p", "Servers your projects deploy to. A machine is registered once per workspace; each project gets its own access to it.", "hint"));
     const add = button("＋ Add machine", () => showConnect(), "btn btn-primary");
     view.body.append(add);
     try {
       const { machines } = await call(ws("/api/machines"));
+      let expectedTarget = null;
+      if (scoped) {
+        try { expectedTarget = await deployTarget(ctx.project.id, ctx.environment); } catch { /* setup can still continue */ }
+      }
       if (!machines.length) view.body.append(node("p", "No machines yet."));
       for (const machine of machines) {
         const card = node("article", "", "machine-card");
         const head = node("div", "", "machine-card-head");
         head.append(node("h4", `${machine.name} · ${machine.host}${machine.port === 22 ? "" : `:${machine.port}`}`), node("span", machine.trusted ? "Identity confirmed" : "Identity not confirmed", "cap-badge"));
         card.append(head);
+        if (scoped) {
+          const candidate = deployCandidate(machine, { projectId: ctx.project.id, environmentId: ctx.environment, targetId: expectedTarget?.targetId, hostname: expectedTarget?.hostname });
+          card.append(node("p", candidate.reason, candidate.access ? "machine-ready" : "hint"));
+          if (!expectedTarget && ctx.onDeploymentSetup) card.append(button("Open project Deploy page", () => setupDeployment(ctx.project.id)));
+          if (candidate.access && matchesTarget(candidate.access, expectedTarget)) card.append(button("Use this machine for deploy", async () => {
+            try {
+              const current = await deployTarget(ctx.project.id, ctx.environment);
+              if (!matchesTarget(candidate.access, current)) throw new Error("The deployment target changed. Recheck machine access before binding it.");
+              await call(`/api/projects/${encodeURIComponent(ctx.project.id)}/deployments/${encodeURIComponent(ctx.environment)}/connection-bindings/host`, { method: "PUT", body: JSON.stringify({ connectionId: candidate.access.connectionId }) });
+              ctx.onBound?.({ projectId: ctx.project.id, environmentId: ctx.environment });
+              showList();
+            } catch (error) { view.error(error.message); }
+          }, "btn btn-primary"));
+          else if (candidate.access) card.append(node("p", "This access was enrolled for a different site root or domain. It cannot be bound to this manifest target.", "machine-error"));
+        }
         card.append(node("p", `Host key ${machine.hostKeyFingerprint}${machine.helper ? ` · helper ${machine.helper.sha256.slice(0, 12)}…` : " · no deployment helper"}${machine.adminConnectionId ? " · PSM has administrator access" : ""}`, "hint"));
         if (machine.helperOutdated) card.append(helperUpdate(machine, view));
         for (const access of machine.access) {
@@ -87,8 +125,26 @@
               } catch (error) { view.error(error.message); }
             }));
           }
+          if (access.role === "deploy" && access.state === "ready") {
+            try {
+              const target = await deployTarget(access.projectId, access.environmentId);
+              if (!target && ctx.onDeploymentSetup) row.append(button("Set up deployment environment", () => setupDeployment(access.projectId)));
+              if (target && !matchesTarget(access, target) && access.plan?.target?.targetId !== target.targetId) row.append(button("Review target repair", async () => {
+                try {
+                  const { access: repaired } = await post(`/api/machine-access/${encodeURIComponent(access.id)}/repair-target`);
+                  showReview(machine.id, [{ access: repaired, method: "admin-ssh", bind: { projectId: access.projectId, environmentId: access.environmentId } }]);
+                } catch (error) { view.error(error.message); }
+              }, "btn btn-primary"));
+            } catch { /* A missing manifest is explained by the project Deploy setup. */ }
+          }
+          if (access.role === "deploy" && access.state === "failed" && access.plan?.retireTarget) row.append(button("Review target repair again", async () => {
+            try {
+              const { access: repaired } = await post(`/api/machine-access/${encodeURIComponent(access.id)}/repair-target`);
+              showReview(machine.id, [{ access: repaired, method: "admin-ssh", bind: { projectId: access.projectId, environmentId: access.environmentId } }]);
+            } catch (error) { view.error(error.message); }
+          }, "btn btn-primary"));
           if (access.role === "admin" && access.state === "ready") row.append(button("Remove administrator access", async () => {
-            if (!await window.psmConfirm(`Remove PSM's administrator access to ${machine.name}? Project accounts keep working; setting up new ones will need administrator access again.`, "Remove administrator access")) return;
+            if (!await confirmAction(`Remove PSM's administrator access to ${machine.name}? Project accounts keep working; setting up new ones will need administrator access again.`, "Remove administrator access")) return;
             try { await post(`/api/machine-access/${encodeURIComponent(access.id)}/release`); showList(); } catch (error) { view.error(error.message); }
           }));
           if (["planned", "setting-up", "failed"].includes(access.state)) row.append(button("Continue setup", async () => {
@@ -98,12 +154,12 @@
             } catch (error) { view.error(error.message); }
           }, "btn btn-primary"));
           if (!access.machineLevel && access.state !== "revoked") row.append(button("Disconnect", async () => {
-            if (!await window.psmConfirm(`Disconnect ${access.projectName} ${access.environmentId} from ${machine.name}? PSM forgets its keys; the server account stays until you remove it.`, "Disconnect machine access")) return;
+            if (!await confirmAction(`Disconnect ${access.projectName} ${access.environmentId} from ${machine.name}? PSM forgets its keys; the server account stays until you remove it.`, "Disconnect machine access")) return;
             try { await post(`/api/machine-access/${encodeURIComponent(access.id)}/revoke`, { revision: access.revision }); showList(); } catch (error) { view.error(error.message); }
           }));
           card.append(row);
         }
-        card.append(button("Monitor machine", () => showDashboard(machine), "btn btn-primary"), button("Add a project", () => showAccess(machine.id)));
+        card.append(button("Monitor machine", () => showDashboard(machine), "btn btn-primary"), button("Security audit", () => showAudit(machine.id, showList)), button("Add a project", () => showAccess(machine.id)));
         view.body.append(card);
       }
     } catch (error) { view.error(error.message); }
@@ -143,7 +199,7 @@
     const view = frame(`${machine.name} · live machine`, null);
     const heading = node("div", "", "machine-card-head");
     const status = node("p", "Connecting…", "mon-note");
-    heading.append(button("Back to machines", showList), status);
+    heading.append(button("Back to machines", showList), button("Security audit", () => showAudit(machine.id, () => showDashboard(machine))), status);
     const content = node("div", "", "machine-dashboard");
     view.body.append(heading, content);
     const history = [];
@@ -212,36 +268,166 @@
     snapshotTimer = setInterval(refresh, 5000);
   }
 
+  function showAudit(machineId, back) {
+    const view = frame("Machine security audit", null);
+    const actions = node("div", "", "machine-card-head");
+    const result = node("div", "", "machine-dashboard");
+    const state = node("p", "Choose a check to run. These observations do not approve a deployment.", "hint");
+    const run = async (scope) => {
+      view.error("");
+      result.replaceChildren();
+      state.textContent = scope === "internal" ? "Checking settings on the machine…" : "Scanning from this PSM agent; this may take a few minutes…";
+      for (const control of actions.querySelectorAll("button")) control.disabled = true;
+      try {
+        const { report } = await post(`/api/machines/${encodeURIComponent(machineId)}/security-audit`, { scope });
+        state.textContent = `${new Date(report.observedAt).toLocaleString()} · ${report.vantage}`;
+        for (const check of report.checks) {
+          const item = node("section", "", "machine-detail");
+          const head = node("div", "", "machine-card-head");
+          head.append(node("h4", check.title), node("span", check.status, `cap-badge machine-audit-${check.status}`));
+          item.append(head, node("p", check.detail, "mon-note"));
+          result.append(item);
+        }
+        result.append(button("Download report JSON", () => {
+          const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = `psm-machine-audit-${report.machineId}-${report.scope}.json`;
+          link.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }));
+      } catch (error) { state.textContent = "Audit could not finish."; view.error(error.message); }
+      finally { for (const control of actions.querySelectorAll("button")) control.disabled = false; }
+    };
+    actions.append(button("Back", back), button("Run host audit", () => run("internal"), "btn btn-primary"), button("Scan from this PSM agent", () => run("agent-external")));
+    view.body.append(node("p", "Host audit checks SSH settings, UFW, listeners, unattended updates and Lynis if installed. Agent scan checks TCP, common UDP and SSH algorithms using Nmap and ssh-audit installed on this PSM agent.", "hint"),
+      actions, state, result, node("p", "An agent scan does not prove what an independent internet location can reach. Unknown and unavailable results require review. Save the report with your deployment evidence.", "hint"));
+  }
+
   /* ---------- 1. Connect ---------- */
 
   function showConnect() {
     const view = frame("Add machine", 0);
     const name = input("", "e.g. staging server");
-    const host = input("", "hostname or IP address");
-    const port = input("22", "22", "number");
-    const lookup = button("Look up host key", async () => {
-      view.error("");
-      lookup.disabled = true;
+    const host = input("", "public IPv4 or reachable hostname");
+    const port = input("22", "22");
+    port.inputMode = "numeric";
+    const bootstrap = document.createElement("select");
+    const adminUser = input("root", "root or ubuntu");
+    const keyDetails = node("div", "", "machine-key-details");
+    const showKey = (key) => {
+      keyDetails.replaceChildren();
+      if (!key) return;
+      const publicKey = node("pre", key.publicKey, "machine-command");
+      const copy = button("Copy public key", async () => {
+        try { await navigator.clipboard.writeText(key.publicKey); copy.textContent = "Copied"; }
+        catch { const range = document.createRange(); range.selectNodeContents(publicKey); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); copy.textContent = "Public key selected"; }
+      }, "btn btn-primary");
+      const remove = button("Remove unused key", async () => {
+        if (!await confirmAction(`Remove the unused droplet key ${key.name} from PSM?`, "Remove key")) return;
+        try { await call(ws(`/api/machine-bootstrap-keys/${encodeURIComponent(key.connectionId)}`), { method: "DELETE" }); await loadKeys(); }
+        catch (error) { view.error(error.message); }
+      });
+      keyDetails.append(node("p", `Name in DigitalOcean: ${key.name}`, "hint"), publicKey, copy, remove,
+        node("p", `Fingerprint ${key.fingerprint}. Paste this public key into DigitalOcean when creating the droplet. PSM stores the private half locally and uses it only after you confirm the droplet's host key.`, "hint"));
+    };
+    const loadKeys = async (selected = "") => {
+      const { keys } = await call(ws("/api/machine-bootstrap-keys"));
+      bootstrap.replaceChildren();
+      const none = document.createElement("option"); none.value = ""; none.textContent = "Use existing SSH access or setup command"; bootstrap.append(none);
+      for (const key of keys) { const option = document.createElement("option"); option.value = key.connectionId; option.textContent = `${key.name} · ${key.fingerprint}`; bootstrap.append(option); }
+      bootstrap.value = selected || "";
+      bootstrap.onchange = () => showKey(keys.find((key) => key.connectionId === bootstrap.value));
+      bootstrap.onchange();
+    };
+    const createKey = button("Create droplet SSH key", async () => {
       try {
-        const found = await post("/api/machines/discover", { host: host.value.trim(), port: port.value });
-        candidates.replaceChildren(node("p", "The network offered these keys. A key learned over the network proves nothing until you compare it with a trusted source — your provider's console, or `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` run on the server itself.", "hint"));
-        for (const candidate of found.candidates) {
-          const row = node("div", "", "machine-candidate");
-          row.append(node("code", `${candidate.keyType} ${candidate.fingerprint}`));
-          row.append(button("It matches — register", async () => {
-            if (!await window.psmConfirm(`Register ${host.value.trim()} with host key\n${candidate.fingerprint}?\n\nOnly confirm if you compared it with a trusted source.`, "Confirm host identity")) return;
-            try {
-              const { machine } = await post("/api/machines", { name: name.value.trim() || host.value.trim(), host: host.value.trim(), port: port.value, knownHost: candidate.knownHost, confirmFingerprint: candidate.fingerprint });
-              showAdmin(machine.id);
-            } catch (error) { view.error(error.message); }
-          }, "btn btn-primary"));
-          candidates.append(row);
-        }
+        const keyName = name.value.trim() || "PSM droplet";
+        const { key } = await post("/api/machine-bootstrap-keys", { name: keyName });
+        await loadKeys(key.connectionId);
       } catch (error) { view.error(error.message); }
-      finally { lookup.disabled = false; }
+    }, "btn btn-primary");
+    void loadKeys().catch((error) => view.error(error.message));
+    const connect = button("Connect machine", async () => {
+      view.error("");
+      candidates.replaceChildren();
+      connect.disabled = true;
+      const requestedHost = host.value.trim();
+      const requestedPort = port.value.trim();
+      const requestedName = name.value.trim() || requestedHost;
+      const requestedKey = bootstrap.value;
+      const requestedUser = adminUser.value.trim();
+      try {
+        const found = await post("/api/machines/discover", { host: requestedHost, port: requestedPort });
+        const preferred = found.candidates.find((item) => item.keyType === "ssh-ed25519") || found.candidates[0];
+        const hostKeyFile = preferred.keyType === "ssh-ed25519" ? "ssh_host_ed25519_key.pub"
+          : preferred.keyType === "ssh-rsa" ? "ssh_host_rsa_key.pub" : "ssh_host_ecdsa_key.pub";
+        const review = node("section", "", "machine-option");
+        review.append(node("h4", `Verify ${found.host}:${found.port}`),
+          node("p", "SSH answered. In DigitalOcean's Web Console, run the command below and compare its fingerprint with this one. This is the server's identity, separate from the droplet key you copied during creation.", "hint"),
+          node("code", `ssh-keygen -lf /etc/ssh/${hostKeyFile}`),
+          node("code", `${preferred.keyType} ${preferred.fingerprint}`));
+        const alternatives = found.candidates.filter((item) => item !== preferred);
+        if (alternatives.length) {
+          const details = document.createElement("details");
+          details.append(node("summary", "Other host key algorithms"));
+          for (const item of alternatives) details.append(node("p", `${item.keyType} ${item.fingerprint}`, "machine-fingerprint"));
+          review.append(details);
+        }
+        review.append(button("Fingerprint matches — connect and add", async () => {
+          if ([host.value.trim(), port.value.trim(), name.value.trim() || host.value.trim(), bootstrap.value, adminUser.value.trim()].some((value, index) => value !== [requestedHost, requestedPort, requestedName, requestedKey, requestedUser][index])) {
+            view.error("Machine details changed. Connect again to verify the current address and key.");
+            candidates.replaceChildren();
+            return;
+          }
+          if (!await confirmAction(`I compared the server's ${preferred.keyType} fingerprint with a trusted source:\n${preferred.fingerprint}\n\nConnect ${requestedName} at ${requestedHost}:${requestedPort}?`, "Confirm server identity")) return;
+          const verify = review.querySelector("button");
+          verify.disabled = true;
+          try {
+            const { machine } = await post("/api/machines", { name: requestedName, host: requestedHost, port: requestedPort, knownHost: preferred.knownHost, confirmFingerprint: preferred.fingerprint });
+            if (requestedKey) {
+              try {
+                await post(`/api/machines/${encodeURIComponent(machine.id)}/bootstrap-access`, { connectionId: requestedKey, user: requestedUser });
+                await post(`/api/machines/${encodeURIComponent(machine.id)}/inspect`);
+                showSecurity(machine.id);
+              } catch (error) {
+                view.error(`Machine added, but SSH access needs attention: ${error.message}`);
+                candidates.replaceChildren(button("Continue machine setup", () => showAdmin(machine.id), "btn btn-primary"), button("See connected machines", showList));
+              }
+            } else showAdmin(machine.id);
+          } catch (error) { view.error(error.message); verify.disabled = false; }
+        }, "btn btn-primary"));
+        candidates.append(review);
+      } catch (error) {
+        view.error(error.code === "no-host-key" && /^10\.|^192\.168\.|^172\.(1[6-9]|2\d|3[01])\./.test(requestedHost)
+          ? `${error.message} That looks like a private address. Use the droplet's Public IPv4 unless this PSM agent is on the same private network.` : error.message);
+      } finally { connect.disabled = false; }
     }, "btn btn-primary");
     const candidates = node("div", "", "machine-candidates");
-    view.body.append(field("Name", name), field("Host", host), field("SSH port", port), lookup, candidates, button("Back to machines", showList));
+    view.body.append(field("Name", name), createKey, field("Droplet SSH key", bootstrap), keyDetails,
+      field("Administrator SSH user", adminUser), field("Public IPv4 or reachable hostname", host),
+      node("p", "For DigitalOcean, copy Public IPv4 from Connection Details. Private IP works only when the PSM agent can reach the same VPC.", "hint"),
+      field("SSH port", port), connect, candidates, button("Back to machines", showList));
+  }
+
+  async function showSecurity(machineId) {
+    const view = frame("Secure new machine", 1);
+    view.body.append(node("p", "PSM verified SSH access using the droplet key. Review the host firewall before setting up deploy accounts.", "hint"));
+    try {
+      const { plan } = await post(`/api/machines/${encodeURIComponent(machineId)}/firewall-review`);
+      const steps = node("ul", "");
+      for (const operation of plan.operations) steps.append(node("li", operation));
+      view.body.append(node("h4", "Host firewall"), steps, node("p", plan.preflight || "Preflight passed.", "hint"));
+      view.body.append(button("Apply and verify firewall", async () => {
+        try {
+          view.body.append(node("p", "Applying firewall and testing a new SSH connection…", "hint"));
+          await post(`/api/machines/${encodeURIComponent(machineId)}/firewall-apply`, { digest: plan.digest });
+          showAccess(machineId);
+        } catch (error) { view.error(error.message); }
+      }, "btn btn-primary"));
+    } catch (error) { view.error(error.message); }
+    view.body.append(button("Run security audit", () => showAudit(machineId, () => showSecurity(machineId))));
+    view.body.append(button("Review deployment access", () => showAccess(machineId)));
   }
 
   /* how PSM gets administrator authority for setup */
@@ -309,6 +495,12 @@
     const environment = input(ctx.environment || "staging", "staging");
     const risk = document.createElement("select");
     for (const value of ["staging", "production", "development"]) { const option = document.createElement("option"); option.value = value; option.textContent = value; risk.append(option); }
+    if (ctx.project?.id && ctx.environment) {
+      projectSelect.disabled = true;
+      environment.readOnly = true;
+      risk.value = ctx.risk || (ctx.environment === "production" ? "production" : "staging");
+      risk.disabled = true;
+    }
     const choices = [
       ["deploy", "Deploy this application", "Its own release and infrastructure accounts on this server, and the deployment helper if it is missing."],
       ["command", "Run application commands", "A separate unprivileged account for builds, diagnostics and maintenance, in its own directory."],
@@ -330,13 +522,17 @@
     // The deployment manifest decides the domain; show it rather than asking again.
     const manifestNote = node("p", "", "hint");
     deployFields.append(manifestNote);
+    const openSetup = button("Open project Deploy page", () => setupDeployment(projectSelect.value));
+    openSetup.hidden = true;
+    deployFields.append(openSetup);
     const loadTarget = async () => {
       try {
-        const { target } = await call(ws(`/api/machine-deploy-target?projectId=${encodeURIComponent(projectSelect.value)}&environmentId=${encodeURIComponent(environment.value.trim())}`));
+        const target = await deployTarget(projectSelect.value, environment.value.trim());
         hostname.readOnly = !!target?.hostname;
         if (target?.hostname) hostname.value = target.hostname;
-        manifestNote.textContent = target ? `From the deployment manifest: target ${target.targetId}, site root ${target.root}.` : "This environment has no deployment manifest target; PSM will create one for the domain you enter.";
-      } catch { manifestNote.textContent = ""; }
+        manifestNote.textContent = target ? `From the deployment manifest: target ${target.targetId}, site root ${target.root}.` : "Create this environment on the project's Deploy page before setting up deploy access on the machine.";
+        openSetup.hidden = !!target || !ctx.onDeploymentSetup;
+      } catch (error) { manifestNote.textContent = error.message; openSetup.hidden = true; }
     };
     projectSelect.onchange = loadTarget;
     environment.onchange = loadTarget;
@@ -348,6 +544,10 @@
       try {
         const projectId = projectSelect.value;
         const plans = [];
+        if (checks.deploy.checked && !await deployTarget(projectId, environment.value.trim())) {
+          view.error(`Create the ${environment.value.trim()} deployment environment on this project's Deploy page first. The machine is connected and can be reused after that.`);
+          return;
+        }
         if (!machine.adminConnectionId && (checks.deploy.checked || checks.command.checked)) {
           const { access } = await post(`/api/machines/${encodeURIComponent(machineId)}/admin-access`);
           plans.push({ access, method: "manual-command" });
@@ -452,6 +652,14 @@
       }
       card2?.remove();
       if (job.state !== "succeeded") {
+        if (plan.access.plan?.retireTarget && job.error?.code === "conflict") card.append(button("Review target repair again", async () => {
+          try {
+            const { access: repaired } = await post(`/api/machine-access/${encodeURIComponent(plan.access.id)}/repair-target`);
+            const rest = plans.slice(plans.indexOf(plan));
+            rest[0] = { ...plan, access: repaired };
+            showReview(machineId, rest, { next });
+          } catch (error) { view.error(error.message); }
+        }, "btn btn-primary"));
         if (job.error?.code === "replaceable") {
           card.append(button("Review replacing it", async () => {
             try {
@@ -475,6 +683,11 @@
 
   async function showReady(machineId, results) {
     const view = frame("Ready", 3);
+    const completion = node("div", results.some(({ plan }) => plan.bind)
+      ? "✓ Machine access verified. Connect it to the deployment below."
+      : "✓ Machine setup complete", "machine-complete");
+    completion.setAttribute("role", "status");
+    view.body.append(completion);
     for (const { plan } of results) {
       const access = (await call(ws(`/api/machine-access/${encodeURIComponent(plan.access.id)}`))).access;
       const card = node("article", "", "machine-card");
@@ -483,21 +696,43 @@
       for (const check of access.checks) verified.append(node("li", `${check.ok ? "✓" : "✕"} ${check.title} — ${check.detail}`));
       card.append(verified);
       if (plan.bind) {
-        const bind = button(`Use for ${ctx.projects().find((entry) => entry.id === plan.bind.projectId)?.name || plan.bind.projectId} ${plan.bind.environmentId} deployments`, async () => {
+        const projectName = ctx.projects().find((entry) => entry.id === plan.bind.projectId)?.name || plan.bind.projectId;
+        let target = null;
+        try { target = await deployTarget(plan.bind.projectId, plan.bind.environmentId); } catch (error) { view.error(error.message); }
+        if (!target) {
+          card.append(node("p", `Machine access is verified, but ${projectName} has no ${plan.bind.environmentId} deployment environment. Create it on the Deploy page before binding a machine. This enrolled target may need a reviewed repair to match the new manifest.`, "machine-error"));
+          if (ctx.onDeploymentSetup) card.append(button("Open project Deploy page", () => setupDeployment(plan.bind.projectId), "btn btn-primary"));
+        } else if (!matchesTarget(access, target)) {
+          card.append(node("p", "This access was enrolled for a different target, site root or domain. It cannot be bound to the deployment manifest. Review a target repair before using it for deploys.", "machine-error"));
+          if (access.plan?.target?.targetId !== target.targetId) card.append(button("Review target repair", async () => {
+            try {
+              const { access: repaired } = await post(`/api/machine-access/${encodeURIComponent(access.id)}/repair-target`);
+              showReview(machineId, [{ access: repaired, method: "admin-ssh", bind: plan.bind }]);
+            } catch (error) { view.error(error.message); }
+          }, "btn btn-primary"));
+        } else {
+          const bind = button(`Use for ${projectName} ${plan.bind.environmentId} deployments`, async () => {
           try {
+            const current = await deployTarget(plan.bind.projectId, plan.bind.environmentId);
+            if (!matchesTarget(access, current)) throw new Error("The deployment target changed. Review machine access again before binding it.");
             await call(`/api/projects/${encodeURIComponent(plan.bind.projectId)}/deployments/${encodeURIComponent(plan.bind.environmentId)}/connection-bindings/host`, { method: "PUT", body: JSON.stringify({ connectionId: access.connectionId }) });
-            bind.textContent = "Connected to the deployment's host slot"; bind.disabled = true;
+            bind.replaceWith(node("span", "✓ Connected to deployment", "machine-bound-state"));
+            completion.textContent = `✓ Connected to ${projectName} ${plan.bind.environmentId}. You can close this window.`;
             ctx.onBound?.(plan.bind);
           } catch (error) { view.error(error.message); }
         }, "btn btn-primary");
         card.append(bind);
+        }
       }
       view.body.append(card);
     }
-    view.body.append(button("Add another project", () => showAccess(machineId)), button("Done", showList));
+    const actions = node("div", "", "machine-ready-actions");
+    actions.append(button("Done ✓", () => ctx.onDone ? ctx.onDone() : showList(), "btn btn-success machine-done"), button("Add another project", () => showAccess(machineId)));
+    view.body.append(actions);
   }
 
   window.PsmMachines = {
+    deployCandidate,
     open(options) {
       ctx = options;
       if (options.machineId) return showAccess(options.machineId);

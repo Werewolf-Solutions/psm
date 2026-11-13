@@ -27,6 +27,7 @@ import {
   newId,
   parseInspection,
   parseKnownHost,
+  parsePublicKey,
   validateHost,
   validateId,
   validateMachineName,
@@ -39,6 +40,8 @@ import {
 import { buildAdminAccessPlan, buildDeployAccessPlan, buildHelperInstallPlan, buildHostHelper, buildReleaseCiKeyPlan, helperSourceDigest, type AdminAccessPlan, type DeployAccessPlan, type HelperBuild, type HelperInstallPlan, type ReleaseCiKeyPlan } from "./roles.ts";
 import { MachineTransportError, type MachineTransport, type SshEndpoint } from "./ssh.ts";
 import { OBSERVE_COMMAND, OBSERVE_SCRIPT } from "./observe.ts";
+import { externalAuditChecks, INTERNAL_AUDIT_SCRIPT, internalAuditChecks, runAuditCommand, type AuditCommandRunner, type MachineAuditReport } from "./audit.ts";
+import { firewallPlan } from "./security.ts";
 import {
   MachineStoreError,
   type AccessPlan,
@@ -84,6 +87,9 @@ export interface MachineServiceOptions {
   /** The host target a project environment's deployment manifest names, if any. */
   hostTarget?: (projectId: string, environmentId: string) => { unitId: string; targetId: string; root: string; allowedRootPrefix: string; hostname: string | null; service?: { entry: string; healthPath: string; startupTimeoutSeconds: number; memoryMaxMb: number; switching?: "health-checked"; drainSeconds?: number } } | null;
   now?: () => number;
+  auditRunner?: AuditCommandRunner;
+  /** Production wiring requires a deployment manifest before enrolling a host target. */
+  requireManifestTarget?: boolean;
 }
 
 const STEP_TITLES: Record<SetupStep["id"], string> = {
@@ -118,6 +124,9 @@ export class MachineService {
   readonly #helperSourceDigest: () => string;
   readonly #hostTarget: NonNullable<MachineServiceOptions["hostTarget"]>;
   readonly #now: () => number;
+  readonly #auditRunner: AuditCommandRunner;
+  readonly #requireManifestTarget: boolean;
+  readonly #auditRuns = new Map<string, Promise<MachineAuditReport>>();
   readonly #owner = `psm_${process.pid}_${randomBytes(4).toString("hex")}`;
   readonly #machineQueues = new Map<string, Promise<unknown>>();
   readonly #running = new Map<string, AbortController>();
@@ -132,6 +141,8 @@ export class MachineService {
     this.#helperSourceDigest = options.helperSourceDigest ?? helperSourceDigest;
     this.#hostTarget = options.hostTarget ?? (() => null);
     this.#now = options.now ?? Date.now;
+    this.#auditRunner = options.auditRunner ?? runAuditCommand;
+    this.#requireManifestTarget = options.requireManifestTarget ?? false;
   }
 
   /** Jobs a stopped process left running are failed as uncertain, never resumed blind. */
@@ -148,6 +159,124 @@ export class MachineService {
 
   listMachines(workspaceId: string) {
     return this.#store.listMachines(workspaceId).map((machine) => this.view(machine));
+  }
+
+  /** A key created before a droplet exists. Only its public half is returned. */
+  async createBootstrapKey(workspaceId: string, nameInput: unknown) {
+    const name = validateMachineName(nameInput);
+    const keys = await this.#transport.generateKeyPair(`psm droplet ${name}`);
+    const connectionId = `machine-bootstrap-${randomBytes(12).toString("hex")}`;
+    const now = this.#now();
+    try {
+      this.#deployments.createConnection({
+        connectionId, kind: ADMIN_CONNECTION_KIND, label: `Droplet key · ${name}`, secretGeneration: 0, readiness: "missing-secret",
+        metadata: { publicMetadata: { workspaceId, bootstrapName: name, publicKey: keys.publicKey, usedMachineId: null }, requiredSecretSlots: ["privateKey"], credentialIdentity: { kind: "public-key", value: parsePublicKey(keys.publicKey).fingerprint } },
+        constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production" }, createdAt: now,
+      });
+      const generation = await this.#broker.put(connectionId, "privateKey", keys.privateKey);
+      const current = this.#deployments.getConnection(connectionId);
+      this.#deployments.updateConnectionSecretStatus({ connectionId, expectedSecretGeneration: current.secretGeneration, secretGeneration: generation, readiness: "unknown", updatedAt: now });
+    } catch (error) { await this.#discardConnection(connectionId); throw error; }
+    finally { keys.privateKey.fill(0); }
+    return { connectionId, name, publicKey: keys.publicKey, fingerprint: parsePublicKey(keys.publicKey).fingerprint };
+  }
+
+  listBootstrapKeys(workspaceId: string) {
+    return this.#deployments.listConnections().filter((connection) => connection.kind === ADMIN_CONNECTION_KIND)
+      .flatMap((connection) => {
+        const publicData = (connection.metadata as { publicMetadata?: { workspaceId?: string; bootstrapName?: string; publicKey?: string; usedMachineId?: string | null } }).publicMetadata;
+        return publicData?.workspaceId === workspaceId && publicData.publicKey && !publicData.usedMachineId
+          ? [{ connectionId: connection.connectionId, name: publicData.bootstrapName, publicKey: publicData.publicKey, fingerprint: parsePublicKey(publicData.publicKey).fingerprint }]
+          : [];
+      });
+  }
+
+  async removeBootstrapKey(workspaceId: string, connectionId: string) {
+    const connection = this.#deployments.getConnection(connectionId);
+    const publicData = (connection.metadata as { publicMetadata?: { workspaceId?: string; publicKey?: string; usedMachineId?: string | null } }).publicMetadata;
+    if (connection.kind !== ADMIN_CONNECTION_KIND || publicData?.workspaceId !== workspaceId || !publicData.publicKey || publicData.usedMachineId) {
+      throw new MachineServiceError("This unused droplet key is unavailable in this workspace.", 403, "bootstrap-key-scope");
+    }
+    await this.#discardConnection(connectionId);
+  }
+
+  /** Bind the saved droplet key only after the machine's host key was reviewed. */
+  async attachBootstrapKey(machineId: string, workspaceId: string, connectionId: unknown, userInput: unknown) {
+    const machine = this.#store.getMachine(machineId, workspaceId);
+    this.#requireTrusted(machine);
+    const user = String(userInput ?? "root").trim();
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) throw new MachineServiceError("Enter a valid SSH administrator username.", 400, "admin-user-invalid");
+    const connection = this.#deployments.getConnection(String(connectionId));
+    if (connection.kind !== ADMIN_CONNECTION_KIND) throw new MachineServiceError("This is not a droplet key.", 400, "bootstrap-key-invalid");
+    const metadata = connection.metadata as { publicMetadata?: { workspaceId?: string; bootstrapName?: string; publicKey?: string; usedMachineId?: string | null }; requiredSecretSlots?: string[] };
+    const publicData = metadata.publicMetadata;
+    if (publicData?.workspaceId !== workspaceId || !publicData.publicKey || publicData.usedMachineId && publicData.usedMachineId !== machineId) {
+      throw new MachineServiceError("This droplet key is unavailable in this workspace.", 403, "bootstrap-key-scope");
+    }
+    if (machine.adminConnectionId && machine.adminConnectionId !== connection.connectionId) throw new MachineServiceError("This machine already has administrator access.", 409, "admin-already-bound");
+    const probe = await this.#transport.run({ host: machine.host, port: machine.port, user, knownHost: machine.knownHost, connectionId: connection.connectionId }, "true", undefined, { timeoutMs: 15_000 });
+    if (probe.code !== 0) throw new MachineServiceError("The droplet refused this key or SSH user. Check the key selected during creation and the administrator username.", 409, "bootstrap-key-refused");
+    const updated = this.#deployments.updateConnection({
+      connectionId: connection.connectionId, expectedMetadataRevision: connection.metadataRevision,
+      label: `Droplet administrator · ${machine.name}`, readiness: connection.readiness, secretGeneration: connection.secretGeneration,
+      metadata: { ...metadata, publicMetadata: { ...publicData, usedMachineId: machine.id, machineId: machine.id, knownHost: machine.knownHost, account: user } },
+      constraints: { allowedProjectIds: ["*"], allowedEnvironmentIds: ["*"], maximumAuthorizedRisk: "production", ssh: { host: machine.host, user, port: machine.port, hostKeyFingerprint: machine.hostKeyFingerprint } }, updatedAt: this.#now(),
+    });
+    this.setAdminConnection(machine.id, workspaceId, machine.revision, updated.connectionId);
+    return this.getMachine(machine.id, workspaceId);
+  }
+
+  async reviewFirewall(machineId: string, workspaceId: string) {
+    const machine = this.#store.getMachine(machineId, workspaceId);
+    this.#requireTrusted(machine);
+    const endpoint = this.#adminEndpoint(machine);
+    const plan = firewallPlan(machine.port);
+    const result = await this.#transport.run(endpoint, "sudo -n bash -s -- --inspect", plan.script, { timeoutMs: 30_000 });
+    if (result.code !== 0) throw new MachineServiceError(result.stderr.trim() || "Firewall preflight failed.", 409, "firewall-preflight");
+    return { digest: plan.digest, operations: plan.operations, preflight: result.stdout.trim() };
+  }
+
+  async applyFirewall(machineId: string, workspaceId: string, reviewedDigest: unknown) {
+    const machine = this.#store.getMachine(machineId, workspaceId);
+    this.#requireTrusted(machine);
+    const endpoint = this.#adminEndpoint(machine);
+    const plan = firewallPlan(machine.port);
+    if (reviewedDigest !== plan.digest) throw new MachineServiceError("The firewall plan changed. Review it again.", 409, "firewall-plan-stale");
+    return this.#serialize(machine.id, async () => {
+      const result = await this.#transport.run(endpoint, "sudo -n bash -s -- --apply", plan.script, { timeoutMs: 180_000 });
+      if (result.code !== 0) throw new MachineServiceError(result.stderr.trim() || "Firewall setup failed.", 502, "firewall-apply");
+      // A fresh connection proves the SSH rule and host key still work.
+      const probe = await this.#transport.run(endpoint, "sudo -n ufw status verbose", undefined, { timeoutMs: 15_000 });
+      if (probe.code !== 0 || !/Status: active/.test(probe.stdout) || !probe.stdout.includes(`${machine.port}/tcp`)) {
+        throw new MachineServiceError("Firewall verification failed. The rollback timer will disable UFW within two minutes.", 502, "firewall-verify");
+      }
+      const cancel = await this.#transport.run(endpoint, "sudo -n systemctl stop psm-firewall-rollback.timer", undefined, { timeoutMs: 15_000 });
+      if (cancel.code !== 0) throw new MachineServiceError("SSH works, but the rollback timer could not be cancelled. Review firewall status after two minutes.", 502, "firewall-rollback-timer");
+      return { ok: true, detail: "UFW active; SSH, HTTP and HTTPS allowed. SSH reconnection verified." };
+    });
+  }
+
+  async auditMachine(machineId: string, workspaceId: string, scope: "internal" | "agent-external"): Promise<MachineAuditReport> {
+    const machine = this.#store.getMachine(machineId, workspaceId);
+    this.#requireTrusted(machine);
+    if (scope !== "internal" && scope !== "agent-external") throw new MachineServiceError("Choose an internal or agent-side audit.", 400, "audit-scope");
+    const key = `${machine.id}:${scope}`;
+    const ongoing = this.#auditRuns.get(key);
+    if (ongoing) return ongoing;
+    const work = (async (): Promise<MachineAuditReport> => {
+      let checks;
+      if (scope === "internal") {
+        const result = await this.#transport.run(this.#adminEndpoint(machine), "sudo -n python3 -", INTERNAL_AUDIT_SCRIPT, { timeoutMs: 135_000 });
+        if (result.code !== 0) throw new MachineServiceError("The read-only host audit could not run. Check administrator SSH and Python 3.", 502, "audit-internal-failed");
+        let observed;
+        try { observed = JSON.parse(result.stdout); } catch { throw new MachineServiceError("The host audit returned invalid data.", 502, "audit-invalid"); }
+        checks = internalAuditChecks(observed, machine.port);
+      } else checks = await externalAuditChecks(machine.host, machine.port, this.#auditRunner);
+      return { machineId: machine.id, machineName: machine.name, address: machine.host, observedAt: this.#now(), scope,
+        vantage: scope === "internal" ? `On ${machine.name} through pinned administrator SSH` : "From this PSM agent; verify from an independently located runner for production", checks };
+    })();
+    this.#auditRuns.set(key, work);
+    try { return await work; } finally { if (this.#auditRuns.get(key) === work) this.#auditRuns.delete(key); }
   }
 
   view(machine: MachineRecord) {
@@ -170,7 +299,7 @@ export class MachineService {
       plan: {
         role: access.role, digest: plan.digest, operations: plan.operations, authority: plan.authority, scriptDigest: plan.scriptDigest,
         account: plan.account, workdir: plan.workdir, publicKeyFingerprint: plan.publicKeyFingerprint,
-        ...(plan.role === "deploy" ? { release: plan.release, target: plan.target } : {}),
+        ...(plan.role === "deploy" ? { release: plan.release, target: plan.target, ...(plan.retireTarget ? { retireTarget: plan.retireTarget } : {}) } : {}),
         ...(plan.role === "helper" ? { helper: plan.helper } : {}),
         ...(plan.role === "ci" ? { deployAccessId: plan.deployAccessId, target: plan.target } : {}),
       },
@@ -388,6 +517,10 @@ export class MachineService {
       throw new MachineServiceError("This project belongs to a different workspace than the machine.", 403, "workspace-mismatch");
     }
     const environmentId = validateId(input.environmentId, "environmentId");
+    const declared = this.#hostTarget(input.project.id, environmentId);
+    if (this.#requireManifestTarget && !declared) throw new MachineServiceError(
+      `Create the ${environmentId} deployment environment in ${input.project.name}'s Deploy page before setting up deploy access on a machine.`,
+      409, "deployment-target-missing");
     return this.#serialize(machine.id, async () => {
       const existing = this.#store.findAccess(machine.id, input.project.id, environmentId, "deploy");
       if (existing && existing.state !== "revoked") return existing;
@@ -401,7 +534,6 @@ export class MachineService {
       let plan: DeployAccessPlan;
       // The deployment manifest, when there is one, decides the target: a
       // connection enrolled for a different target could never be bound to it.
-      const declared = this.#hostTarget(input.project.id, environmentId);
       if (declared && input.hostname && declared.hostname && String(input.hostname).trim().toLowerCase() !== declared.hostname) {
         throw new MachineServiceError(`This deployment serves ${declared.hostname}, not ${String(input.hostname)}. Change the manifest to change the domain.`, 409, "hostname-mismatch");
       }
@@ -449,6 +581,59 @@ export class MachineService {
         account: plan.account, workdir: plan.workdir, publicKeyFingerprint: plan.publicKeyFingerprint, connectionId: infraConnection,
         releaseConnectionId: releaseConnection, state: "planned", plan, checks: [], verifiedAt: null, createdAt: now, updatedAt: now,
       });
+    });
+  }
+
+  /** Repair a ready, unbound legacy target after its real manifest environment is created. */
+  async planDeployTargetRepair(accessId: string, workspaceId: string): Promise<MachineAccessRecord> {
+    const access = this.getAccess(accessId, workspaceId);
+    const retry = access.plan.role === "deploy" && access.state === "failed" && Boolean(access.plan.retireTarget);
+    if (access.role !== "deploy" || access.plan.role !== "deploy" || (access.state !== "ready" && !retry)) throw new MachineServiceError("Only ready deploy access or a failed target repair can be reviewed.", 409, "repair-not-ready");
+    const machine = this.#store.getMachine(access.machineId, workspaceId);
+    this.#requireTrusted(machine);
+    const target = this.#hostTarget(access.projectId, access.environmentId);
+    if (!target) throw new MachineServiceError("Create the deployment manifest environment before repairing its machine target.", 409, "deployment-target-missing");
+    const current = access.plan;
+    const oldTarget = retry ? current.retireTarget! : current.target;
+    if (!retry && current.target.service) throw new MachineServiceError("An existing service target needs a separate traffic and data migration review.", 409, "repair-service-target");
+    if (oldTarget.targetId === target.targetId) throw new MachineServiceError("This target needs a separate contract revision review.", 409, "repair-same-target");
+    if (this.#deployments.listConnectionBindings(access.projectId, access.environmentId).some((binding) => [access.connectionId, access.releaseConnectionId].includes(binding.connectionId))) {
+      throw new MachineServiceError("A deployment uses this access. Disconnect its binding and review the release before target repair.", 409, "repair-bound");
+    }
+    const ci = this.#store.findAccess(machine.id, access.projectId, access.environmentId, "ci");
+    if (ci && ci.state !== "revoked") throw new MachineServiceError("Revoke the CI release key before repairing this target.", 409, "repair-ci-key");
+    const metadata = this.#deployments.getConnection(access.connectionId).metadata as { publicMetadata?: { targetContracts?: Record<string, { fingerprint?: string }> } };
+    const fingerprint = metadata.publicMetadata?.targetContracts?.[oldTarget.targetId]?.fingerprint;
+    if (!fingerprint || !/^sha256:[0-9a-f]{64}$/.test(fingerprint)) throw new MachineServiceError("The old target has no verified contract digest. Inspect it before repair.", 409, "repair-no-digest");
+    return this.#serialize(machine.id, async () => {
+      const latest = this.getAccess(access.id, workspaceId);
+      if (latest.revision !== access.revision || latest.state !== access.state) throw new MachineServiceError("Machine access changed. Review it again.", 409, "repair-stale");
+      // The helper fingerprints canonical JSON, while its enrolled file is
+      // indented JSON. Pin the actual file bytes that the setup script archives.
+      const file = oldTarget.file;
+      const readFileDigest = async () => {
+        const admin = this.#adminEndpoint(machine);
+        const prefix = admin.user === "root" ? "" : "sudo -n ";
+        const result = await this.#transport.run(admin, `${prefix}sha256sum -- ${file}`, "", { timeoutMs: 30_000 });
+        const match = /^([0-9a-f]{64})  \/etc\/psm-deploy\/targets\/[0-9a-f]{64}\.json\s*$/.exec(result.stdout);
+        if (result.code !== 0 || !match) throw new MachineServiceError("Could not read the old target file digest through administrator SSH.", 409, "repair-file-unavailable");
+        return match[1];
+      };
+      const rawDigest = await readFileDigest();
+      const observed = await this.#helper.invoke({ connection: profileFromRecord(this.#deployments.getConnection(access.connectionId)), request: hostHelperRequest({ targetId: oldTarget.targetId, operation: "observe-target", desired: {} }) });
+      const observedDigest = (observed.data as { targetDigest?: unknown } | undefined)?.targetDigest;
+      if (observed.outcome !== "succeeded" || observedDigest !== fingerprint || await readFileDigest() !== rawDigest) {
+        throw new MachineServiceError("The old target changed since it was verified. Inspect and review its contract before repair.", 409, "repair-target-changed");
+      }
+      const plan = buildDeployAccessPlan({
+        machine: identity(machine), projectId: access.projectId, projectName: access.projectName, environmentId: access.environmentId,
+        risk: access.risk, unitId: target.unitId, targetId: target.targetId,
+        hostname: target.hostname, certbotEmail: current.target.certbotEmail, canonicalRoot: target.root,
+        allowedRootPrefix: target.allowedRootPrefix, ...(target.service ? { service: target.service } : {}),
+        infraPublicKey: current.publicKey, releasePublicKey: current.release.publicKey,
+        retireTarget: { targetId: oldTarget.targetId, file, digest: rawDigest, root: retry ? current.retireTarget!.root : current.target.canonicalRoot }, now: this.#now(),
+      });
+      return this.#store.updateAccess(access.id, access.revision, (current) => ({ ...current, plan, state: "planned", checks: [], verifiedAt: null, updatedAt: this.#now() }));
     });
   }
 
@@ -714,6 +899,12 @@ export class MachineService {
     this.#requireTrusted(machine);
     if (access.state === "revoked") throw new MachineServiceError("This access was revoked. Plan it again.", 409, "access-revoked");
     if (input.planDigest !== access.plan.digest) throw new MachineServiceError("The setup plan changed since it was reviewed. Review it again.", 409, "plan-changed");
+    if (this.#requireManifestTarget && access.plan.role === "deploy") {
+      const target = this.#hostTarget(access.projectId, access.environmentId);
+      if (!target || target.targetId !== access.plan.target.targetId || target.root !== access.plan.target.canonicalRoot || target.hostname !== access.plan.target.hostname) {
+        throw new MachineServiceError("The deployment manifest target changed. Review machine access again.", 409, "deployment-target-changed");
+      }
+    }
     const method: SetupMethod = input.method === "manual-command" ? "manual-command" : "admin-ssh";
     if (method === "admin-ssh") this.#adminEndpoint(machine);
     if (method === "admin-ssh" && access.role === "admin" && machine.adminConnectionId === access.connectionId) {
@@ -811,6 +1002,12 @@ export class MachineService {
     };
 
     try {
+      if (this.#requireManifestTarget && access.plan.role === "deploy") {
+        const target = this.#hostTarget(access.projectId, access.environmentId);
+        if (!target || target.targetId !== access.plan.target.targetId || target.root !== access.plan.target.canonicalRoot || target.hostname !== access.plan.target.hostname) {
+          throw new StepFailure("The deployment manifest target changed after approval. Review the machine plan again.", "deployment-target-changed");
+        }
+      }
       const admin = job.method === "admin-ssh" ? this.#adminEndpoint(machine) : null;
       let report: InspectionReport | null = null;
       if (admin) {
@@ -890,6 +1087,13 @@ export class MachineService {
           : access.plan.role === "ci" ? this.#deployContracts(access.plan)
           : null;
         for (const connectionId of [access.connectionId, access.releaseConnectionId].filter((value): value is string => Boolean(value))) {
+          if (access.plan.role === "deploy" && access.plan.retireTarget) {
+            const connection = this.#deployments.getConnection(connectionId);
+            this.#deployments.updateConnection({ connectionId, expectedMetadataRevision: connection.metadataRevision,
+              label: connection.label, readiness: connection.readiness, metadata: connection.metadata,
+              constraints: { ...(connection.constraints as Record<string, unknown>), allowedTargetIds: [access.plan.target.targetId], allowedTargetRootPrefixes: [access.plan.target.allowedRootPrefix] },
+              secretGeneration: connection.secretGeneration, updatedAt: this.#now() });
+          }
           await this.#markConnectionReady(connectionId, pinned);
         }
         return { value: null, detail: `Connection ${access.connectionId} is ready for ${access.projectName} ${access.environmentId}${pinned ? `; target contract ${verified.targetDigest} pinned` : ""}.` };
@@ -1184,7 +1388,7 @@ function inspectDetail(plan: AccessPlan, report: InspectionReport): string {
 function isAlreadyDone(plan: AccessPlan, report: InspectionReport): boolean {
   const values = report.values;
   if (plan.role === "helper") return values.binary === "match" && values.client === "match" && values.unit === "match" && values.service === "active" && values.socket === "present" && !values.missing_packages;
-  if (plan.role === "deploy") return values.infra === "present" && values.infra_key === "match" && values.release === "present" && values.release_key === "match" && values.target === "match";
+  if (plan.role === "deploy") return values.infra === "present" && values.infra_key === "match" && values.release === "present" && values.release_key === "match" && values.target === "match" && (!plan.retireTarget || values.retire_target === "absent");
   if (plan.role === "admin") return values.account === "present" && values.key === "match" && values.sudoers === "match";
   if (plan.role === "ci") return values.release === "present" && values.key === "match";
   return report.account === "present" && report.key === "match" && report.workdir === "present";

@@ -90,6 +90,20 @@ test("a replacement is named by exact digest in both the plan and its script", (
   assert.throws(() => deploy({ replacesTarget: "abc" }), /SHA-256/);
 });
 
+test("reviewed retarget plan pins and archives only the inactive old contract", () => {
+  const old = deploy();
+  const repair = deploy({ targetId: "example:todo-staging-web", retireTarget: {
+    targetId: old.target.targetId, file: old.target.file, digest: "d".repeat(64), root: old.target.canonicalRoot,
+  } });
+  assert.equal(syntax(repair.script).status, 0, syntax(repair.script).stderr.toString());
+  assert.match(repair.script, /retire-target-changed/);
+  assert.match(repair.script, /retire-target-active/);
+  assert.match(repair.script, /mv -- "\$PSM_RETIRE_TARGET_FILE"/);
+  assert.ok(repair.operations.some((line) => line.includes("archive inactive target")));
+  assert.throws(() => deploy({ targetId: "example:todo-staging-web", retireTarget: { targetId: old.target.targetId, file: "/tmp/other", digest: "d".repeat(64), root: old.target.canonicalRoot } }), /file does not match/);
+  assert.throws(() => deploy({ targetId: "example:todo-staging-web", retireTarget: { targetId: old.target.targetId, file: old.target.file, digest: "bad", root: old.target.canonicalRoot } }), /SHA-256/);
+});
+
 test("a CI release key extends exactly the release account the deploy plan created", async () => {
   const { buildReleaseCiKeyPlan, releaseAuthorizedLine } = await import("./roles.ts");
   const base = deploy();

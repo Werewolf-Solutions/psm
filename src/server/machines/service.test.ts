@@ -203,6 +203,47 @@ test("deploy access follows the deployment manifest's target, root and domain", 
   assert.deepEqual((deployments.getConnection(access.connectionId).constraints as any).allowedTargetIds, ["werewolf:todo-staging-web"]);
 });
 
+test("ready unbound fallback access can be reviewed for a manifest target repair", async (t) => {
+  const { deployments, broker, server, store, service, machine, project } = await fixture(t);
+  const old = await service.planDeployAccess({ machineId: machine.id, workspaceId: "personal", project, environmentId: "production", risk: "production", hostname: "lab.example.com", certbotEmail: "ops@example.com" });
+  const oldPlan = old.plan as import("./roles.ts").DeployAccessPlan;
+  store.updateAccess(old.id, old.revision, (current) => ({ ...current, state: "ready" }));
+  const connection = deployments.getConnection(old.connectionId);
+  deployments.updateConnection({ connectionId: connection.connectionId, expectedMetadataRevision: connection.metadataRevision,
+    label: connection.label, readiness: "ready", metadata: { ...(connection.metadata as object), publicMetadata: { ...((connection.metadata as any).publicMetadata), targetContracts: { [oldPlan.target.targetId]: { fingerprint: `sha256:${"d".repeat(64)}`, revision: oldPlan.target.revision } } } },
+    constraints: connection.constraints, secretGeneration: connection.secretGeneration, updatedAt: Date.now() });
+  const declared = { unitId: "web", targetId: "example:lab-production-web", root: "/srv/lab.example.com", allowedRootPrefix: "/srv", hostname: "lab.example.com",
+    service: { entry: "bin/www", healthPath: "/healthz", startupTimeoutSeconds: 20, memoryMaxMb: 256 } };
+  let rawDigest = "e".repeat(64);
+  let observedDigest = `sha256:${"d".repeat(64)}`;
+  const originalRun = server.run.bind(server);
+  server.run = async (endpoint, command, input) => command.startsWith("sha256sum -- /etc/psm-deploy/targets/")
+    ? { code: 0, stdout: `${rawDigest}  ${oldPlan.target.file}\n`, stderr: "" }
+    : originalRun(endpoint, command, input);
+  const helper = { invoke: async () => ({ outcome: "succeeded", data: { targetDigest: observedDigest } }) } as any;
+  const strict = new MachineService({ store, deployments, broker, transport: server, helper, hostTarget: () => declared, requireManifestTarget: true });
+  const repaired = await strict.planDeployTargetRepair(old.id, "personal");
+  const plan = repaired.plan as import("./roles.ts").DeployAccessPlan;
+  assert.equal(repaired.state, "planned");
+  assert.equal(plan.target.targetId, declared.targetId);
+  assert.equal(plan.target.canonicalRoot, declared.root);
+  assert.deepEqual(plan.retireTarget, { targetId: oldPlan.target.targetId, file: oldPlan.target.file, root: oldPlan.target.canonicalRoot, digest: rawDigest });
+  assert.equal(/readonly PSM_RETIRE_TARGET_SHA='([^']+)'/.exec(plan.script)?.[1], rawDigest);
+  assert.equal(plan.publicKey, oldPlan.publicKey);
+  assert.deepEqual((deployments.getConnection(old.connectionId).constraints as any).allowedTargetIds, [oldPlan.target.targetId], "authority changes only after the reviewed setup verifies");
+  store.updateAccess(repaired.id, repaired.revision, (value) => ({ ...value, state: "failed" }));
+  const reviewedAgain = await strict.planDeployTargetRepair(repaired.id, "personal");
+  assert.equal(reviewedAgain.state, "planned");
+  assert.equal((reviewedAgain.plan as import("./roles.ts").DeployAccessPlan).retireTarget?.digest, rawDigest);
+  store.updateAccess(reviewedAgain.id, reviewedAgain.revision, (value) => ({ ...value, state: "failed" }));
+  observedDigest = `sha256:${"f".repeat(64)}`;
+  await assert.rejects(strict.planDeployTargetRepair(repaired.id, "personal"), /changed since it was verified/);
+  observedDigest = `sha256:${"d".repeat(64)}`;
+  rawDigest = "a".repeat(64);
+  const changedFile = await strict.planDeployTargetRepair(repaired.id, "personal");
+  assert.equal((changedFile.plan as import("./roles.ts").DeployAccessPlan).retireTarget?.digest, rawDigest, "a re-reviewed plan pins the newly observed file bytes");
+});
+
 test("replacing re-inspects with this version's script, so a plan made by an older PSM can be re-planned", async (t) => {
   const { service, server, store, machine, project } = await fixture(t);
   const inspected: string[] = [];
