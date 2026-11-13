@@ -1,6 +1,6 @@
 import { createSdkMcpServer, query, tool, type Options } from "@anthropic-ai/claude-agent-sdk";
 import type { ManagedMcpTools } from "./agent-mcp-tools.ts";
-import { ManagedTaskRunner } from "./agent-task-runner.ts";
+import { ManagedTaskRunner, agentImage } from "./agent-task-runner.ts";
 import { runCodexManaged } from "./agent-codex-runtime.ts";
 import { z } from "zod";
 import { childEnv } from "./procs.ts";
@@ -92,7 +92,7 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
   const services = (input.policy.previewServices ?? []).map((snapshot) => new RepositoryTools(snapshot, serviceChecker, input.policy.protectedRoots));
   const byName = (name: string) => [...repositories.values()].find((repo) => repo.snapshot.project.name === name)
     ?? services.find((repo) => repo.snapshot.project.name === name);
-  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName, { checkoutDeps: policy.profile === "implement" })]));
+  const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName, { checkoutDeps: policy.profile === "implement", ...(policy.profile === "implement" ? { taskImage: agentImage() } : {}) })]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");
   const project = z.string().describe("Registered project ID from the session scope");

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { AgentPermissionStore } from "./agent-permissions.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
-import { ManagedTaskRunner, describeDockerConnectionFailure, downloadLockedPackage, type TaskExecutor } from "./agent-task-runner.ts";
+import { ManagedTaskRunner, PackageTooLargeError, describeDockerConnectionFailure, downloadLockedPackage, runsInSandbox, type TaskExecutor } from "./agent-task-runner.ts";
 import { openDatabase } from "./db.ts";
 
 function fixture(t: test.TestContext) {
@@ -425,4 +425,40 @@ test("a signed-in preview hands the browser the same generated secret the seed r
   await runner.preview("dev", 5200, ["/"]);
   assert.ok(!calls.filter((args) => args[0] === "run").at(-1)!.at(-1)!.includes(token), "a signed-out check gets no session");
   assert.equal(h.repo.verificationStatus().verified, true, "the signed-out pass is the one recorded");
+});
+
+test("optional packages for another system are not fetched, and an oversized optional one is left out", async (t) => {
+  const h = fixture(t);
+  const tarball = (name: string) => `https://registry.npmjs.org/${name}/-/${name}-1.tgz`;
+  fs.writeFileSync(path.join(h.directory, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: {
+    "": {},
+    "node_modules/dep": { resolved: tarball("dep"), integrity: "sha512-test" },
+    "node_modules/tool-darwin": { resolved: tarball("tool-darwin"), integrity: "sha512-test", optional: true, os: ["darwin"] },
+    "node_modules/tool-linux": { resolved: tarball("tool-linux"), integrity: "sha512-test", optional: true, os: ["linux"] },
+    "node_modules/tool-huge": { resolved: tarball("tool-huge"), integrity: "sha512-test", optional: true, os: ["linux"] },
+  } }));
+  const fetched: string[] = [];
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async () => "ok", async (resolved) => {
+    fetched.push(resolved.split("/").pop()!);
+    if (resolved.includes("tool-huge")) throw new PackageTooLargeError();
+    return Buffer.from("fake verified tarball");
+  });
+  t.after(() => runner.close());
+  const note = await runner.install();
+  assert.deepEqual(fetched, ["dep-1.tgz", "tool-linux-1.tgz", "tool-huge-1.tgz"]);
+  assert.match(note, /Left out 1 optional package over the 64 MB download limit: tool-huge/);
+});
+test("a required package over the size limit still stops the install", async (t) => {
+  const h = fixture(t);
+  const runner = new ManagedTaskRunner(h.repo, h.store, h.abort.signal, async () => "ok", async () => { throw new PackageTooLargeError(); });
+  t.after(() => runner.close());
+  await assert.rejects(runner.install(), /exceeds the managed download limit/);
+});
+test("runsInSandbox follows os and cpu lists, including exclusions", () => {
+  assert.equal(runsInSandbox({}), true);
+  assert.equal(runsInSandbox({ os: ["darwin", "win32"] }), false);
+  assert.equal(runsInSandbox({ os: ["!win32"] }), true);
+  assert.equal(runsInSandbox({ os: ["!linux"] }), false);
+  assert.equal(runsInSandbox({ os: ["linux"], cpu: ["arm64"] }, "x64"), false);
+  assert.equal(runsInSandbox({ os: ["linux"], cpu: ["x64"] }, "x64"), true);
 });

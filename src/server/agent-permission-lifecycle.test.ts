@@ -28,9 +28,9 @@ test("revocation aborts the managed turn, clears its queue and blocks resume bef
     await new Promise<void>((resolve) => input.signal.signal.addEventListener("abort", () => resolve(), { once: true }));
   });
   t.after(() => { ai.stopSession("test"); ai.configureManagedAgents(null); database.close(); });
-  const send = () => ai.send("test", root, "claude", null, null, "continue", true);
+  const send = () => ai.send("test", root, "claude", null, null, "continue", "auto");
   assert.equal(send().ok, true);
-  assert.equal(running.length, 1, "Full access cannot bypass the managed runner");
+  assert.equal(running.length, 1, "auto mode cannot bypass the managed runner");
   assert.equal(send().queued, true);
   store.change(project, "git.commit", false, store.snapshot(project).revision, "operator");
   ai.stopProjectAgents(root);
@@ -57,7 +57,7 @@ test("a managed Claude session resumes while its authority is unchanged, and res
   });
   t.after(() => { ai.stopSession("resume"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   const turn = async (message: string) => {
-    assert.equal(ai.send("resume", directory, "claude", null, null, message, false).ok, true);
+    assert.equal(ai.send("resume", directory, "claude", null, null, message, "default").ok, true);
     for (let i = 0; i < 50 && ai.aiState("resume").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   };
   await turn("first");
@@ -98,7 +98,7 @@ test("managed Codex continuity carries its tool digest, fences authority changes
   });
   t.after(() => { ai.stopSession("codex-resume"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   const turn = async (model: string | null = null) => {
-    assert.equal(ai.send("codex-resume", directory, "codex", model, null, "continue", false).ok, true);
+    assert.equal(ai.send("codex-resume", directory, "codex", model, null, "continue", "default").ok, true);
     for (let i = 0; i < 50 && ai.aiState("codex-resume").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   };
   await turn(); await turn();
@@ -136,7 +136,7 @@ test("workspace restriction changes break provider resume even after a restricti
   });
   t.after(() => { ai.stopSession("workspace-resume"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   const turn = async () => {
-    assert.equal(ai.send("workspace-resume", directory, "claude", null, null, "continue", false).ok, true);
+    assert.equal(ai.send("workspace-resume", directory, "claude", null, null, "continue", "default").ok, true);
     for (let i = 0; i < 50 && ai.aiState("workspace-resume").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   };
   await turn(); await turn();
@@ -160,7 +160,7 @@ test("preparation attempt metadata persists while the provider receives the full
   t.after(() => { ai.stopSession("preparation"); ai.configureManagedAgents(null); database.close(); fs.rmSync(directory, { recursive: true, force: true }); });
   const preparation = { jobId: "prep-1", environmentId: "staging", purpose: "repair" as const, attempt: 2, maximumAttempts: 3 };
   const message = "Full repair instructions and failing checks";
-  assert.equal(ai.send("preparation", directory, "claude", null, null, message, false, "", [], preparation).ok, true);
+  assert.equal(ai.send("preparation", directory, "claude", null, null, message, "default", "", [], preparation).ok, true);
   for (let i = 0; i < 50 && ai.aiState("preparation").busy; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(received, [message]);
   const saved = JSON.parse(fs.readFileSync(process.env.PSM_SESSIONS_FILE!, "utf8"));

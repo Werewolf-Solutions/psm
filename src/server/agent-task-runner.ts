@@ -65,6 +65,26 @@ export const dockerTaskExecutor: TaskExecutor = (args, signal) => new Promise((r
   });
 });
 
+const PACKAGE_LIMIT_MB = 64;
+export class PackageTooLargeError extends Error {
+  constructor() { super("Package exceeds the managed download limit."); }
+}
+
+/**
+ * Would npm install this locked package in the sandbox (Linux, this machine's
+ * CPU)? Follows package.json `os` / `cpu`: a list of names, or `!name` to exclude.
+ */
+export function runsInSandbox(entry: { os?: unknown; cpu?: unknown }, cpu: string = process.arch): boolean {
+  const allows = (list: unknown, value: string) => {
+    if (!Array.isArray(list) || !list.length) return true;
+    const names = list.filter((item): item is string => typeof item === "string");
+    if (names.includes(`!${value}`)) return false;
+    const wanted = names.filter((item) => !item.startsWith("!"));
+    return !wanted.length || wanted.includes(value);
+  };
+  return allows(entry.os, "linux") && allows(entry.cpu, cpu);
+}
+
 /** Downloads are brokered; repository code never receives a network namespace. */
 export async function downloadLockedPackage(resolved: string, integrity: string, signal?: AbortSignal): Promise<Buffer> {
   const url = new URL(resolved);
@@ -80,7 +100,7 @@ export async function downloadLockedPackage(resolved: string, integrity: string,
   const parts: Uint8Array[] = []; let size = 0;
   for await (const chunk of response.body) {
     size += chunk.length;
-    if (size > 64 * 1024 * 1024) throw new Error("Package exceeds the managed download limit.");
+    if (size > PACKAGE_LIMIT_MB * 1024 * 1024) throw new PackageTooLargeError();
     parts.push(chunk);
   }
   const bytes = Buffer.concat(parts);
@@ -117,7 +137,17 @@ export interface TaskRunnerOptions {
    * it: without them `npm run dev` or `npx vite` in that shell finds nothing.
    */
   checkoutDeps?: boolean;
+  /**
+   * The image tests and scripts run in. Defaults to PSM_TASK_IMAGE, a bare Node
+   * image. Implement jobs pass the agent image instead, which also has git, a
+   * compiler and the ordinary development tools: a project whose tests shell out
+   * to those must see the same tools the agent's own shell has.
+   */
+  taskImage?: string;
 }
+
+/** The image an implement job's shell runs in; its test runs use it too. */
+export const agentImage = (): string => process.env.PSM_AGENT_IMAGE || "psm-agent:1";
 
 /** A package with a lifecycle script, by its lockfile path and its compiled-output cache key. */
 interface NativeAddon { path: string; key: string }
@@ -173,7 +203,7 @@ export class ManagedTaskRunner {
   private async container(directory: string, command: string[], install = false, cwd = ".", browser = false, extra: { network?: string; env?: Record<string, string>; mounts?: string[] } = {}): Promise<string> {
     if (this.signal.aborted) throw new Error("This turn was stopped.");
     const name = `psm-task-${randomUUID()}`;
-    const image = browser ? (process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0") : (process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim");
+    const image = browser ? (process.env.PSM_BROWSER_IMAGE || "psm-task-browser:1.64.0") : (this.options.taskImage || process.env.PSM_TASK_IMAGE || "node:22-bookworm-slim");
     // Lifecycle scripts never run here; compiled addons are copied in from /packages/native instead.
     const installs = install ? [...this.installed].flatMap(([dir, entry]) => [
       { command: NPM_CI, cwd: dir },
@@ -181,7 +211,8 @@ export class ManagedTaskRunner {
     ]) : [];
     const bootstrap = `const fs=require('fs'),cp=require('child_process'); fs.cpSync('/source','/workspace',{recursive:true}); const commands=${JSON.stringify([...installs, { command, cwd }])}; for(const {command:[cmd,...args],cwd} of commands){const result=cp.spawnSync(cmd,args,{cwd:require('path').join('/workspace',cwd),stdio:'inherit'});if(result.error||result.status!==0)process.exit(result.status||1);}`;
     try {
-      return await this.execute(["run", "--name", name, "--rm", "--pull=never", `--network=${extra.network ?? "none"}`, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, ...(extra.mounts ?? []).flatMap(mount => ["--mount", mount]), "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", ...Object.entries(extra.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]), image, "node", "-e", bootstrap], this.signal);
+      // /tmp allows exec, as /workspace does: tests write helper programs to the temp directory and run them.
+      return await this.execute(["run", "--name", name, "--rm", "--pull=never", `--network=${extra.network ?? "none"}`, "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=512", "--memory=2g", "--cpus=1", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=256m", "--tmpfs", "/workspace:rw,exec,nosuid,nodev,size=1536m,mode=1777", "--mount", `type=bind,source=${directory}/workspace,target=/source,readonly`, "--mount", `type=bind,source=${directory}/packages,target=/packages,readonly`, ...(extra.mounts ?? []).flatMap(mount => ["--mount", mount]), "--shm-size=256m", "--workdir", "/workspace", "--env", "HOME=/tmp", "--env", "npm_config_cache=/tmp/npm-cache", ...Object.entries(extra.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]), image, "node", "-e", bootstrap], this.signal);
     } finally { await this.execute(["rm", "-f", name]).catch(() => {}); }
   }
   tests(script = "test"): Promise<string> { return this.serialize(() => this.runTests(script)); }
@@ -344,6 +375,7 @@ export class ManagedTaskRunner {
     const entries = Object.entries(lock.packages) as [string, any][];
     if (entries.length > 2000) throw new Error("Lockfile exceeds the managed package limit.");
     let total = 0;
+    const skipped = { otherSystem: 0, tooLarge: [] as string[], names: new Set<string>() };
     const deadline = Date.now() + 300_000;
     for (const [name, entry] of entries) {
       if (!name) continue;
@@ -351,7 +383,18 @@ export class ManagedTaskRunner {
       if (this.signal.aborted) throw new Error("This turn was stopped.");
       if (entry.link || typeof entry.resolved !== "string" || typeof entry.integrity !== "string") throw new Error("Managed installs require registry packages with integrity; workspace, Git and local dependencies are unsupported.");
       if (Date.now() >= deadline) throw new Error("Managed dependency downloads exceeded five minutes.");
-      const bytes = await this.download(entry.resolved, entry.integrity, this.signal);
+      // An optional package built for another system (the macOS or Windows build
+      // of a binary) is never installed by npm in the sandbox, so it is not fetched.
+      if (entry.optional === true && !runsInSandbox(entry)) { skipped.otherSystem++; skipped.names.add(name); continue; }
+      let bytes: Buffer;
+      try {
+        bytes = await this.download(entry.resolved, entry.integrity, this.signal);
+      } catch (error) {
+        // An optional package over the size limit is left out, as npm leaves out
+        // any optional package it cannot get. A required one still stops the install.
+        if (entry.optional === true && error instanceof PackageTooLargeError) { skipped.tooLarge.push(name.split("node_modules/").pop()!); skipped.names.add(name); continue; }
+        throw error;
+      }
       total += bytes.length;
       if (total > 256 * 1024 * 1024) throw new Error("Dependencies exceed the managed download limit.");
       const filename = createHash("sha256").update(bytes).digest("hex") + ".tgz";
@@ -364,10 +407,11 @@ export class ManagedTaskRunner {
     // and checkout are never writable by npm or by package lifecycle scripts.
     const output = await this.container(directory, NPM_CI, false, cwd);
     this.store.check(this.repository.snapshot, "pkg.install");
-    const native = await this.nativeAddons(directory, entries, cwd);
+    const native = await this.nativeAddons(directory, entries.filter(([name]) => !skipped.names.has(name)), cwd);
     this.installed.set(cwd, { lockHash: createHash("sha256").update(realLock).digest("hex"), privateLock, natives: native.addons });
     const checkout = this.options.checkoutDeps ? await this.installInCheckout(directory, cwd) : "";
-    return `Installed dependencies in this turn's sandbox. Tests, scripts and previews keep using them after your edits, until ${lockFile} changes.${checkout}${native.note}\n${output}`;
+    const left = skipped.tooLarge.length ? ` Left out ${skipped.tooLarge.length} optional package${skipped.tooLarge.length === 1 ? "" : "s"} over the ${PACKAGE_LIMIT_MB} MB download limit: ${skipped.tooLarge.join(", ")}. Code that needs ${skipped.tooLarge.length === 1 ? "it" : "them"} will not find ${skipped.tooLarge.length === 1 ? "it" : "them"} in the sandbox.` : "";
+    return `Installed dependencies in this turn's sandbox. Tests, scripts and previews keep using them after your edits, until ${lockFile} changes.${checkout}${native.note}${left}\n${output}`;
   }
   /**
    * Packages are installed with lifecycle scripts off, so a native addon

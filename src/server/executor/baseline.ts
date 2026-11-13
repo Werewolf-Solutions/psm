@@ -10,7 +10,7 @@
  */
 import type { PermissionChecker } from "../agent-permissions.ts";
 import type { RepositoryTools } from "../agent-repository-tools.ts";
-import { ManagedTaskRunner, type TaskExecutor } from "../agent-task-runner.ts";
+import { ManagedTaskRunner, agentImage, type TaskExecutor } from "../agent-task-runner.ts";
 
 export type Baseline =
   | { status: "pass"; summary: string }
@@ -73,7 +73,7 @@ export async function runBaseline(
   const onAbort = () => controller.abort();
   signal.addEventListener("abort", onAbort, { once: true });
   // Installing into the clone too means the agent's shell starts with the project's packages.
-  const runner = new ManagedTaskRunner(repository, checker, controller.signal, execute, undefined, undefined, { checkoutDeps: true });
+  const runner = new ManagedTaskRunner(repository, checker, controller.signal, execute, undefined, undefined, { checkoutDeps: true, taskImage: agentImage() });
   try {
     let hasLock = false;
     try { repository.read("package-lock.json"); hasLock = true; } catch { /* nothing to install */ }

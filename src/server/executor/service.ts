@@ -3,18 +3,15 @@
  *
  *   PSM_EXECUTOR=1 npm run agent     or     npm run executor
  *
- * It borrows psm's one Werewolf session (server/session.ts): sign in with
- * "Continue with Werewolf" on the local cockpit and the loop starts claiming;
- * signed out, it backs off and says so. That session lives in memory, so a
- * restarted executor waits for a fresh sign-in — see the TODO below.
+ * It works from psm's own queue (local-hub.ts), so it needs no account. With
+ * PSM_HUB=werewolf it claims from the Werewolf hub instead and borrows psm's one
+ * Werewolf session, which lives in memory: signed out, it backs off and says so.
  *
  * Projects are matched by their `prj_` id (.psm/identity.json), so the executor
  * only triages projects this machine actually has.
  */
 import { getProjects } from "../../index.ts";
 import { cachedRecap } from "../ai.ts";
-import { werewolfApiUrl } from "../runtime.ts";
-import { sessionContext } from "../session.ts";
 import { claudeEngine, fileTriageCache } from "../triage/run.ts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,12 +19,15 @@ import { fileURLToPath } from "node:url";
 import { AgentPermissionStore } from "../agent-permissions.ts";
 import { runManagedAgent } from "../agent-permission-runtime.ts";
 import { databaseFile } from "../db.ts";
-import { executorId, executorPaused, hubClient, runExecutor, type ExecutorEvent, type ExecutorJob, type JobKind, type JobOutcome } from "./client.ts";
+import { executorId, executorPaused, runExecutor, type ExecutorEvent, type ExecutorJob, type JobKind, type JobOutcome } from "./client.ts";
 import { runBaseline } from "./baseline.ts";
+import { activeHub } from "./hub.ts";
+import { primaryCheckouts } from "../mcp/primary-checkout.ts";
 import { implementJobRunner } from "./implement-job.ts";
 import { stepReporter } from "./progress.ts";
 import { triageJobRunner } from "./triage-job.ts";
 import { ExecutorActivity } from "./activity.ts";
+import { ReviewCauses } from "./review-causes.ts";
 import { statePath } from "../../store.ts";
 import { loadState as loadWorkspaceState, projectWorkspaceRef } from "../workspaces.ts";
 
@@ -62,6 +62,14 @@ let activity: ExecutorActivity | null = null;
 export function executorActivity(): ExecutorActivity {
   if (!activity) activity = new ExecutorActivity(process.env.PSM_EXECUTOR_ACTIVITY_FILE || statePath(".psm-executor-activity.json"));
   return activity;
+}
+
+let causes: ReviewCauses | null = null;
+
+/** Why reviewed jobs went back (the cause tag on Reject and Revise). Created on first use. */
+export function reviewCauses(): ReviewCauses {
+  if (!causes) causes = new ReviewCauses(process.env.PSM_REVIEW_CAUSES_FILE || statePath(".psm-review-causes.json"));
+  return causes;
 }
 
 function track(event: ExecutorEvent): void {
@@ -140,16 +148,12 @@ function launch(): { stop: () => Promise<void> } {
   status.state = "starting";
   status.lastError = null;
 
-  // TODO(P14 B4): a long-lived executor needs a credential that survives a
-  // restart without a person at the keyboard — a device session it can refresh
-  // on its own. psm has none today: its only dapp session is the in-memory one
-  // from "Continue with Werewolf". Swap this provider when one exists.
-  const token = async () => (await sessionContext()).accessToken;
-  const hub = hubClient({ apiUrl: () => werewolfApiUrl(), token, executorId: id });
+  // The local queue by default; the Werewolf hub with PSM_HUB=werewolf (hub.ts).
+  const hub = activeHub();
 
   const runJob = triageJobRunner({
     findProject: (projectId) => {
-      const project = getProjects().find((candidate) => candidate.id === projectId);
+      const project = primaryCheckouts(getProjects()).find((candidate) => candidate.id === projectId);
       return project ? { name: project.name, path: project.path } : null;
     },
     listIntake: (projectId) => hub.listIntake(projectId),
@@ -171,11 +175,11 @@ function launch(): { stop: () => Promise<void> } {
   const steps = stepReporter((jobId, step) => hub.heartbeat(jobId, step), (line) => console.log(line));
   const runImplementJob = implementJobRunner({
     findProject: (projectId) => {
-      const project = getProjects().find((candidate) => candidate.id === projectId);
+      const project = primaryCheckouts(getProjects()).find((candidate) => candidate.id === projectId);
       return project ? { id: projectId, name: project.name, path: project.path, workspaceId: projectWorkspaceRef(loadWorkspaceState(), projectId) } : null;
     },
     findProjectByName: (name) => {
-      const project = getProjects().find((candidate) => candidate.name === name && candidate.id);
+      const project = primaryCheckouts(getProjects()).find((candidate) => candidate.name === name && candidate.id);
       return project?.id ? { id: project.id, name: project.name, path: project.path, workspaceId: projectWorkspaceRef(loadWorkspaceState(), project.id) } : null;
     },
     jobsDir: jobsDirectory(),
@@ -184,7 +188,7 @@ function launch(): { stop: () => Promise<void> } {
     protectedRoots: [PSM_CODE_ROOT, path.resolve(databaseFile()), `${path.resolve(databaseFile())}-wal`, `${path.resolve(databaseFile())}-shm`],
     baseline: runBaseline,
     runAgent: runManagedAgent,
-    projectEngine: (projectId) => getProjects().find((candidate) => candidate.id === projectId)?.aiEngine ?? "claude",
+    projectEngine: (projectId) => primaryCheckouts(getProjects()).find((candidate) => candidate.id === projectId)?.aiEngine ?? "claude",
     progress: (jobId, step) => steps.report(jobId, step),
     activity: executorActivity(),
   });

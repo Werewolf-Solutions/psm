@@ -12,7 +12,9 @@ export function taskInputs(repository: RepositoryTools, destination?: string, di
   const hash = createHash("sha256");
   let total = 0;
   const within = directory === "." ? "" : `${directory.replace(/\/+$/, "")}/`;
-  const files = repository.taskFiles().filter(file => file.startsWith(within) && !OUTPUT.test(file) && !SECRET.test(file) && !file.startsWith(".psm/") && !file.startsWith(".psm-")).sort();
+  // psm's own state under .psm/ stays out; the project's committed files there are source and go in.
+  const committed = repository.committedPsmFiles();
+  const files = repository.taskFiles().filter(file => file.startsWith(within) && !OUTPUT.test(file) && !SECRET.test(file) && (!file.startsWith(".psm/") || committed.has(file)) && !file.startsWith(".psm-")).sort();
   const entries = files.map(file => {
     const source = repository.resolve(file);
     const stat = fs.statSync(source);

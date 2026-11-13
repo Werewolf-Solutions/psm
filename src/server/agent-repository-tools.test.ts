@@ -7,6 +7,7 @@ import test from "node:test";
 import { openDatabase } from "./db.ts";
 import { AgentPermissionStore } from "./agent-permissions.ts";
 import { RepositoryTools } from "./agent-repository-tools.ts";
+import { taskInputs } from "./agent-task-inputs.ts";
 import { managedAgentOptions } from "./agent-permission-runtime.ts";
 import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 
@@ -344,4 +345,20 @@ test("builds cannot certify different staged source and docs-only changes need n
   tools.write("app.txt", "passing worktree content\n");
   tools.recordVerification(".", "build", taskInputs(tools).digest);
   assert.throws(() => tools.commit("partial staging"), /app.txt differs from verified source/);
+});
+
+test("the sandbox copy carries a project's committed .psm files, never psm's untracked state there", (t) => {
+  const h = fixture(t);
+  fs.mkdirSync(path.join(h.root, ".psm"));
+  fs.writeFileSync(path.join(h.root, ".psm", "deployments.json"), "{}\n");
+  h.git("add", ".psm"); h.git("commit", "-qm", "manifest");
+  fs.writeFileSync(path.join(h.root, ".psm", "local-state.json"), "{}\n");
+  fs.writeFileSync(path.join(h.root, ".psm-sessions.json"), "{}\n");
+  const copy = fs.mkdtempSync(path.join(os.tmpdir(), "psm-task-copy-"));
+  t.after(() => fs.rmSync(copy, { recursive: true, force: true }));
+  const files = taskInputs(h.tools, copy).entries.map((entry) => entry.file);
+  assert.ok(files.includes(".psm/deployments.json"));
+  assert.ok(fs.existsSync(path.join(copy, ".psm", "deployments.json")));
+  assert.ok(!files.includes(".psm/local-state.json"));
+  assert.ok(!files.some((file) => file.startsWith(".psm-")));
 });

@@ -283,7 +283,7 @@ export class ExecutorActivity {
     if (!entry) return;
     const [label, state]: [string, ActivityState] =
       action === "accept" ? [`Merged into ${detail || "your branch"}`, "merged"]
-      : action === "reject" ? ["Rejected: the branch was dropped, nothing reached your repo", "rejected"]
+      : action === "reject" ? [`Rejected${detail ? ` (${detail})` : ""}: the branch was dropped, nothing reached your repo`, "rejected"]
       : [`Sent back for changes: ${detail}`, "revising"];
     this.#touch(entry, label, state);
   }

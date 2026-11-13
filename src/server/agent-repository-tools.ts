@@ -73,6 +73,17 @@ export class RepositoryTools {
   /** Files that define the current test input. In Git checkouts, ignored runtime
    * output (logs, caches, uploads, and other generated data) must not turn into
    * source merely because it exists beside the checkout. */
+  /**
+   * The project's committed files under `.psm/` (its deployment manifest, its
+   * identity, its scripts). They are source like any other tracked file. What
+   * psm itself writes there and Git does not track is state, and is not listed.
+   */
+  committedPsmFiles(): Set<string> {
+    this.allow("repo.read");
+    const dotGit = path.join(this.snapshot.project.path, ".git");
+    if (!fs.existsSync(dotGit) || !fs.lstatSync(dotGit).isDirectory()) return new Set();
+    return new Set(this.git(["ls-files", "-z", "--cached", "--", ".psm"]).split("\0").filter(Boolean));
+  }
   taskFiles(): string[] {
     this.allow("repo.read");
     const dotGit = path.join(this.snapshot.project.path, ".git");

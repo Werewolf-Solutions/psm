@@ -164,6 +164,22 @@ export class HubError extends Error {
   }
 }
 
+/** A triaged item whose verdict is `needs_decision` (hub contract C2). */
+export interface HubQuestion {
+  intakeId: string;
+  kind: "task" | "note" | "psm";
+  itemId: string | null;
+  projectId: string;
+  project: string | null;
+  text: string;
+  workspace: string | null;
+  date: string | null;
+  questions: string[];
+  rationale: string;
+  size: string | null;
+  updatedAt: string;
+}
+
 export interface HubOptions {
   /** dapp's API base, e.g. https://werewolf.solutions/api/v1. */
   apiUrl: () => Promise<string> | string;
@@ -189,6 +205,14 @@ export interface Hub {
   cancelJob(jobId: string): Promise<HubJob>;
   /** The owner's whole intake queue, newest first (at most 200), for the Queue view. */
   listQueue(): Promise<QueueItem[]>;
+  /** What triage is waiting on the owner to decide, from Todo and PSM alike. */
+  listQuestions(): Promise<HubQuestion[]>;
+  /** A task written in PSM (P17). Idempotent on `key`: a retry returns the same intake. */
+  createIntake(input: { projectId: string; text: string; key: string }): Promise<{ intake: QueueItem; created: boolean }>;
+  /** Edit a PSM-made intake; a real change sends it back to triage. */
+  updateIntake(intakeId: string, change: { text?: string; projectId?: string }): Promise<QueueItem>;
+  /** Withdraw a PSM-made intake. */
+  withdrawIntake(intakeId: string): Promise<QueueItem>;
   /** Replace this executor's share of the project registry the `@` picker reads. */
   publishProjects(projects: HubProject[]): Promise<{ count: number; archived: number }>;
 }
@@ -198,7 +222,8 @@ export interface QueueItem {
   intakeId: string;
   projectId: string;
   source: string;
-  sourceRef: { kind: "task" | "note"; id: string } | null;
+  /** Todo intake points at a task or note; a task written in PSM carries its own key. */
+  sourceRef: { kind: "task" | "note"; id: string } | { kind: "psm"; key: string } | null;
   text: string;
   status: "new" | "claimed" | "triaged" | "failed" | "withdrawn";
   claim: { executorId: string; leaseUntil: string } | null;
@@ -298,6 +323,23 @@ export function hubClient(options: HubOptions): Hub {
       const { data } = await call("GET", "/psm/intake", undefined, REQUEST_TIMEOUT_MS);
       const items: any[] = Array.isArray(data?.intake) ? data.intake : [];
       return items.filter((item) => item && typeof item.intakeId === "string" && typeof item.status === "string") as QueueItem[];
+    },
+    async listQuestions() {
+      const { data } = await call("GET", "/psm/questions", undefined, REQUEST_TIMEOUT_MS);
+      const rows: any[] = Array.isArray(data?.questions) ? data.questions : [];
+      return rows.filter((row) => row && typeof row.intakeId === "string" && Array.isArray(row.questions)) as HubQuestion[];
+    },
+    async createIntake({ projectId, text, key }) {
+      const { status, data } = await call("POST", "/psm/intake", { projectId, text, sourceRef: { kind: "psm", key } }, REQUEST_TIMEOUT_MS);
+      return { intake: data.intake as QueueItem, created: status === 201 };
+    },
+    async updateIntake(intakeId, change) {
+      const { data } = await call("PATCH", `/psm/intake/${encodeURIComponent(intakeId)}`, change, REQUEST_TIMEOUT_MS);
+      return data.intake as QueueItem;
+    },
+    async withdrawIntake(intakeId) {
+      const { data } = await call("DELETE", `/psm/intake/${encodeURIComponent(intakeId)}`, undefined, REQUEST_TIMEOUT_MS);
+      return data.intake as QueueItem;
     },
     async publishProjects(projects) {
       const { data } = await call("PUT", "/psm/projects", { projects }, REQUEST_TIMEOUT_MS);

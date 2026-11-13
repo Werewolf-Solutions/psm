@@ -110,6 +110,27 @@ async function fakeHub(): Promise<FakeHub> {
     // Like the hub: a projectId narrows the list; without one, everything.
     res.json({ success: true, data: { intake: hub.intake.filter((item) => !req.query.projectId || item.projectId === req.query.projectId) } });
   });
+  // Tasks written in PSM (P17): idempotent on the source key, like the hub.
+  app.post("/api/v1/psm/intake", (req, res) => {
+    const { projectId, text, sourceRef } = req.body;
+    const existing = hub.intake.find((item) => item.sourceRef?.key === sourceRef?.key);
+    if (existing) return res.status(200).json({ success: true, data: { intake: existing, created: false } });
+    const made = { intakeId: `int_${String(hub.intake.length).padStart(24, "0")}`, projectId, source: "psm", sourceRef, text, status: "new" };
+    hub.intake.push(made);
+    res.status(201).json({ success: true, data: { intake: made, created: true } });
+  });
+  app.patch("/api/v1/psm/intake/:intakeId", (req, res) => {
+    const item = hub.intake.find((candidate) => candidate.intakeId === req.params.intakeId);
+    if (!item) return res.status(404).json({ success: false, code: "not_found", message: "No such intake" });
+    Object.assign(item, req.body, { status: "new" });
+    res.json({ success: true, data: { intake: item } });
+  });
+  app.delete("/api/v1/psm/intake/:intakeId", (req, res) => {
+    const item = hub.intake.find((candidate) => candidate.intakeId === req.params.intakeId);
+    if (!item) return res.status(404).json({ success: false, code: "not_found", message: "No such intake" });
+    item.status = "withdrawn";
+    res.json({ success: true, data: { intake: item } });
+  });
   const server = app.listen(0, "127.0.0.1");
   await new Promise((resolve) => server.once("listening", resolve));
   hub.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/v1`;
@@ -213,6 +234,28 @@ test("the client sends the session and executor id and reads the envelope", asyn
     assert.deepEqual(await api.listIntake("prj_a"), [{ intakeId: "int_x", text: "other", status: "new", verdict: null }]);
     const queue = await api.listQueue();
     assert.deepEqual(queue.map((item) => item.intakeId), ["int_x"], "the whole queue, minus rows that are not intake items");
+  } finally {
+    await hub.close();
+  }
+});
+
+test("the client creates, edits and withdraws a task written in PSM", async () => {
+  const hub = await fakeHub();
+  try {
+    const api = client(hub);
+    const key = "pst_0123456789abcdef01234567";
+    const first = await api.createIntake({ projectId: "prj_a", text: "Fix it", key });
+    assert.equal(first.created, true);
+    assert.deepEqual(first.intake.sourceRef, { kind: "psm", key });
+    const again = await api.createIntake({ projectId: "prj_a", text: "Fix it", key });
+    assert.equal(again.created, false, "a 200 is the same intake again, not a new one");
+    assert.equal(again.intake.intakeId, first.intake.intakeId);
+    assert.equal(hub.intake.length, 1);
+
+    const edited = await api.updateIntake(first.intake.intakeId, { text: "Fix it properly" });
+    assert.equal(edited.text, "Fix it properly");
+    assert.equal((await api.withdrawIntake(first.intake.intakeId)).status, "withdrawn");
+    await assert.rejects(api.withdrawIntake("int_missing"), (err: HubError) => err.status === 404 && err.code === "not_found");
   } finally {
     await hub.close();
   }
