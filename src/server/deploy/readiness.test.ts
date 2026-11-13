@@ -52,6 +52,8 @@ test("a plan with nothing outstanding is ready to deploy", () => {
   assert.equal(readiness.ready, true);
   assert.equal(readiness.canMakeReady, false);
   assert.ok(readiness.items.every((item) => item.status === "ready"), JSON.stringify(readiness.items));
+  assert.deepEqual(readiness.guide.map((step) => step.id), ["project", "machine", "connections", "secrets", "source", "recovery", "approval"]);
+  assert.equal(readiness.guide.at(-1)?.status, "action-required");
 });
 
 test("readiness names the connection to make, not just that one is missing", () => {
@@ -67,6 +69,9 @@ test("readiness names the connection to make, not just that one is missing", () 
   assert.equal(item.title, "Connect host");
   assert.equal(readiness.ready, false);
   assert.equal(readiness.canMakeReady, false, "psm cannot supply a credential on the operator's behalf");
+  assert.equal(readiness.guide.find((step) => step.id === "machine")?.status, "blocked");
+  assert.equal(readiness.guide.find((step) => step.id === "machine")?.target, "machine");
+  assert.equal(readiness.guide.find((step) => step.id === "connections")?.status, "ready", "a missing host belongs to Machine access, not provider connections");
 });
 
 test("a connection that is bound is reported as done, not left silent", () => {
@@ -74,6 +79,7 @@ test("a connection that is bound is reported as done, not left silent", () => {
   const readiness = deploymentReadiness(plan(), { canPrepare: false });
   const slots = readiness.items.filter((item) => item.code === "connection-ready").map((item) => item.slot);
   assert.deepEqual(slots.sort(), ["github", "host"]);
+  assert.match(readiness.guide.find((step) => step.id === "machine")?.detail || "", /droplet/);
 });
 
 test("a missing build is the one step psm offers to run itself", () => {

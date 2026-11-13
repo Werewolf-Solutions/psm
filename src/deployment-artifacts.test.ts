@@ -65,14 +65,15 @@ test("dirty source action starts preparation rather than navigating to Changes",
   assert.deepEqual(calls, [true]);
 });
 
-test("Check readiness focuses remaining steps and only focuses a plan when ready", async () => {
+test("Check readiness opens the checklist before starting each check", async () => {
   const nodes: Record<string, any> = {};
-  const focused: string[] = [];
+  const order: string[] = [];
   let checks = 0;
   const state = { readiness: { ready: false } };
   const context = vm.createContext({ WS: { managedDeploy: state },
-    $: (id: string) => nodes[id] ??= { hidden: false, scrollIntoView: () => focused.push(id) },
-    checkDeploymentReadiness: async () => { checks++; },
+    $: (id: string) => nodes[id] ??= { hidden: false },
+    openDeploymentGuide: () => order.push("guide"),
+    checkDeploymentReadiness: async () => { checks++; order.push("check"); },
   });
   const start = source.indexOf('$("#dep-discover").onclick =');
   const end = source.indexOf('$("#dep-make-ready").onclick', start);
@@ -81,7 +82,7 @@ test("Check readiness focuses remaining steps and only focuses a plan when ready
   state.readiness.ready = true;
   await nodes["#dep-discover"].onclick();
   assert.equal(checks, 2);
-  assert.deepEqual(focused, ["#dep-readiness", "#dep-plan-section"]);
+  assert.deepEqual(order, ["guide", "check", "guide", "check"]);
 });
 
 test("the build button uses the same commit/publication preparation coordinator", async () => {

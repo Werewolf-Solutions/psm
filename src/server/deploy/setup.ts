@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { deploymentManifestIssues } from "./manifest.ts";
+import { deploymentManifestIssues, loadDeploymentManifest } from "./manifest.ts";
 
 /**
  * First-time managed deployment setup for a project that has no
@@ -594,4 +594,49 @@ export function writeDeploymentSetup(
     throw error;
   }
   return { files, skipped: [] };
+}
+
+/** Add a separately scoped target without replacing the first environment. */
+export function addDeploymentEnvironment(
+  project: { id: string; name: string; path: string },
+  input: DeploymentSetupInput,
+): { files: string[]; environment: string } {
+  const root = fs.realpathSync(project.path);
+  const loaded = loadDeploymentManifest(root, project.id);
+  if (!loaded) throw new DeploymentSetupError("Create deployment setup first.", "setup-missing");
+  const environment = input.environment ?? "staging";
+  if (loaded.manifest.environments.some((entry) => entry.id === environment)) {
+    throw new DeploymentSetupError(`${environment} already exists.`, "setup-exists");
+  }
+  const detection = detectDeploymentSetup(project);
+  const recipe = loaded.manifest.environments[0]?.units[0]?.recipe;
+  const drafted = recipe === "node-service-ssh-nginx@1"
+    ? draftNodeServiceManifest(detection, input)
+    : recipe === "static-ssh-nginx@1" ? draftStaticManifest(detection, input)
+      : null;
+  if (!drafted) throw new DeploymentSetupError("This manifest uses a recipe the environment wizard cannot draft.", "setup-recipe");
+  const next = (drafted.environments as Record<string, unknown>[])[0];
+  if (environment === "production") {
+    (next.releasePolicy as Record<string, unknown>).approval = "authenticated-local-operator";
+    (next.policy as Record<string, unknown>).requireFreshWatchBeforeRelease = true;
+    (next.connections as Record<string, unknown>).monitor = { kind: "external-monitor@1" };
+    next.watch = [{ id: "watch-web", kind: "external-http-monitor@1", connection: "monitor", unit: "web", monitorKey: `${detection.projectId}:production:web`, hostname: input.hostname.trim().toLowerCase(), maxObservationAgeSeconds: 180 }];
+  }
+  const hostname = input.hostname.trim().toLowerCase();
+  if (loaded.manifest.environments.some((entry) => entry.resources.some((resource) => "hostname" in resource.desired && resource.desired.hostname === hostname))) {
+    throw new DeploymentSetupError("Use a hostname distinct from existing environments.", "setup-hostname-conflict");
+  }
+  const manifest = { ...loaded.manifest, environments: [...loaded.manifest.environments, next] };
+  const issues = deploymentManifestIssues(manifest, { projectRoot: root, expectedProjectId: project.id, identityProjectId: project.id, packageVersion: detection.version ?? "" });
+  if (issues.length) throw new DeploymentSetupError(`The new environment is invalid: ${issues.map((issue) => `${issue.path} ${issue.message}`).join("; ")}`, "setup-invalid");
+  const file = loaded.manifestPath;
+  const previous = fs.readFileSync(file, "utf8");
+  const temporary = path.join(path.dirname(file), `.deployments-${process.pid}-${Date.now()}.tmp`);
+  try {
+    // Refuse to replace a concurrent edit made while the operator reviewed the form.
+    if (fs.readFileSync(file, "utf8") !== previous) throw new DeploymentSetupError("The manifest changed. Review it and try again.", "setup-changed");
+    fs.writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx", mode: 0o644 });
+    fs.renameSync(temporary, file);
+  } finally { fs.rmSync(temporary, { force: true }); }
+  return { files: [".psm/deployments.json"], environment };
 }

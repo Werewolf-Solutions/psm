@@ -1,4 +1,4 @@
-import { repositoryRepairItems } from "./readiness.ts";
+import { deploymentGuide, repositoryRepairItems } from "./readiness.ts";
 import { isPermissionOperatorRequest } from "../agent-permissions.ts";
 import type { SourcePublicationController } from "./source-publication.ts";
 import express, { type Request, type Response } from "express";
@@ -14,7 +14,7 @@ import {
 import { DeploymentManifestValidationError } from "./manifest.ts";
 import type { EnvironmentManifest, UnitManifest } from "./types.ts";
 import { ManagedDeploymentError, DeploymentService } from "./service.ts";
-import { DeploymentSetupError, detectDeploymentSetup, writeDeploymentSetup } from "./setup.ts";
+import { DeploymentSetupError, detectDeploymentSetup, writeDeploymentSetup, addDeploymentEnvironment } from "./setup.ts";
 import { GitHubSetup } from "./github-setup.ts";
 import { GitHubControllerSetup } from "./github-controller-setup.ts";
 import {
@@ -211,6 +211,7 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
     // and only once grants are in place, since the preflight reads with them.
     const checkout = needsRepair && !gap ? options.reviewCheckout?.(projectId) : null;
     if (checkout) checked.readiness.items.unshift({ id: "review-checkout", code: "checkout-not-ready", title: "Prepare the Git checkout", detail: checkout, status: "blocked", action: "review-source", automatic: false });
+    checked.readiness.guide = deploymentGuide(checked.readiness);
     return checked;
   };
 
@@ -226,6 +227,20 @@ export function createDeploymentRouter(options: DeploymentApiOptions): express.R
       const environment = req.body?.environment === "production" ? "production" : "staging";
       const written = writeDeploymentSetup(project, { hostname: String(req.body?.hostname || ""), zone: String(req.body?.zone || ""), environment });
       res.status(201).json({ ok: true, ...written });
+    } catch (error) {
+      if (error instanceof DeploymentSetupError) return apiError(res, new ManagedDeploymentError(error.message, error.code, error.code === "setup-exists" ? 409 : 400));
+      apiError(res, error);
+    }
+  });
+
+  router.post("/api/projects/:id/deployment-environments", (req, res) => {
+    if (!requireLocal(options, req, res)) return;
+    try {
+      const project = service.resolveProject(req.params.id);
+      const environment = req.body?.environment === "production" ? "production" : req.body?.environment === "staging" ? "staging" : null;
+      if (!environment) throw new DeploymentSetupError("Choose staging or production.", "setup-environment");
+      const result = addDeploymentEnvironment(project, { hostname: String(req.body?.hostname || ""), zone: String(req.body?.zone || ""), environment });
+      res.status(201).json({ ok: true, ...result });
     } catch (error) {
       if (error instanceof DeploymentSetupError) return apiError(res, new ManagedDeploymentError(error.message, error.code, error.code === "setup-exists" ? 409 : 400));
       apiError(res, error);

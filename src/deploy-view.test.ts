@@ -53,15 +53,15 @@ test("a confirmed missing manifest still offers deployment setup", async () => {
 });
 
 test("deployment readiness renders before any preparation job exists", () => {
-  const nodes = new Map<string, { children: unknown[]; classList: { add: () => void }; textContent: string; hidden: boolean; disabled: boolean; value: string; title: string }>();
+  const nodes = new Map<string, { children: unknown[]; replaceChildren: () => void; append: () => void; classList: { add: () => void }; textContent: string; hidden: boolean; disabled: boolean; value: string; title: string }>();
   const state = { environment: "production", readinessEnvironment: null, readiness: null, loading: false, preparation: null, preparationActivity: null, error: null, run: null, plan: null };
   const context = vm.createContext({
     WS: { name: "handymanservices", pane: "deploy", managedDeploy: state },
     $: (selector: string) => {
-      if (!nodes.has(selector)) nodes.set(selector, { children: [], classList: { add() {} }, textContent: "", hidden: false, disabled: false, value: "", title: "" });
+      if (!nodes.has(selector)) nodes.set(selector, { children: [], replaceChildren() {}, append() {}, classList: { add() {} }, textContent: "", hidden: false, disabled: false, value: "", title: "" });
       return nodes.get(selector);
     },
-    scheduleDeploymentTodo() {}, depRows() {}, renderActivityTimes() {},
+    scheduleDeploymentTodo() {}, depRows() {}, renderActivityTimes() {}, depText: (_tag: string, _class: string, value: string) => ({ textContent: value }),
     deploymentReadinessControls: () => ({ busy: false, preparing: false, resumable: false, showPreparation: false }),
     preparationSuperseded: () => false, deploymentReleaseComplete: () => false,
     deploymentEnvironment: () => null,

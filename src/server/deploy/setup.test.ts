@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { loadDeploymentManifest } from "./manifest.ts";
-import { BUILD_WORKFLOW, detectDeploymentSetup, draftStaticManifest, githubRepository, PREPARE_SCRIPT, writeDeploymentSetup } from "./setup.ts";
+import { addDeploymentEnvironment, BUILD_WORKFLOW, detectDeploymentSetup, draftStaticManifest, githubRepository, PREPARE_SCRIPT, writeDeploymentSetup } from "./setup.ts";
 
 const PROJECT_ID = "prj_a1557b3e3e9c57129fa8";
 
@@ -49,6 +49,21 @@ test("a static Vite project gets a manifest that passes the plan parser, and its
   assert.doesNotMatch(fs.readFileSync(path.join(project.path, PREPARE_SCRIPT), "utf8"), /client/);
 
   assert.throws(() => writeDeploymentSetup(project, { hostname: "shop.werewolf.solutions", zone: "werewolf.solutions" }), /already has a deployment manifest/);
+});
+
+test("adding production preserves staging and gives production a distinct reviewed target", (t) => {
+  const project = checkout(t, staticApp);
+  writeDeploymentSetup(project, { hostname: "shop-staging.example.com", zone: "example.com" });
+  assert.throws(() => addDeploymentEnvironment(project, { environment: "production", hostname: "shop-staging.example.com", zone: "example.com" }), /distinct/);
+  addDeploymentEnvironment(project, { environment: "production", hostname: "shop.example.com", zone: "example.com" });
+  const environments = loadDeploymentManifest(project.path, PROJECT_ID)!.manifest.environments;
+  assert.equal(environments.length, 2);
+  assert.equal(environments[0].id, "staging");
+  assert.equal(environments[1].risk, "production");
+  assert.equal(environments[1].releasePolicy.approval, "authenticated-local-operator");
+  assert.equal(environments[1].policy.requireFreshWatchBeforeRelease, true);
+  assert.notEqual(environments[0].units[0].target.targetId, environments[1].units[0].target.targetId);
+  assert.throws(() => addDeploymentEnvironment(project, { environment: "production", hostname: "again.example.com", zone: "example.com" }), /already exists/);
 });
 
 test("an existing build workflow blocks setup without overwriting it or leaving a manifest", (t) => {

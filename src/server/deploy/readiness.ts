@@ -24,6 +24,36 @@ export interface DeploymentReadiness {
   canMakeReady: boolean;
   artifactId: string | null;
   items: DeploymentReadinessItem[];
+  guide: DeploymentGuideStep[];
+}
+
+export interface DeploymentGuideStep {
+  id: "project" | "machine" | "connections" | "secrets" | "source" | "recovery" | "approval";
+  title: string;
+  status: "ready" | "action-required" | "blocked";
+  detail: string;
+  target: "setup" | "machine" | "connections" | "secrets" | "source" | "monitoring" | "plan";
+}
+
+/** Present the planner's evidence in a stable operator order. This is a guide,
+ * never a second authorization decision. */
+export function deploymentGuide(readiness: Pick<DeploymentReadiness, "items" | "ready" | "expiresAt">): DeploymentGuideStep[] {
+  const groups: Array<[DeploymentGuideStep["id"], string, DeploymentGuideStep["target"], (item: DeploymentReadinessItem) => boolean]> = [
+    ["project", "Project setup", "setup", (i) => i.code === "manifest-missing" || i.code === "checkout-not-ready"],
+    ["machine", "Machine access", "machine", (i) => i.slot === "host" || /host|target-contract/.test(i.id)],
+    ["connections", "Provider connections", "connections", (i) => i.slot !== "host" && (i.action === "connect" || i.action === "configure-provider" || i.action === "review-controller")],
+    ["secrets", "Runtime secrets", "secrets", (i) => /secret|credential/.test(`${i.code} ${i.id}`)],
+    ["source", "Source and artifact", "source", (i) => i.action === "review-source" || i.action === "prepare-artifact" || i.action === "review-capabilities"],
+    ["recovery", "Recovery evidence", "monitoring", (i) => /backup|restore|monitor|recovery/.test(`${i.code} ${i.id}`)],
+  ];
+  const steps: DeploymentGuideStep[] = groups.map(([id, title, target, matches]) => {
+    const outstanding = readiness.items.filter((item) => item.status !== "ready" && matches(item));
+    const host = id === "machine" ? readiness.items.find((item) => item.id === "connection:host" && item.status === "ready") : null;
+    return { id, title, target, status: outstanding.length ? "blocked" : "ready", detail: outstanding[0]?.detail ?? (host ? host.detail : "No blocker reported by the latest check.") } satisfies DeploymentGuideStep;
+  });
+  const expired = readiness.expiresAt <= Date.now();
+  steps.push({ id: "approval", title: "Plan approval", target: "plan", status: readiness.ready && !expired ? "action-required" : "blocked", detail: expired ? "Readiness expired. Check again before reviewing a plan." : readiness.ready ? "Review and approve the exact deployment plan." : "Complete the steps above and check readiness again." });
+  return steps;
 }
 
 export interface DeploymentReadinessOptions {
@@ -111,7 +141,7 @@ export function deploymentReadiness(document: DeploymentPlanDocument, options: D
       item.detail = "The build is running. Readiness will be checked again after it finishes.";
     }
   }
-  return {
+  const readiness: DeploymentReadiness = {
     checkedAt: document.createdAt,
     expiresAt: document.expiresAt,
     environmentId: document.environmentId,
@@ -119,7 +149,10 @@ export function deploymentReadiness(document: DeploymentPlanDocument, options: D
     canMakeReady: !preparing && items.some((item) => item.automatic),
     artifactId: document.artifact?.artifactId ?? null,
     items,
+    guide: [],
   };
+  readiness.guide = deploymentGuide(readiness);
+  return readiness;
 }
 
 /** Only source defects belong to a repository repair room. Runtime dependency
