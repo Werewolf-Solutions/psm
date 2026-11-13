@@ -43,3 +43,6 @@ notes.md
 __pycache__/
 *.pyc
 .psm-workspaces.json
+
+# psm operator token for the local cockpit (local-operator-authority.md).
+.psm-operator.json
