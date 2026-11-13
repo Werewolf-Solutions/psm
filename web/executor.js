@@ -1,7 +1,11 @@
-/* Executor activity: what the executor did with each Todo note it claimed.
- * A triage job is one prompt to a tool-less Claude call and one answer, so a
- * job reads as a short exchange: the note, what psm asked Claude, what Claude
- * answered, the verdict, and what went back to the hub. Live while open. */
+/* The Executor page (P17): write a task for a project, watch it get triaged,
+ * press Go, and review the change — the same flow a Todo note tagged @project
+ * takes, started here or there.
+ *
+ * Queue is the hub's whole intake for this user plus its implement jobs.
+ * Activity is what this machine's executor did with each job it claimed: a
+ * triage job is one prompt to a tool-less Claude call and one answer, so it
+ * reads as a short exchange. Both are live while the page is visible. */
 (() => {
   const node = (tag, text = "", className = "") => {
     const element = document.createElement(tag);
@@ -29,7 +33,9 @@
   };
   const VERDICT = { fits: "Fits", doesnt_fit: "Doesn't fit", needs_decision: "Needs a decision" };
 
-  let ctx = null; // { api, list, detail, summary }
+  let ctx = null; // the page's elements and callbacks, from app.js
+  /** Nothing is polled while the tab is in the background or the page is closed. */
+  const watching = () => !!ctx && !document.hidden && (!ctx.isOpen || ctx.isOpen());
   let jobs = [];
   let selected = null;
   let selectedEntry = null;
@@ -59,19 +65,25 @@
   }
 
   function statusLine(status) {
-    if (!status?.enabled) return "Executor is off — switch it on in Running to pick up tagged notes.";
+    if (ctx.statusText) return ctx.statusText(status || {});
+    if (!status?.enabled) return "Executor is off — switch it on to pick up tasks.";
     if (status.state === "hub-error") return /sign in/i.test(status.lastError || "") ? "Waiting for you to sign in with Werewolf." : `Hub not answering: ${status.lastError}`;
-    if (status.running?.length) return `Working on ${status.running.length} note${status.running.length === 1 ? "" : "s"} now.`;
-    return "Connected — waiting for tagged notes.";
+    if (status.running?.length) return `Working on ${status.running.length} task${status.running.length === 1 ? "" : "s"} now.`;
+    return "Connected — waiting for tasks.";
   }
 
   function renderList() {
     ctx.list.replaceChildren();
     if (!jobs.length) {
-      ctx.list.append(node("div", "No jobs yet. Tag a Todo note with @project and it appears here as soon as the executor claims it.", "procs-empty"));
+      ctx.list.append(node("div", "No jobs yet. Add a task in Queue, or tag a Todo note with @project: it appears here as soon as this machine's executor claims it.", "procs-empty"));
       return;
     }
-    for (const job of jobs) {
+    const shown = projectFilter ? jobs.filter((job) => job.projectId === projectFilter) : jobs;
+    if (!shown.length) {
+      ctx.list.append(node("div", "No jobs for this project yet. Pick All projects to see the rest.", "procs-empty"));
+      return;
+    }
+    for (const job of shown) {
       const row = node("button", "", `exec-job${job.jobId === selected ? " on" : ""}`);
       row.type = "button";
       const head = node("div", "", "exec-job-head");
@@ -156,7 +168,7 @@
       if (facts.length) root.append(node("div", facts.join(" · "), "exec-facts"));
     }
 
-    root.append(bubble("Todo note", "exec-from-todo", node("p", entry.text)));
+    root.append(bubble("Task", "exec-from-todo", node("p", entry.text)));
 
     if (entry.prompt) {
       const asked = bubble("psm → Claude", "exec-from-psm",
@@ -196,7 +208,7 @@
 
   /** An implement job: the task, what the agent said and did, the result. */
   function renderImplement(root, entry) {
-    root.append(bubble("Todo note", "exec-from-todo", node("p", entry.text)));
+    root.append(bubble("Task", "exec-from-todo", node("p", entry.text)));
     if (entry.prompt) {
       const sent = bubble("psm → agent", "exec-from-psm", node("p", "One agent with a shell in the job's isolated container. Only its clone is writable; the container has no host files or network."));
       sent.append(collapsible(`Task as sent (${kb(entry.prompt)})`, entry.prompt));
@@ -313,11 +325,12 @@
   let view = "activity";
   let queueTimer = null;
 
+  // What waits on you comes first: ready to implement, then your decisions; then the triage line.
   const QUEUE_SECTIONS = [
-    { id: "running", title: "Being triaged now", empty: null },
-    { id: "waiting", title: "Waiting", empty: "Nothing waiting. Tag a Todo task or note with @project to queue it." },
-    { id: "needs_decision", title: "Needs your decision", empty: null },
     { id: "fits", title: "Fits — ready to implement", note: "Go queues an implement job: a local branch in its own clone, tested, never pushed, for you to review here.", empty: null },
+    { id: "needs_decision", title: "Needs your decision", empty: null },
+    { id: "running", title: "Being triaged now", empty: null },
+    { id: "waiting", title: "Waiting", empty: "Nothing waiting. Add a task above, or tag a Todo task or note with @project." },
     { id: "doesnt_fit", title: "Doesn't fit", empty: null },
     { id: "failed", title: "Failed", empty: null },
   ];
@@ -341,8 +354,11 @@
     const name = node("strong", item.projectName || item.projectId);
     head.append(name);
     if (position) head.append(node("span", `#${position}`, "exec-qpos"));
-    head.append(node("span", item.sourceRef?.kind === "note" ? "note" : "task", "exec-qkind"));
-    row.append(head, node("div", item.text, "exec-qtext"));
+    const fromPsm = item.source === "psm";
+    const asked = item.requestedBy;
+    head.append(node("span", asked ? `${asked.kind === "bug" ? "bug" : asked.kind === "feature" ? "feature" : "request"} from ${asked.name}` : fromPsm ? "from PSM" : item.sourceRef?.kind === "note" ? "Todo note" : "Todo task", `exec-qkind${fromPsm ? " exec-qsource-psm" : ""}`));
+    const text = node("div", item.text, "exec-qtext");
+    row.append(head, text);
     const meta = [ago(new Date(item.createdAt).getTime())];
     if (item.status === "claimed" && item.claim) meta.push(item.mine ? "this machine" : `executor ${item.claim.executorId}`, leaseLeft(item.claim.leaseUntil));
     if (item.attempts > 1 || (item.status === "new" && item.attempts > 0)) meta.push(`attempt ${item.attempts}${item.status === "new" ? " failed, retrying" : ""}`);
@@ -426,6 +442,7 @@
         row.append(choice, model, effort, go);
       }
     }
+    const actions = node("div", "", "exec-qactions");
     if (jobs.some((job) => job.jobId === item.intakeId)) {
       const open = node("button", "See what the executor did", "btn exec-qopen");
       open.type = "button";
@@ -433,17 +450,86 @@
         setView("activity");
         void select(item.intakeId);
       };
-      row.append(open);
+      actions.append(open);
     }
+    // Only a task written here can be changed here; a Todo item is changed in Todo.
+    if (fromPsm) actions.append(...ownTaskButtons(item, row, text));
+    if (actions.childElementCount) row.append(actions);
     return row;
+  }
+
+  /** Edit and Withdraw for a task written in PSM. An edit sends it back to triage. */
+  function ownTaskButtons(item, row, text) {
+    const path = `/api/executor/intake/${encodeURIComponent(item.intakeId)}`;
+    const fail = (error) => row.append(node("div", error.message, "exec-qerror"));
+    const edit = node("button", "Edit", "btn exec-qopen");
+    edit.type = "button";
+    edit.title = "Change the wording. The task goes back to triage.";
+    edit.onclick = () => {
+      editing = item.intakeId; // the queue is not redrawn under an open editor
+      const area = node("textarea", "", "exec-qedit");
+      area.value = item.text;
+      area.maxLength = 20000;
+      area.setAttribute("aria-label", "Task text");
+      const save = node("button", "Save — triage again", "btn btn-primary exec-qopen");
+      const cancel = node("button", "Cancel", "btn exec-qopen");
+      save.type = cancel.type = "button";
+      const bar = node("div", "", "exec-qactions");
+      bar.append(save, cancel);
+      text.replaceWith(area, bar);
+      edit.disabled = true;
+      area.focus();
+      const done = () => {
+        editing = null;
+        lastQueue = "";
+        void pollQueue();
+      };
+      cancel.onclick = done;
+      save.onclick = async () => {
+        if (!area.value.trim()) return area.focus();
+        save.disabled = cancel.disabled = true;
+        try {
+          await send(path, { text: area.value.trim() }, "PATCH");
+          done();
+        } catch (error) {
+          save.disabled = cancel.disabled = false;
+          fail(error);
+        }
+      };
+    };
+    const withdraw = node("button", "Withdraw", "btn exec-qopen");
+    withdraw.type = "button";
+    withdraw.title = "Take this task off the queue";
+    let armed = false;
+    withdraw.onclick = async () => {
+      if (!armed) {
+        armed = true;
+        withdraw.textContent = "Withdraw — sure?";
+        setTimeout(() => { armed = false; withdraw.textContent = "Withdraw"; }, 4000);
+        return;
+      }
+      withdraw.disabled = true;
+      try {
+        await send(path, undefined, "DELETE");
+        if (editing === item.intakeId) editing = null;
+        lastQueue = "";
+        await pollQueue();
+      } catch (error) {
+        withdraw.disabled = false;
+        fail(error);
+      }
+    };
+    return [edit, withdraw];
   }
 
   const JOB_LABEL = { queued: "queued", claimed: "implementing now", review: "ready for review", accepted: "merged", rejected: "rejected", stalled: "stalled", failed: "failed", cancelled: "cancelled" };
   let jobByIntake = new Map();
   let lastQueue = "";
+  let editing = null; // the intake whose text is being edited in place
+  let projectFilter = ""; // a prj_ id, or "" for every project
 
-  async function send(path, body = {}) {
-    const response = await ctx.api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  async function send(path, body = {}, method = "POST") {
+    const response = await ctx.api(path, { method, headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw Object.assign(new Error(data.error || `Request failed (${response.status})`), { data });
     return data;
@@ -505,6 +591,9 @@
     return row;
   }
 
+  const DONE_KEY = "psm.executor.doneOpen";
+  let doneOpen = (() => { try { return localStorage.getItem(DONE_KEY) === "1"; } catch { return false; } })();
+
   function renderJobs(root, jobList, items, me) {
     const textOf = (intakeId) => items.find((item) => item.intakeId === intakeId)?.text;
     const sections = [
@@ -512,28 +601,44 @@
       { title: "Queued to implement", list: jobList.filter((job) => job.status === "queued").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)), queued: true },
       { title: "Ready for review", list: jobList.filter((job) => job.status === "review") },
       { title: "Stalled or failed", list: jobList.filter((job) => job.status === "stalled" || job.status === "failed") },
-      { title: "Done recently", list: jobList.filter((job) => ["accepted", "rejected", "cancelled"].includes(job.status)).slice(0, 8) },
+      { title: "Done recently", list: jobList.filter((job) => ["accepted", "rejected", "cancelled"].includes(job.status)).slice(0, 8), collapsible: true },
     ];
     const busy = new Set(jobList.filter((job) => job.status === "claimed").map((job) => job.projectId));
     for (const section of sections) {
       if (!section.list.length) continue;
-      const block = node("section", "", `exec-qsection exec-q-job-${section.title.split(" ")[0].toLowerCase()}`);
+      const className = `exec-qsection exec-q-job-${section.title.split(" ")[0].toLowerCase()}`;
+      if (section.collapsible) {
+        // Finished work stays out of the way: closed unless you opened it.
+        const block = node("details", "", `${className} exec-qfold`);
+        block.open = doneOpen;
+        const summary = node("summary", `${section.title} (${section.list.length})`, "procs-group exec-qfold-head");
+        summary.onclick = () => { doneOpen = !block.open; try { localStorage.setItem(DONE_KEY, doneOpen ? "1" : "0"); } catch { /* private window */ } };
+        block.append(summary);
+        section.list.forEach((job) => block.append(jobRow(job, textOf, { me, position: 0, waiting: false })));
+        root.append(block);
+        continue;
+      }
+      const block = node("section", "", className);
       block.append(node("h3", `${section.title} (${section.list.length})`, "procs-group"));
       section.list.forEach((job, index) => block.append(jobRow(job, textOf, { me, position: section.queued ? index + 1 : 0, waiting: section.queued && busy.has(job.projectId) })));
       root.append(block);
     }
   }
 
-  function renderQueue(items, executorId, jobList = []) {
+  function renderQueue(allItems, executorId, allJobs = []) {
     const root = ctx.queue;
     root.replaceChildren();
     jobByIntake = new Map();
-    for (const job of jobList) if (!jobByIntake.has(job.intakeId)) jobByIntake.set(job.intakeId, job);
+    for (const job of allJobs) if (!jobByIntake.has(job.intakeId)) jobByIntake.set(job.intakeId, job);
+    fillProjectFilter(allItems);
+    const items = projectFilter ? allItems.filter((item) => item.projectId === projectFilter) : allItems;
+    const jobList = projectFilter ? allJobs.filter((job) => job.projectId === projectFilter) : allJobs;
     const groups = new Map(QUEUE_SECTIONS.map((section) => [section.id, []]));
     for (const item of items) {
       // An item with a job under way is shown with its job, not again under its verdict.
       const job = jobByIntake.get(item.intakeId);
-      if (job && ["queued", "claimed", "review"].includes(job.status)) continue;
+      // A merged one is done and listed under "Done recently"; a rejected or cancelled one can Go again.
+      if (job && ["queued", "claimed", "review", "accepted"].includes(job.status)) continue;
       groups.get(sectionOf(item))?.push(item);
     }
     // Claim order is oldest first, so that is the order they will be picked up in.
@@ -549,8 +654,8 @@
       if (!list.length) block.append(node("div", section.empty, "procs-empty"));
       list.forEach((item, index) => block.append(queueRow(item, section.id === "waiting" ? index + 1 : 0)));
       root.append(block);
-      // Implement jobs sit between "being triaged" and the triage outcomes.
-      if (section.id === "waiting") renderJobs(root, jobList, items, executorId);
+      // Implement jobs follow the triage line.
+      if (section.id === "waiting") renderJobs(root, jobList, allItems, executorId);
     }
   }
 
@@ -558,10 +663,11 @@
     if (!ctx || view !== "queue") return;
     try {
       const [data, jobData] = await Promise.all([get("/api/executor/queue"), get("/api/executor/jobs").catch(() => ({ jobs: [] }))]);
-      if (view !== "queue") return; // a review opened meanwhile
+      ctx.onJobs?.(jobData.jobs || []); // the header's count
+      if (view !== "queue" || editing) return; // a review opened meanwhile, or a task is being edited
       // Redraw only on a real change, so a button never moves under the pointer
       // and the scroll position holds. Lease countdowns refresh every 30 s.
-      const fingerprint = JSON.stringify([data, jobData, Math.floor(Date.now() / 30000)]);
+      const fingerprint = JSON.stringify([data, jobData, projectFilter, Math.floor(Date.now() / 30000)]);
       if (fingerprint === lastQueue && ctx.queue.childElementCount) return;
       lastQueue = fingerprint;
       renderQueue(data.items || [], data.executorId, jobData.jobs || []);
@@ -594,7 +700,7 @@
       return;
     }
     if (view !== "review") return;
-    const { job, diff } = data;
+    const { job, diff, projectCauses = [] } = data;
     root.replaceChildren();
     const back = node("button", "← Queue", "btn exec-qopen");
     back.type = "button";
@@ -640,25 +746,257 @@
       }
     };
     accept.onclick = () => act(accept, `/api/executor/jobs/${encodeURIComponent(jobId)}/accept`, {}, (r) => `Merged into ${r.merged.into} (${r.merged.mergeCommit.slice(0, 8)}). The job's clone is removed.`);
-    reject.onclick = () => act(reject, `/api/executor/jobs/${encodeURIComponent(jobId)}/reject`, {}, () => "Rejected. The job's clone is removed; nothing reached your repo.");
+    // The cause tag: is this a one-off, or will the next job make the same mistake?
+    const causeBox = node("div", "", "exec-cause");
+    const causeNote = node("input", "", "exec-cause-note");
+    causeNote.type = "text";
+    causeNote.maxLength = 500;
+    causeNote.placeholder = "What in the project? A misleading example, a missing fixture, an unreliable setup…";
+    causeNote.hidden = true;
+    const causeChoices = node("div", "", "exec-cause-choices");
+    for (const [value, label] of [["one-off", "One-off mistake"], ["project", "The project made this easy"]]) {
+      const choice = node("label", "", "exec-cause-choice");
+      const radio = node("input");
+      radio.type = "radio";
+      radio.name = "exec-cause";
+      radio.value = value;
+      radio.onchange = () => { causeNote.hidden = value !== "project"; };
+      choice.append(radio, node("span", label));
+      causeChoices.append(choice);
+    }
+    causeBox.append(causeChoices, causeNote);
+    if (projectCauses.length) {
+      const earlier = node("details", "", "exec-cause-earlier");
+      earlier.open = true;
+      earlier.append(node("summary", `Earlier project causes here (${projectCauses.length}) — a repeat means fix the project`));
+      const list = node("ul");
+      for (const cause of projectCauses) list.append(node("li", `${new Date(cause.at).toLocaleDateString()} · ${cause.note}${cause.task ? ` — task: ${cause.task}` : ""}`));
+      earlier.append(list);
+      causeBox.append(earlier);
+    }
+    /** The chosen cause, or null after telling the owner what is missing. */
+    const chosenCause = (noteFallback = "") => {
+      const cause = causeChoices.querySelector("input:checked")?.value;
+      const fail = (text) => {
+        message.className = "exec-review-message exec-qerror";
+        message.textContent = text;
+        return null;
+      };
+      if (!cause) return fail("Say first why it is going back: a one-off, or something in the project.");
+      if (cause === "project" && !causeNote.value.trim() && !noteFallback) return fail("Say what in the project made this mistake easy.");
+      return { cause, causeNote: causeNote.value.trim() };
+    };
+    reject.onclick = () => {
+      const why = chosenCause();
+      if (why) act(reject, `/api/executor/jobs/${encodeURIComponent(jobId)}/reject`, why, () => "Rejected. The job's clone is removed; nothing reached your repo.");
+    };
     revise.onclick = () => {
       if (!comment.value.trim()) {
         message.className = "exec-review-message exec-qerror";
         message.textContent = "Say what should change first.";
         return;
       }
-      act(revise, `/api/executor/jobs/${encodeURIComponent(jobId)}/revise`, { comment: comment.value.trim() }, () => "Sent back with your comment. It continues on the same branch.");
+      const why = chosenCause(comment.value.trim());
+      if (why) act(revise, `/api/executor/jobs/${encodeURIComponent(jobId)}/revise`, { comment: comment.value.trim(), ...why }, () => "Sent back with your comment. It continues on the same branch.");
     };
-    actions.append(accept, reject);
+    actions.append(accept);
     const reviseRow = node("div", "", "exec-revise-row");
     reviseRow.append(comment, revise);
-    root.append(node("div", "Your decision", "exec-label"), actions, reviseRow, message);
+    const rejectRow = node("div", "", "exec-review-actions");
+    rejectRow.append(reject);
+    root.append(node("div", "Your decision", "exec-label"), actions, node("div", "Or send it back — why?", "exec-label"), causeBox, reviseRow, rejectRow, message);
+  }
+
+  /* ---------- Project filter and the new-task composer ---------- */
+
+  /** The projects a task can be written for: scanned here, with a prj_ id. */
+  const localProjects = () =>
+    (ctx.projects?.() || []).filter((project) => project.id).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+  /** Replace a select's options only when they changed, keeping what is chosen. */
+  function fillSelect(select, options, value) {
+    const signature = JSON.stringify(options);
+    if (select.dataset.options !== signature) {
+      select.dataset.options = signature;
+      select.replaceChildren();
+      for (const [id, label] of options) {
+        const option = node("option", label);
+        option.value = id;
+        select.append(option);
+      }
+    }
+    select.value = options.some(([id]) => id === value) ? value : "";
+  }
+
+  /** Every project that is local or has something in the queue; a name the hub knows and psm does not shows its id. */
+  function fillProjectFilter(items = []) {
+    const select = ctx.filter?.select;
+    if (!select) return;
+    const names = new Map(localProjects().map((project) => [project.id, project.name]));
+    for (const item of items) if (!names.has(item.projectId)) names.set(item.projectId, item.projectName || item.projectId);
+    if (projectFilter && !names.has(projectFilter)) names.set(projectFilter, projectFilter);
+    const options = [...names].sort((a, b) => a[1].localeCompare(b[1], undefined, { sensitivity: "base" }));
+    fillSelect(select, [["", "All projects"], ...options], projectFilter);
+  }
+
+  function fillComposerProjects() {
+    const select = ctx.composer?.project;
+    if (!select) return;
+    fillSelect(select, [["", "Project…"], ...localProjects().map((project) => [project.id, project.name])], select.value || projectFilter);
+  }
+
+  function setProjectFilter(id, fromUser = false) {
+    projectFilter = id || "";
+    fillProjectFilter();
+    if (projectFilter && ctx.composer?.project) {
+      fillComposerProjects();
+      ctx.composer.project.value = localProjects().some((project) => project.id === projectFilter) ? projectFilter : ctx.composer.project.value;
+    }
+    if (fromUser) ctx.filter?.onChange?.(projectFilter);
+    if (view === "queue" && !editing) {
+      lastQueue = "";
+      void pollQueue();
+    }
+    if (view === "activity") renderList();
+  }
+
+  const MENTION = /(^|\s)@([^\s@]*)$/;
+  let attempt = null; // { nonce, signature }: a retry of the same task reuses its nonce
+
+  const newNonce = () => {
+    if (crypto.randomUUID) return crypto.randomUUID().replace(/-/g, "");
+    return [...crypto.getRandomValues(new Uint8Array(16))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+
+  function setupComposer() {
+    const composer = ctx.composer;
+    if (!composer) return;
+    const { form, project, text, suggest, add, note } = composer;
+    let matches = [];
+    let active = 0;
+    const say = (message, bad = false) => {
+      note.textContent = message;
+      note.classList.toggle("exec-qerror", bad);
+    };
+    const grow = () => {
+      text.style.height = "auto";
+      text.style.height = `${Math.min(text.scrollHeight + 2, window.innerHeight * 0.4)}px`;
+    };
+    const closeSuggest = () => {
+      matches = [];
+      suggest.hidden = true;
+      suggest.replaceChildren();
+    };
+    /** The "@partial" being typed just before the caret, if any. */
+    const mention = () => {
+      const before = text.value.slice(0, text.selectionStart);
+      const match = before.match(MENTION);
+      return match ? { start: before.length - match[2].length - 1, end: before.length, query: match[2].toLowerCase() } : null;
+    };
+    const pick = (chosen) => {
+      const at = mention();
+      if (at) {
+        // The @token names the project; it is not part of the task, as in Todo.
+        const rest = text.value.slice(at.end).replace(/^ /, "");
+        text.value = text.value.slice(0, at.start) + rest;
+        text.setSelectionRange(at.start, at.start);
+      }
+      project.value = chosen.id;
+      closeSuggest();
+      say("");
+      grow();
+      text.focus();
+    };
+    const showSuggest = () => {
+      const at = mention();
+      if (!at) return closeSuggest();
+      const all = localProjects();
+      matches = [...all.filter((p) => p.name.toLowerCase().startsWith(at.query)), ...all.filter((p) => !p.name.toLowerCase().startsWith(at.query) && p.name.toLowerCase().includes(at.query))].slice(0, 8);
+      if (!matches.length) return closeSuggest();
+      active = Math.min(active, matches.length - 1);
+      suggest.replaceChildren();
+      matches.forEach((candidate, index) => {
+        const option = node("button", candidate.name, index === active ? "on" : "");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        option.setAttribute("aria-selected", index === active ? "true" : "false");
+        option.onmousedown = (event) => { event.preventDefault(); pick(candidate); };
+        suggest.append(option);
+      });
+      suggest.hidden = false;
+    };
+    /** "@name" tokens left in the text: the last one that names a project wins, and all such tokens go. */
+    const takeTokens = (raw) => {
+      const all = localProjects();
+      let named = null;
+      const cleaned = raw.replace(/(^|\s)@([^\s@]+)/g, (whole, lead, name) => {
+        const found = all.find((p) => p.name.toLowerCase() === name.toLowerCase());
+        if (!found) return whole;
+        named = found;
+        return lead;
+      });
+      return { named, text: cleaned.replace(/[ \t]{2,}/g, " ").trim() };
+    };
+
+    text.oninput = () => { active = 0; showSuggest(); grow(); };
+    text.onblur = () => setTimeout(closeSuggest, 100);
+    text.onkeydown = (event) => {
+      if (matches.length) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          active = (active + (event.key === "ArrowDown" ? 1 : matches.length - 1)) % matches.length;
+          return showSuggest();
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault();
+          return pick(matches[active]);
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          return closeSuggest();
+        }
+      }
+      // Enter adds the task; Shift+Enter is a new line.
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    };
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      if (add.disabled) return;
+      const taken = takeTokens(text.value);
+      if (taken.named) project.value = taken.named.id;
+      if (!taken.text) return say("Write the task first.", true);
+      if (!project.value) return say("Choose a project from the list, or type @ and its name.", true);
+      const signature = JSON.stringify([project.value, taken.text]);
+      if (attempt?.signature !== signature) attempt = { nonce: newNonce(), signature };
+      add.disabled = true;
+      say("Adding…");
+      try {
+        await send("/api/executor/intake", { projectId: project.value, text: taken.text, nonce: attempt.nonce });
+        attempt = null;
+        text.value = "";
+        grow();
+        say("Added. It waits for triage, then shows its verdict below.");
+        lastQueue = "";
+        await pollQueue();
+      } catch (error) {
+        say(error.message, true);
+      } finally {
+        add.disabled = false;
+      }
+    };
+    fillComposerProjects();
+    say("");
   }
 
   function setView(next) {
     view = next;
     ctx.activityPane.hidden = next !== "activity";
     ctx.queue.hidden = next !== "queue" && next !== "review";
+    if (ctx.composer) ctx.composer.form.hidden = next !== "queue";
+    if (ctx.filter?.wrap) ctx.filter.wrap.hidden = next !== "queue" && next !== "activity";
     for (const [name, tab] of Object.entries(ctx.tabs)) {
       const on = name === next || (name === "queue" && next === "review");
       tab.classList.toggle("on", on);
@@ -670,7 +1008,8 @@
       ctx.queue.replaceChildren(node("div", "Reading the queue from the hub…", "procs-empty"));
       void pollQueue();
       queueTimer = setInterval(() => {
-        if (ctx?.isOpen && !ctx.isOpen()) return clearInterval(queueTimer);
+        if (!watching()) return; // hidden tab or closed page: no polling
+        fillComposerProjects(); // a rescan may have found a project
         void pollQueue();
       }, 3000);
     }
@@ -686,19 +1025,34 @@
       ctx.detail.replaceChildren();
       ctx.tabs.activity.onclick = () => setView("activity");
       ctx.tabs.queue.onclick = () => setView("queue");
-      setView(options.view || "activity");
+      editing = null;
+      projectFilter = options.project || "";
+      if (ctx.filter?.select) ctx.filter.select.onchange = () => setProjectFilter(ctx.filter.select.value, true);
+      setupComposer();
+      fillProjectFilter();
+      setView(options.view || "queue");
       clearInterval(timer);
       timer = setInterval(() => {
-        if (ctx?.isOpen && !ctx.isOpen()) return clearInterval(timer);
-        void poll();
-      }, 2000);
+        if (watching()) void poll();
+      }, 3000);
       return poll();
+    },
+    /** Open one job's exchange in Activity (from a job on the Agents page). */
+    showJob(jobId) {
+      if (!ctx || !jobId) return;
+      setView("activity");
+      void select(jobId);
+    },
+    /** Show one project's queue (the route's ?project=), or all of it. */
+    setProject(id) {
+      if (ctx && (id || "") !== projectFilter) setProjectFilter(id);
     },
     close() {
       clearInterval(timer);
       clearInterval(queueTimer);
       timer = null;
       queueTimer = null;
+      editing = null;
     },
   };
 })();

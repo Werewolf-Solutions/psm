@@ -8,7 +8,7 @@
     "description": "B2B SaaS platform connecting business owners with developers through an API-first ERP, integrated payment processing, and blockchain/DeFi. The current flagship — successor to the older werewolf-* web apps.",
     "next": "Continue AI builder workspace links so generated sites stay connected to their separate repos/projects.",
     "runCommand": "npm run dev",
-    "port": 5174,
+    "port": 5173,
     "aiEngine": "claude",
     "aiModel": "opus",
     "aiEffort": "medium",
@@ -80,18 +80,20 @@
     "next": "Exercise the web and universal recorders against real apps, then add a permissioned native companion for semantic macOS/Windows/Linux accessibility events where browser screen capture is insufficient.",
     "runCommand": "npm start",
     "port": 4400,
-    "aiModel": "opus",
-    "aiEffort": "medium",
     "pinned": true,
     "workingOn": true,
-    "workingOnAt": 1791288963230
+    "workingOnAt": 1791288963230,
+    "aiEngine": "codex",
+    "aiModel": "gpt-6-astra",
+    "aiEffort": "high"
   },
   "AI-social-media-autopilot": {
     "category": "AI & automation",
-    "status": "paused",
+    "status": "planning",
     "stack": "Node, AI",
     "description": "AI social-media manager that creates, schedules, and optimises content across platforms. Transitioning to a multi-tenant agency architecture with workspace isolation and RBAC.",
-    "next": "Complete deploy steps; finish multi-tenant transition."
+    "next": "Complete deploy steps; finish multi-tenant transition.",
+    "pinned": true
   },
   "workflow": {
     "category": "AI & automation",
@@ -115,7 +117,7 @@
         "command": "npm run server"
       }
     ],
-    "port": 5173,
+    "port": 5174,
     "aiEngine": "codex",
     "aiModel": "gpt-6-sol",
     "aiEffort": "medium",
@@ -151,10 +153,12 @@
     "description": "Trading-bot software for the Werewolf app: Express + SQLite backend running the bots, plus a web SPA to configure strategies, bots, and exchange credentials. Auto-migrating SQLite on first boot.",
     "next": "Resume from the pre-merge cto sync.",
     "pinned": true,
-    "port": 3000,
+    "port": 3001,
     "aiModel": "opus",
     "aiEffort": "medium",
-    "runCommand": "npm run dev"
+    "runCommand": "npm run dev",
+    "workingOn": true,
+    "workingOnAt": 1792135064674
   },
   "accounting": {
     "category": "Apps, libraries & other",
@@ -384,7 +388,7 @@
     "priority": "high",
     "runCommand": "npm run dev",
     "port": 5176,
-    "aiEngine": "claude",
+    "aiEngine": "codex",
     "attachments": [
       {
         "capabilityRef": "workspace:feedback-hub",
@@ -403,7 +407,8 @@
         "attachedAt": 1784545392580
       }
     ],
-    "aiModel": "fable"
+    "aiModel": "gpt-6-astra",
+    "aiEffort": "high"
   },
   "zzz-psm-smoke": {
     "description": "smoke test"
@@ -484,6 +489,10 @@
   },
   "werewolf-deploy-lab": {
     "runCommand": "npm run dev",
-    "port": 3001
+    "port": 3001,
+    "status": "active",
+    "pinned": true,
+    "workingOn": true,
+    "workingOnAt": 1792163451714
   }
 }

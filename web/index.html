@@ -7,6 +7,7 @@
     <!-- Absolute, not "./": the SPA fallback serves this file at /auth/callback too,
          where a relative path would resolve to /auth/styles.css and 404. -->
     <link rel="stylesheet" href="/styles.css" />
+    <script src="/operator.js"></script>
     <script src="/privacy.js"></script>
   </head>
   <body>
@@ -97,8 +98,10 @@
         <button id="ws-chat-open" class="btn" title="Chat with an AI that has access to every project">💬&nbsp;Ask&nbsp;psm</button>
         <button id="work-open" class="btn" title="One AI working across several projects at once">👥&nbsp;Work&nbsp;together</button>
         <button id="procs-open" class="btn" title="What's running on this machine, and what's left over">⚡&nbsp;Running</button>
+        <button id="agents-open" class="btn" title="Every agent working on your projects: the executor, AI sessions, script agents and MCP clients">⚙&nbsp;Agents <span id="executor-count" class="questions-count" hidden>0</span></button>
+        <button id="models-open" class="btn" title="Every AI model on this machine: price, strengths, benchmarks and side-by-side comparison">🧠&nbsp;Models</button>
         <button id="resources-open" class="btn" title="Databases, containers and folders on this machine, and how much access each one gets">🗄&nbsp;Resources</button>
-        <button id="questions-open" class="btn" title="Review pending questions from your sessions" aria-haspopup="dialog">Questions <span id="questions-count" class="questions-count" hidden>0</span></button>
+        <button id="questions-open" class="btn" title="Questions waiting on you: executor triage and your sessions" aria-haspopup="dialog">Questions <span id="questions-count" class="questions-count" hidden>0</span></button>
         <button id="links-open" class="btn" title="Choose which folders psm looks at">🔗&nbsp;Folders</button>
         <button id="machines-open" class="btn" title="Servers your projects deploy to">🖥&nbsp;Machines</button>
         <button id="rules-open" class="btn" title="Edit workspace + per-project house rules">House&nbsp;rules</button>
@@ -236,6 +239,76 @@
       </div>
     </section>
 
+    <!-- Models (#/models): every model on this machine — profile, price, benchmarks, comparison (web/models.js) -->
+    <section class="executor-page models-page" id="models-page" aria-labelledby="models-title" hidden>
+      <header class="exec-page-head">
+        <div class="exec-page-title">
+          <h2 id="models-title">Models</h2>
+          <p class="hint" id="models-summary" aria-live="polite">Reading…</p>
+        </div>
+        <div class="exec-page-actions">
+          <button class="btn" id="models-refresh" title="Ask every engine again which models it has">Refresh</button>
+          <button class="btn" id="models-home" aria-label="Return home">← Home</button>
+        </div>
+      </header>
+      <div class="models-body" id="models-root" data-stream-private></div>
+    </section>
+
+    <!-- Agents (#/agents): everything working on your projects. The executor is one of them:
+         write a task for a project, it is triaged, runs on Go, and comes back for review (P17) -->
+    <section class="executor-page agents-page" id="agents-page" aria-labelledby="agents-title" hidden>
+      <header class="exec-page-head">
+        <div class="exec-page-title">
+          <h2 id="agents-title">Agents</h2>
+          <p class="hint" id="agents-summary">Reading…</p>
+        </div>
+        <div class="exec-page-actions">
+          <button class="btn" id="agents-home" aria-label="Return home">← Home</button>
+        </div>
+      </header>
+      <div class="agents-body">
+        <nav class="agents-rail" id="agents-rail" aria-label="Agents" data-stream-private></nav>
+        <div class="agents-main">
+          <div class="agents-executor" id="executor-page">
+            <header class="exec-page-head exec-sub-head">
+              <div class="exec-page-title">
+                <h3 id="executor-title">Executor</h3>
+                <p class="hint" id="executor-summary">Reading…</p>
+              </div>
+              <div class="exec-page-actions">
+                <div class="res-levels" id="executor-page-switch" role="radiogroup" aria-label="Executor"></div>
+              </div>
+            </header>
+            <div class="exec-page-bar">
+              <div class="res-levels exec-tabs" role="tablist" aria-label="Executor views">
+                <button class="res-level on" type="button" role="tab" id="executor-tab-queue" aria-selected="true">Queue</button>
+                <button class="res-level" type="button" role="tab" id="executor-tab-activity" aria-selected="false">Activity</button>
+              </div>
+              <label class="exec-filter" id="executor-filter">
+                <span>Project</span>
+                <select id="executor-project-filter" class="exec-qchoice" data-stream-private></select>
+              </label>
+            </div>
+            <form class="exec-composer" id="executor-composer" autocomplete="off" data-stream-private>
+              <select id="executor-new-project" class="exec-qchoice" aria-label="Project for the new task"></select>
+              <div class="exec-composer-text">
+                <textarea id="executor-new-text" rows="1" maxlength="20000" aria-label="New task" placeholder="New task — type @ to pick the project, Enter to add"></textarea>
+                <div class="exec-suggest" id="executor-suggest" role="listbox" aria-label="Projects" hidden></div>
+              </div>
+              <button class="btn btn-primary" type="submit" id="executor-new-add">Add</button>
+              <div class="exec-composer-note" id="executor-new-note" role="status"></div>
+            </form>
+            <div class="exec-queue" id="executor-queue" data-stream-private></div>
+            <div class="exec-body" id="executor-activity" hidden data-stream-private>
+              <div class="exec-list" id="executor-list"></div>
+              <div class="exec-detail" id="executor-detail"></div>
+            </div>
+          </div>
+          <div class="agents-detail" id="agents-detail" hidden data-stream-private></div>
+        </div>
+      </div>
+    </section>
+
     <!-- workspace / cockpit -->
     <div class="ws-backdrop" id="ws-backdrop" hidden></div>
     <section class="workspace" id="workspace" hidden>
@@ -253,6 +326,7 @@
       <div class="ws-runbar" id="ws-runbar">
         <input id="ws-cmd" type="text" spellcheck="false" placeholder="run command…" data-stream-private />
         <button class="btn btn-primary" id="ws-run">▶ Run</button>
+        <button class="btn" id="ws-restart" title="Restart the running project command">↻ Restart</button>
         <button class="btn" id="ws-stop">■ Stop</button>
         <button class="btn" id="ws-clear" title="Clear the console">Clear</button>
         <button class="btn" id="ws-download" title="Download the whole log since this run started">⤓ Log</button>
@@ -277,6 +351,7 @@
         <button class="ws-tab" data-pane="notes">Notes</button>
         <button class="ws-tab" data-pane="changes">Changes</button>
         <button class="ws-tab" data-pane="capabilities">Capabilities</button>
+        <button class="ws-tab" data-pane="scripts" title="Every script this project has: what it does, when to use it, and start/stop">Scripts</button>
         <button class="ws-tab on" data-pane="logs">Logs</button>
         <button class="ws-tab" data-pane="web">Web</button>
         <button class="ws-tab" data-pane="ai">AI</button>
@@ -402,6 +477,8 @@
             </aside>
           </div>
         </div>
+        <!-- P18: the project's runbook — every script, what it is for, and its units started one process each -->
+        <div class="ws-scripts" id="ws-scripts" data-pane="scripts" hidden data-stream-private></div>
         <div class="ws-logs" data-pane="logs">
           <div id="ws-log-title" class="ws-log-title">Run logs</div>
           <div class="ws-console" id="ws-console" data-stream-private></div>
@@ -415,6 +492,11 @@
             <select id="ws-model" class="ws-model" aria-label="AI model"><option value="">Provider default</option></select>
             <select id="ws-effort" class="ws-effort" title="Reasoning effort for the selected model">
               <option value="">Default effort</option>
+            </select>
+            <select id="ws-mode" class="ws-mode" title="How the AI CLI runs this chat: its own configured default, Plan (read-only), or Auto">
+              <option value="default">CLI default</option>
+              <option value="plan">Plan</option>
+              <option value="auto">Auto</option>
             </select>
             <span class="ws-model-current" id="ws-model-current" title="Model used by the current AI session">model: default</span>
             <button class="ai-scope" id="ws-scope" hidden title="Which repositories this AI may edit"></button>
@@ -468,6 +550,11 @@
             <select id="web-model" class="ws-model" aria-label="AI model"><option value="">Provider default</option></select>
             <select id="web-effort" class="ws-effort" title="Reasoning effort for the selected model">
               <option value="">Default effort</option>
+            </select>
+            <select id="web-mode" class="ws-mode" title="How the AI CLI runs this chat: its own configured default, Plan (read-only), or Auto">
+              <option value="default">CLI default</option>
+              <option value="plan">Plan</option>
+              <option value="auto">Auto</option>
             </select>
             <span class="ws-model-current" id="web-model-current" title="Model used by the current AI session">model: default</span>
             <button class="ai-scope" id="web-scope" hidden title="Which repositories this AI may edit"></button>
@@ -599,18 +686,25 @@
             </details>
             <div class="dep-content">
               <section class="dep-section">
-                <div class="dep-section-head"><h3>Readiness</h3><span id="dep-readiness-count"></span></div>
-                <div class="activity-times" id="dep-readiness-times"></div>
-                <div class="dep-list" id="dep-readiness"></div>
+                <div class="dep-section-head"><h3>Deployment checklist</h3><span id="dep-readiness-count"></span></div>
+                <div class="dep-list" id="dep-guide-summary"></div>
+                <details class="dep-readiness-details">
+                  <summary>Detailed checks</summary>
+                  <div class="activity-times" id="dep-readiness-times"></div>
+                  <div class="dep-list" id="dep-readiness"></div>
+                </details>
               </section>
               <section class="dep-section" id="dep-watch-section" hidden>
                 <div class="dep-section-head"><h3>Werewolf monitoring</h3><button class="btn" id="dep-watch-refresh">Refresh monitoring</button></div>
                 <div class="activity-times" id="dep-watch-status"></div>
                 <div class="dep-list" id="dep-watch-incidents"></div>
               </section>
+              <section class="dep-section" id="dep-machines-section">
+                <div class="dep-section-head"><h3>Deployment machine</h3><span>chosen for this environment</span></div>
+                <div id="dep-host-machines"></div>
+              </section>
               <section class="dep-section" id="dep-connections-section">
-                <div class="dep-section-head"><h3>Deployment connections</h3><span>credentials stay on this machine</span></div>
-                <div class="dep-connections" id="dep-connections"></div>
+                <div class="dep-section-head"><h3>Provider connections</h3><span>GitHub, DNS and monitoring credentials</span></div>
                 <div id="dep-connection-setup" data-stream-private></div>
               </section>
               <section class="dep-section" id="dep-secrets-section" hidden>
@@ -695,7 +789,7 @@
         <button class="icon-btn" id="questions-close" aria-label="Close questions">✕</button>
       </div>
       <div class="modal-body questions-body">
-        <p class="questions-hint">Pending questions from your sessions. Open one when you’re ready; closing it leaves it here for later.</p>
+        <p class="questions-hint">What is waiting on you: the executor’s triage questions, and questions from your sessions. Open one when you’re ready; closing it leaves it here for later.</p>
         <p id="questions-error" class="questions-error" role="status" hidden></p>
         <div id="questions-list" data-stream-private></div>
       </div>
@@ -735,38 +829,15 @@
       <div class="switch-row procs-switch" id="executor-switch-row">
         <div class="switch-text">
           <strong>Executor</strong>
-          <span id="executor-switch-note">Runs Todo's @project triage on this machine.</span>
+          <span id="executor-switch-note">Triages and implements tasks for your projects on this machine.</span>
         </div>
         <div class="switch-actions">
-          <button class="btn" id="executor-activity-open" title="What the executor did with each note: the prompt, Claude's answer, the verdict">Activity</button>
+          <button class="btn" id="executor-activity-open" title="Open the executor on the Agents page: the queue, reviews, and what it did with each task">Activity</button>
           <div class="res-levels" id="executor-switch" role="radiogroup" aria-label="Executor"></div>
         </div>
       </div>
       <div class="res-strip" id="procs-resources" hidden data-stream-private></div>
       <div class="modal-body procs-body" id="procs-body" data-stream-private></div>
-    </section>
-
-    <!-- the executor's jobs: note → prompt → Claude's answer → verdict → hub -->
-    <section class="modal modal-wide executor-modal" id="executor-modal" role="dialog" aria-modal="true" aria-labelledby="executor-title" hidden>
-      <div class="modal-head">
-        <div>
-          <h2 id="executor-title">Executor</h2>
-          <p class="hint" id="executor-summary">Reading…</p>
-        </div>
-        <div class="res-levels exec-tabs" role="tablist" aria-label="Executor views">
-          <button class="res-level on" type="button" role="tab" id="executor-tab-activity" aria-selected="true">Activity</button>
-          <button class="res-level" type="button" role="tab" id="executor-tab-queue" aria-selected="false">Queue</button>
-        </div>
-        <div class="procs-head-actions">
-          <button class="btn" id="executor-back">Running</button>
-          <button class="icon-btn" id="executor-close" aria-label="Close">✕</button>
-        </div>
-      </div>
-      <div class="exec-body" id="executor-activity" data-stream-private>
-        <div class="exec-list" id="executor-list"></div>
-        <div class="exec-detail" id="executor-detail"></div>
-      </div>
-      <div class="exec-queue" id="executor-queue" hidden data-stream-private></div>
     </section>
 
     <!-- databases, containers, servers and folders, each with an access level -->
@@ -828,6 +899,35 @@
             <button class="btn" id="pairing-copy">Copy</button>
             <button class="btn" id="pairing-rotate" title="Invalidate the old token everywhere">Rotate</button>
           </div>
+        </div>
+
+        <!-- MCP: Codex, Claude Code or another MCP host reading psm (docs/roadmaps/psm-mcp-operations.md) -->
+        <div class="pairing mcp-clients" id="mcp-clients" hidden data-stream-private>
+          <div class="pairing-head">
+            <h3>AI clients (MCP)</h3>
+            <span class="pairing-origin" id="mcp-endpoint"></span>
+          </div>
+          <p class="pairing-copy">
+            Let Claude Code, Codex, another harness or a local model's host use psm: read your projects,
+            plans and agents, start the scripts you allowed, and send requests if you tick that for a client.
+            Each client gets its own credential that you can revoke here.
+          </p>
+          <div class="mcp-scope-row">
+            <label for="mcp-scope">A new client may see</label>
+            <select id="mcp-scope" aria-label="Projects this client may see">
+              <option value="all">All projects</option>
+              <option value="pick">Choose projects…</option>
+            </select>
+            <select id="mcp-projects" multiple size="6" hidden aria-label="Projects"></select>
+          </div>
+          <div class="mcp-connect" id="mcp-connect"></div>
+          <div class="mcp-list" id="mcp-list"></div>
+          <p class="pairing-copy mcp-manual-note">Or create a credential by hand and export it yourself:</p>
+          <form class="mcp-add" id="mcp-add">
+            <input id="mcp-name" placeholder="Client name, e.g. Codex on laptop" maxlength="60" required>
+            <button class="btn" type="submit">Create credential</button>
+          </form>
+          <div class="mcp-minted" id="mcp-minted" hidden></div>
         </div>
 
         <div class="links-list" id="links-list" data-stream-private></div>
@@ -1038,6 +1138,9 @@
     <script src="/machines.js"></script>
     <script src="/resources.js"></script>
     <script src="/executor.js"></script>
+    <script src="/agents.js"></script>
+    <script src="/models.js"></script>
+    <script src="/scripts.js"></script>
     <script src="/workspaces.js"></script>
     <script src="/monitoring.js"></script>
     <script src="/app.js"></script>

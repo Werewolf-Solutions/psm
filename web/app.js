@@ -259,7 +259,7 @@ function routeKey(project) {
 }
 
 const PANE_MEMORY_KEY = "psm.selected-panes.v1";
-const PROJECT_PANES = ["plan", "notes", "capabilities", "logs", "web", "ai", "session", "changes", "deploy", "monitoring"];
+const PROJECT_PANES = ["plan", "notes", "capabilities", "scripts", "logs", "web", "ai", "session", "changes", "deploy", "monitoring"];
 const SELECTED_PANES = (() => {
   try {
     const saved = JSON.parse(localStorage.getItem(PANE_MEMORY_KEY) || "{}");
@@ -330,7 +330,7 @@ function renderQuickSwitch() {
   nav.classList.toggle("has-items", show);
   if (!show) return;
   const home = el("button", "quick-pill", "Home");
-  home.classList.toggle("on", !WS?.name);
+  home.classList.toggle("on", !WS?.name && !AGENTS_PAGE);
   home.onclick = () => { location.hash = "#/"; };
   nav.append(home);
   for (const name of names) {
@@ -979,6 +979,8 @@ function emptyManagedDeploymentState() {
   };
 }
 
+/** True while the Executor page (#/executor) is the open page. */
+let AGENTS_PAGE = false;
 let WS = {
   name: null, kind: "project", id: null, es: null, port: null, pane: "logs", chatOnly: false, workingOn: false,
   engine: "claude", model: "", effort: "", actualModel: null, extraProjects: [], aiEs: null, aiBusy: false, pending: [], aiLimited: false, sessionState: null, question: null,
@@ -1128,6 +1130,7 @@ function setWsStatus(status) {
   badge.dataset.state = status;
   const running = status === "running";
   $("#ws-run").disabled = running;
+  $("#ws-restart").disabled = !running;
   $("#ws-stop").disabled = !running;
 }
 
@@ -1690,7 +1693,7 @@ async function createWorkroom(event) {
       const started = await agentApi(`/api/work-sessions/${encodeURIComponent(roomId)}/ai`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: objective, engine: data.workSession.engine, model: data.workSession.model, effort: data.workSession.effort }),
+        body: JSON.stringify({ message: objective, engine: data.workSession.engine, model: data.workSession.model, effort: data.workSession.effort, mode: aiMode() }),
       });
       if (!started.ok) toast((await started.json().catch(() => ({}))).error || "Workroom created, but its AI session could not start");
     } catch (error) {
@@ -1805,6 +1808,8 @@ function switchPane(pane) {
   if (pane === "plan") loadPlan();
   if (pane === "capabilities") loadCapabilities();
   if (pane === "notes") loadNotes();
+  if (pane === "scripts") PsmScripts.open(WS.name);
+  else PsmScripts.close();
   if (pane === "ai" && !WS.recapFetched) {
     WS.recapFetched = true;
     fetchRecap(); // refresh "where we left off" (regenerates only if stale)
@@ -2154,7 +2159,7 @@ function connectLogs(name, kind = "run") {
   if (WS.es) WS.es.close();
   WS.logKind = kind;
   const command = (projectByName(name)?.customCommands || []).find((entry) => `custom:${entry.id}` === kind);
-  $("#ws-log-title").textContent = kind === "run" ? "Run logs" : `${command?.name || "Custom command"} logs`;
+  $("#ws-log-title").textContent = kind === "run" ? "Run logs" : kind.startsWith("unit:") ? `${kind.slice(5)} logs` : `${command?.name || "Custom command"} logs`;
   const es = agentStream(`/api/projects/${encodeURIComponent(name)}/logs/stream?kind=${encodeURIComponent(kind)}`);
   WS.es = es;
   es.onopen = () => clearConsole(); // rebuild on (re)connect, don't duplicate
@@ -2192,6 +2197,7 @@ function closeWorkspace(fromRoute = false) {
   }
   stashDraft(); // keep the unsent text so it's there when this chat reopens
   saveDevNotes(); // un-applied preview notes come back with the project
+  PsmScripts.close();
   DEV = { on: false, picking: false, notes: [], proxyUrl: null, pagePath: "/", busy: false };
   clearTimeout(sessionRefreshTimer);
   if (WS.es) WS.es.close();
@@ -2223,6 +2229,25 @@ function closeWorkspace(fromRoute = false) {
 }
 
 function routeFromHash() {
+  // #/models, #/models/<view>?m=<model keys>&c=<categories>&s=<benchmarks>
+  const models = location.hash.match(/^#\/models(?:\/([a-z]+))?(?:\?(.*))?$/);
+  if (models) {
+    if (WS.name) closeWorkspace(true);
+    closeAgentsPage();
+    openModelsPage(models[1] || "models", new URLSearchParams(models[2] || ""));
+    return;
+  }
+  closeModelsPage();
+  // #/agents, #/agents/<agent id>, and the executor's own address #/executor,
+  // optionally ?project=prj_… for one project's queue.
+  const agents = location.hash.match(/^#\/(?:agents(?:\/([^/?]+))?|(executor))(?:\?(.*))?$/);
+  if (agents) {
+    if (WS.name) closeWorkspace(true);
+    const agent = agents[2] ? "executor" : agents[1] ? decodeURIComponent(agents[1]) : "executor";
+    openAgentsPage(agent, new URLSearchParams(agents[3] || "").get("project"));
+    return;
+  }
+  closeAgentsPage();
   const room = location.hash.match(/^#\/w\/([^/]+)(?:\/([^/]+))?$/);
   if (room) {
     openWorkroom(decodeURIComponent(room[1]), true, room[2] ? decodeURIComponent(room[2]) : null);
@@ -3886,14 +3911,117 @@ function syncPendingQuestions(sessions, questions) {
   renderQuestions();
 }
 
+/* Triage questions: Todo or PSM items whose verdict is `needs_decision`, from
+ * the hub (contract C2). They share the Questions button and count with
+ * session questions, because both are "something is waiting on you". */
+let TRIAGE_QUESTIONS = [];
+/** One answer or Go at a time per item, and what went wrong with the last one. */
+const TRIAGE_STATE = new Map();
+
+async function refreshTriageQuestions() {
+  if (document.hidden) return;
+  try {
+    const response = await agentApi("/api/executor/questions");
+    const data = response.ok ? await response.json() : { questions: [] };
+    TRIAGE_QUESTIONS = Array.isArray(data.questions) ? data.questions : [];
+  } catch {
+    return; // the agent being down has its own screen
+  }
+  renderQuestions();
+}
+
+function triageQuestionCard(question) {
+  const state = TRIAGE_STATE.get(question.intakeId) || {};
+  const row = el("article", "questions-item questions-item--triage");
+  const title = el("h3");
+  title.textContent = question.projectName || question.project || "psm";
+  const meta = el("p", "questions-meta");
+  meta.textContent = ["Executor triage", question.kind === "task" ? `Todo task${question.date ? ` · ${question.date}` : ""}` : question.kind === "note" ? "Todo note" : "written in psm", question.size ? `size ${question.size}` : null].filter(Boolean).join(" · ");
+  const item = el("p", "questions-preview");
+  item.textContent = compactText(question.text, 300);
+  const asks = el("ol", "questions-asks");
+  for (const ask of question.questions) {
+    const li = el("li");
+    li.textContent = ask;
+    asks.append(li);
+  }
+  row.append(title, meta, item, asks);
+  if (question.rationale) {
+    const why = el("p", "questions-meta");
+    why.textContent = compactText(question.rationale, 400);
+    row.append(why);
+  }
+
+  const act = async (which, run) => {
+    TRIAGE_STATE.set(question.intakeId, { busy: which });
+    questionsListSignature = null;
+    renderQuestions();
+    try {
+      const response = await run();
+      if (!response.ok) throw new Error((await response.json().catch(() => null))?.error || `Failed (${response.status})`);
+      TRIAGE_STATE.delete(question.intakeId);
+      await refreshTriageQuestions();
+      void refreshExecutorCount();
+    } catch (error) {
+      TRIAGE_STATE.set(question.intakeId, { error: error.message });
+    }
+    questionsListSignature = null;
+    renderQuestions();
+  };
+  const json = { "Content-Type": "application/json" };
+  const actions = el("div", "questions-actions");
+  if (question.kind === "psm") {
+    const answer = el("textarea", "questions-answer");
+    answer.rows = 2;
+    answer.maxLength = 2000;
+    answer.placeholder = "Your answer. It is added to the task, and the executor triages it again.";
+    answer.value = state.draft || "";
+    answer.oninput = () => TRIAGE_STATE.set(question.intakeId, { ...TRIAGE_STATE.get(question.intakeId), draft: answer.value });
+    const send = el("button", "btn btn-primary");
+    send.textContent = state.busy === "answer" ? "Sending…" : "Answer";
+    send.disabled = Boolean(state.busy);
+    send.onclick = () => {
+      const text = answer.value.trim();
+      if (!text) return answer.focus();
+      void act("answer", () => agentApi(`/api/executor/intake/${encodeURIComponent(question.intakeId)}`, { method: "PATCH", headers: json, body: JSON.stringify({ text: `${question.text}\n\nAnswer: ${text}` }) }));
+    };
+    row.append(answer);
+    actions.append(send);
+  } else if (question.todoLink) {
+    const link = el("a", "btn btn-primary");
+    link.href = question.todoLink;
+    link.target = "_blank";
+    link.rel = "noreferrer";
+    link.textContent = "Answer in Todo ↗";
+    link.title = "The item lives in Todo; answering there sends it back to triage.";
+    actions.append(link);
+  }
+  const go = el("button", "btn");
+  go.textContent = state.busy === "go" ? "Queuing…" : "Go as is";
+  go.title = "Decide yes as it stands: an implement job on a local branch, for you to review in the Executor.";
+  go.disabled = Boolean(state.busy);
+  go.onclick = () => void act("go", () => agentApi("/api/executor/jobs", { method: "POST", headers: json, body: JSON.stringify({ intakeId: question.intakeId, selection: { mode: "auto" } }) }));
+  actions.append(go);
+  row.append(actions);
+  if (state.error) {
+    const error = el("p", "questions-error");
+    error.textContent = state.error;
+    row.append(error);
+  }
+  return row;
+}
+
 function renderQuestions() {
   const entries = [...PENDING_QUESTIONS.values()].sort((a, b) => (a.request.askedAt || 0) - (b.request.askedAt || 0));
-  const count = entries.length;
+  const triage = TRIAGE_QUESTIONS;
+  const count = entries.length + triage.length;
   $("#questions-count").textContent = String(count);
   $("#questions-count").hidden = count === 0;
   $("#questions-open").setAttribute("aria-label", `Questions: ${count} pending`);
   if ($("#questions-modal").hidden) return;
-  const signature = JSON.stringify(entries);
+  // An answer being typed is not redrawn away under the cursor.
+  if (document.activeElement?.classList?.contains("questions-answer")) return;
+  const signature = JSON.stringify([entries, triage, [...TRIAGE_STATE].map(([id, state]) => [id, state.busy, state.error])]);
   if (signature === questionsListSignature) return;
   questionsListSignature = signature;
   const list = $("#questions-list");
@@ -3903,6 +4031,17 @@ function renderQuestions() {
     empty.textContent = "No pending questions.";
     list.append(empty);
     return;
+  }
+  if (triage.length) {
+    const heading = el("h3", "questions-section");
+    heading.textContent = `From executor triage · ${triage.length}`;
+    list.append(heading);
+    for (const question of triage) list.append(triageQuestionCard(question));
+    if (entries.length) {
+      const sessions = el("h3", "questions-section");
+      sessions.textContent = `From your sessions · ${entries.length}`;
+      list.append(sessions);
+    }
   }
   for (const entry of entries) {
     const row = el("article", "questions-item");
@@ -3924,6 +4063,7 @@ function openQuestions() {
   openModal("#questions-modal");
   renderQuestions();
   fetchSessions();
+  void refreshTriageQuestions();
 }
 
 function collectQuestionAnswers() {
@@ -3975,7 +4115,7 @@ async function answerQuestion(event) {
       body: JSON.stringify({
         requestId: active.request.id,
         answers,
-        ...(planner ? { role: active.role } : {}),
+        ...(planner ? { role: active.role } : { mode: aiMode() }),
       }),
     });
     const data = await r.json().catch(() => ({}));
@@ -4910,12 +5050,36 @@ async function fetchLimit() {
   } catch {}
 }
 
+/*
+ * How the AI CLI runs a chat turn: "default" passes no permission flag (the
+ * CLI's own settings apply, like running it in a terminal), "plan" is
+ * read-only, "auto" lets it act. Remembered per browser; both bars mirror it.
+ */
+const AI_MODE_KEY = "psm.aiMode";
+const AI_MODES = ["default", "plan", "auto"];
+function aiMode() {
+  try {
+    const saved = localStorage.getItem(AI_MODE_KEY);
+    if (AI_MODES.includes(saved)) return saved;
+  } catch { /* storage unavailable: fall back to the CLI default */ }
+  return "default";
+}
+function setAiMode(mode) {
+  const value = AI_MODES.includes(mode) ? mode : "default";
+  try { localStorage.setItem(AI_MODE_KEY, value); } catch { /* still applies to this page */ }
+  for (const node of document.querySelectorAll(".ws-mode")) node.value = value;
+}
+for (const node of document.querySelectorAll(".ws-mode")) {
+  node.value = aiMode();
+  node.addEventListener("change", () => setAiMode(node.value));
+}
+
 /** One place that hands a message to the project's AI with the current selection. */
 async function postAiMessage(name, message) {
   const r = await agentApi(`${aiBase(name)}/ai`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort }),
+    body: JSON.stringify({ message, engine: WS.engine, model: WS.model, effort: WS.effort, mode: aiMode() }),
   });
   return { ok: r.ok, body: await r.json().catch(() => ({})) };
 }
@@ -5143,6 +5307,18 @@ function renderDeploymentReadiness() {
   const outstanding = rows.filter((item) => item.status !== "ready" && !(item.code === "version-not-increased" && deploymentUpToDate()));
   $("#dep-readiness-count").textContent = readiness ? `${outstanding.length} remaining` : "Not checked";
   renderActivityTimes($("#dep-readiness-times"), [["Checked", readiness?.checkedAt]]);
+  const summary = $("#dep-guide-summary");
+  if (summary) {
+    summary.replaceChildren();
+    const guide = readiness?.guide || [];
+    summary.append(depText("div", "dep-row-detail", state.loading ? "Checking the deployment steps…" : guide.length
+      ? `${guide.filter((step) => step.status === "ready").length} of ${guide.length} steps clear · open the checklist for details`
+      : "Open the checklist to check this environment."));
+    const open = depText("button", "dep-mini-btn", "Open checklist");
+    open.type = "button";
+    open.onclick = () => openDeploymentGuide();
+    summary.append(open);
+  }
   for (const [index, item] of rows.entries()) {
     // App-managed pins, target files and credentials are reviewed as one complete bundle.
     if (item.status !== "ready" && item.action === "review-controller") {
@@ -5254,6 +5430,13 @@ function renderDeploymentReadiness() {
       $("#dep-readiness").children[index]?.append(build);
     }
     if (item.status === "ready" || !["connect", "review-source", "review-capabilities"].includes(item.action)) continue;
+    if (item.action === "connect" && item.slot === "host") {
+      const machine = depText("button", "dep-mini-btn", `Choose ${state.environment} machine`);
+      machine.type = "button";
+      machine.onclick = () => openDeploymentGuide("machine");
+      $("#dep-readiness").children[index]?.append(machine);
+      continue;
+    }
     if (item.code === "source-dirty") {
       const prepare = depText("button", "dep-mini-btn", "Commit and prepare build");
       prepare.type = "button";
@@ -5269,16 +5452,6 @@ function renderDeploymentReadiness() {
       ? $("#dep-connections-section").scrollIntoView({ behavior: "smooth", block: "start" })
       : switchPane(item.action === "review-capabilities" ? "capabilities" : "changes");
     $("#dep-readiness").children[index]?.append(button);
-    // The server a deployment runs on can be set up from here, scoped to this project.
-    if (item.action === "connect" && item.slot === "host") {
-      const machine = depText("button", "dep-mini-btn", "Set up on a machine");
-      machine.type = "button";
-      machine.onclick = () => openMachines({
-        project: currentProject(), environment: state.environment,
-        onBound: () => { void discoverDeploymentPlan(); },
-      });
-      $("#dep-readiness").children[index]?.append(machine);
-    }
   }
   // Highlight the first step the operator can act on right here.
   const next = [...$("#dep-readiness").children].find((row) => row.dataset.state !== "ready" && row.querySelector(".dep-mini-btn"));
@@ -5359,6 +5532,157 @@ function renderDeploymentReadiness() {
   }
 }
 
+function confirmGuideMachineAction(message, title) {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "dep-guide-dialog dep-guide-confirm";
+    const cancel = depText("button", "btn", "Cancel");
+    const accept = depText("button", "btn btn-primary", "Confirm");
+    cancel.type = accept.type = "button";
+    cancel.onclick = () => dialog.close();
+    accept.onclick = () => { dialog.returnValue = "confirm"; dialog.close(); };
+    dialog.append(depText("h2", "", title), depText("p", "", message), cancel, accept);
+    dialog.addEventListener("close", () => { resolve(dialog.returnValue === "confirm"); dialog.remove(); }, { once: true });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
+async function renderGuideMachinePicker(panel, projectKey, environmentId) {
+  panel.replaceChildren(depText("p", "hint", `Checking machines for ${environmentId}…`));
+  try {
+    const response = await agentApi(`/api/machines?workspace=${encodeURIComponent($("#workspace-select")?.value || "personal")}`);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!panel.isConnected || (currentProject()?.id || WS.name) !== projectKey || WS.managedDeploy.environment !== environmentId) return;
+    const environment = deploymentEnvironment();
+    const targetId = environment?.target?.targetId || environment?.units?.[0]?.target?.targetId;
+    const bound = environment?.connections?.find((entry) => entry.slot === "host")?.connectionId;
+    panel.replaceChildren(depText("p", "hint", `Choose a verified machine for ${environmentId}. Access is separate for each environment.`));
+    for (const machine of body.machines || []) {
+      const candidate = window.PsmMachines.deployCandidate(machine, { projectId: projectKey, environmentId, targetId, hostname: environment?.target?.hostname || environment?.hostname });
+      const row = depText("div", "dep-guide-machine", "");
+      row.append(depText("strong", "", `${machine.name} · ${machine.host}`), depText("p", "hint", candidate.reason));
+      const connected = !!candidate.access && bound === candidate.access.connectionId;
+      const action = connected ? depText("span", "machine-bound-state", "✓ Connected") : depText("button", candidate.access ? "btn btn-primary" : "btn", candidate.access
+        ? `Use for ${environmentId}` : `Set up ${environmentId} access`);
+      if (!connected) action.type = "button";
+      if (!connected) action.onclick = async () => {
+        if (!candidate.access) {
+          await window.PsmMachines.open({ api: agentApi, root: panel, workspace: $("#workspace-select")?.value || "personal", projects: () => STATE.projects, confirm: confirmGuideMachineAction,
+            project: currentProject(), environment: environmentId, risk: environment?.risk, machineId: machine.id, toast,
+            onDone: () => void renderGuideMachinePicker(panel, projectKey, environmentId),
+            onBound: () => { void loadManagedDeploy({ quiet: true }).then(() => checkDeploymentReadiness()); },
+          });
+          return;
+        }
+        action.disabled = true;
+        action.textContent = "Connecting…";
+        try {
+          const response = await agentApi(`${deploymentBase(projectKey)}/${encodeURIComponent(environmentId)}/connection-bindings/host`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connectionId: candidate.access.connectionId }) });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+          invalidateDeploymentReadiness();
+          await loadManagedDeploy({ quiet: true });
+          await checkDeploymentReadiness();
+        } catch (error) { action.disabled = false; action.textContent = "Try again"; row.append(depText("p", "machine-error", error.message)); }
+      };
+      row.append(action);
+      panel.append(row);
+    }
+    const add = depText("button", "btn", "Add machine");
+    add.type = "button";
+    add.onclick = () => window.PsmMachines.open({ api: agentApi, root: panel, workspace: $("#workspace-select")?.value || "personal", projects: () => STATE.projects, confirm: confirmGuideMachineAction,
+      project: currentProject(), environment: environmentId, risk: environment?.risk, toast,
+      onDone: () => void renderGuideMachinePicker(panel, projectKey, environmentId),
+      onBound: () => { void loadManagedDeploy({ quiet: true }).then(() => checkDeploymentReadiness()); },
+    });
+    panel.append(add);
+  } catch (error) { if (panel.isConnected) panel.replaceChildren(depText("p", "machine-error", `Machines unavailable: ${error.message}`)); }
+}
+
+function openDeploymentGuide(initialStep = null) {
+  const projectKey = currentProject()?.id || WS.name;
+  const environmentId = WS.managedDeploy.environment;
+  const dialog = document.createElement("dialog");
+  dialog.className = "dep-guide-dialog";
+  const title = depText("h2", "", `Deployment checklist · ${environmentId || "setup"}`);
+  const status = depText("p", "hint", "Checking readiness…");
+  const list = depText("ol", "dep-guide-list", "");
+  const close = depText("button", "btn", "Close");
+  close.type = "button";
+  close.onclick = () => dialog.close();
+  dialog.append(title, status, list, close);
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
+  let lastRender = "";
+  const refresh = () => {
+    if (!dialog.open) return;
+    const same = (currentProject()?.id || WS.name) === projectKey && WS.managedDeploy.environment === environmentId;
+    if (!same) { dialog.close(); return; }
+    const state = WS.managedDeploy;
+    const guide = state.readinessEnvironment === environmentId ? state.readiness?.guide : null;
+    const expired = !!state.readiness && Number(state.readiness.expiresAt) <= Date.now();
+    const signature = JSON.stringify([state.loading, state.error, state.readiness?.checkedAt, guide, expired]);
+    if (signature === lastRender) return;
+    lastRender = signature;
+    status.textContent = state.loading ? "Checking readiness…" : state.error || (expired ? "Readiness expired. Check again before approval." : guide ? "Select a step to open its control." : "Check readiness to update the steps.");
+    list.replaceChildren();
+    if (!environmentId) {
+      const row = depText("li", "dep-guide-step", "");
+      row.dataset.state = "blocked";
+      row.append(depText("strong", "", "○ Project setup"), depText("p", "hint", "Create a deployment manifest and its build files for the first environment."));
+      list.append(row);
+      return;
+    }
+    for (const step of guide || []) {
+      const row = depText("li", "dep-guide-step", "");
+      const stepStatus = expired && step.id === "approval" ? "blocked" : step.status;
+      row.dataset.state = stepStatus;
+      row.append(depText("strong", "", `${stepStatus === "ready" ? "✓" : "○"} ${step.title}`), depText("p", "hint", expired && step.id === "approval" ? "Check readiness again before reviewing the plan." : step.id === "machine" && stepStatus !== "ready" ? `For ${environmentId}: ${step.detail}` : step.detail));
+      if (stepStatus !== "ready" || step.id === "machine") {
+        const action = depText("button", "dep-mini-btn", step.target === "machine" ? "View machines" : step.target === "connections" ? "Set up providers" : "Open");
+        action.type = "button";
+        action.onclick = () => {
+          if (expired && step.id === "approval") { void checkDeploymentReadiness(); return; }
+          if (step.target === "machine") {
+            action.hidden = true;
+            const panel = depText("div", "dep-guide-inline machines-body", "");
+            row.append(panel);
+            void renderGuideMachinePicker(panel, projectKey, environmentId);
+          } else if (step.target === "connections") {
+            action.hidden = true;
+            const panel = depText("div", "dep-guide-inline", "");
+            row.append(panel);
+            const environment = deploymentEnvironment();
+            window.PsmDeploymentConnections.render(panel, { projectKey, environment: { ...environment, connections: (environment?.connections || []).filter((entry) => entry.slot !== "host") }, api: agentApi,
+              isCurrent: () => dialog.open && (currentProject()?.id || WS.name) === projectKey && WS.managedDeploy.environment === environmentId,
+              onChanged: async () => { invalidateDeploymentReadiness(); await loadManagedDeploy({ quiet: true }); await checkDeploymentReadiness(); },
+            });
+          } else if (step.target === "source") { dialog.close(); switchPane("changes"); }
+          else {
+            dialog.close();
+            const target = $({ setup: "#ws-deploy-setup", connections: "#dep-connections-section", secrets: "#dep-secrets", monitoring: "#dep-watch-section", plan: "#dep-plan-section" }[step.target]);
+            target?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        };
+        row.append(action);
+        if (initialStep === step.id) { initialStep = null; queueMicrotask(() => { if (dialog.open && action.isConnected) action.click(); }); }
+      }
+      list.append(row);
+    }
+    if ((!guide || expired) && !state.loading) {
+      const check = depText("button", "btn btn-primary", "Check readiness");
+      check.type = "button";
+      check.onclick = () => void checkDeploymentReadiness();
+      list.append(check);
+    }
+  };
+  refresh();
+  const timer = setInterval(() => { if (!dialog.open) clearInterval(timer); else refresh(); }, 400);
+}
+
 /** A deploy-page element, only while it is on screen. */
 function shownDeployControl(selector) {
   const node = $(selector);
@@ -5435,7 +5759,8 @@ function deploymentTodoItems() {
       items.push({ title: `Set up the release controller: press “Review controller setup / update”, or choose a ${slot} connection that has one`, detail: blocker.message, target: () => deploymentControllerSetupTarget(slot) });
     } else if (blocker.code === "connection-missing") {
       const slot = String(blocker.id || "").replace(/^connection:/, "");
-      items.push({ title: `Choose a ${slot} connection`, detail: blocker.message, target: () => deploymentConnectionRow(slot)?.querySelector(".dep-connection-select") || deploymentConnectionRow(slot), fallback: () => $("#dep-connections-section") });
+      if (slot === "host") items.push({ title: `Choose a machine for ${environment.id}`, detail: blocker.message, action: () => openDeploymentGuide("machine"), actionLabel: "Choose machine" });
+      else items.push({ title: `Choose a ${slot} provider connection`, detail: blocker.message, target: () => deploymentConnectionRow(slot)?.querySelector(".dep-connection-select") || deploymentConnectionRow(slot), fallback: () => $("#dep-connections-section") });
     } else if (blocker.code === "source-dirty") {
       if (outstanding.some(({ item }) => item.code === "source-dirty")) continue;
       items.push({ title: "Commit and prepare build", detail: blocker.message, action: () => checkDeploymentReadiness(true), actionLabel: "Commit and prepare build" });
@@ -5550,7 +5875,7 @@ function loadDeploymentConnectionSetup() {
   const environment = deploymentEnvironment();
   if (!environment) return;
   window.PsmDeploymentConnections.render($("#dep-connection-setup"), {
-    projectKey: scope.projectKey, environment, api: agentApi,
+    projectKey: scope.projectKey, environment: { ...environment, connections: (environment.connections || []).filter((entry) => entry.slot !== "host") }, api: agentApi,
     isCurrent: () => deploymentRequestIsCurrent(scope),
     onIssue: (issue) => {
       if (!deploymentRequestIsCurrent(scope)) return;
@@ -5755,18 +6080,69 @@ async function refreshDeploymentWatch() {
 }
 
 function renderManagedConnections(environment) {
-  depRows(
-    $("#dep-connections"),
-    (environment.connections || []).map((connection) => ({
-      state: connection.ready ? "ready" : "blocked",
-      title: connection.slot,
-      detail: connection.ready
-        ? `${connection.profile || "bound"}${connection.principal ? ` · ${connection.principal}` : ""}`
-        : connection.detail || "No local profile is bound",
-      kind: connection.kind,
-    })),
-    "This environment declares no connections.",
-  );
+  void renderDeployHostMachines(environment);
+}
+
+async function renderDeployHostMachines(environment) {
+  const target = $("#dep-host-machines");
+  if (!target) return;
+  const scope = deploymentRequestScope({ environment: true });
+  const state = scope.state;
+  if (!scope.environmentId || !(environment.connections || []).some((entry) => entry.slot === "host")) { target.replaceChildren(); return; }
+  const cacheKey = `${scope.projectKey}:${scope.environmentId}:${$("#workspace-select")?.value || "personal"}`;
+  if (state.hostMachineCache?.key !== cacheKey || Date.now() - state.hostMachineCache.at > 10_000) {
+    if (state.hostMachineLoading === cacheKey) return;
+    state.hostMachineLoading = cacheKey;
+    target.replaceChildren(depText("p", "hint", "Checking registered machines…"));
+    try {
+      const response = await agentApi(`/api/machines?workspace=${encodeURIComponent($("#workspace-select")?.value || "personal")}`);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      if (!deploymentRequestIsCurrent(scope)) return;
+      state.hostMachineCache = { key: cacheKey, at: Date.now(), machines: body.machines || [] };
+    } catch (error) {
+      if (deploymentRequestIsCurrent(scope)) target.replaceChildren(depText("p", "hint", `Machines unavailable: ${error.message}`));
+      return;
+    } finally { if (state.hostMachineLoading === cacheKey) state.hostMachineLoading = null; }
+  }
+  if (!deploymentRequestIsCurrent(scope)) return;
+  target.replaceChildren(depText("p", "dep-machine-scope", `${environment.id} · ${environment.hostname || "hostname pending"}`));
+  const machines = state.hostMachineCache.machines;
+  const targetId = environment.target?.targetId || environment.units?.[0]?.target?.targetId;
+  const hostConnection = environment.connections.find((entry) => entry.slot === "host");
+  if (!machines.length) target.append(depText("p", "hint", "No machines registered in this workspace."));
+  for (const machine of machines) {
+    const candidate = window.PsmMachines.deployCandidate(machine, { projectId: scope.projectKey, environmentId: environment.id, targetId, hostname: environment.target?.hostname || environment.hostname });
+    const access = candidate.access;
+    const usable = !!access;
+    const row = depText("div", "dep-row", "");
+    row.dataset.state = usable ? "ready" : "blocked";
+    row.append(depText("strong", "dep-row-title", `${machine.name} · ${machine.host}`), depText("span", "dep-row-detail", usable
+      ? `Verified helper and deploy account · ${access.plan.target.targetId}${hostConnection?.connectionId === access.connectionId ? " · connected" : ""}`
+      : candidate.reason));
+    const connected = usable && hostConnection?.connectionId === access.connectionId;
+    const button = connected ? depText("span", "machine-bound-state", "✓ Connected") : depText("button", "dep-mini-btn", usable ? `Use for ${environment.id}` : "Set up access");
+    if (!connected) button.type = "button";
+    if (!connected) button.onclick = usable ? async () => {
+      button.disabled = true;
+      try {
+        const response = await agentApi(`${deploymentBase(scope.projectKey)}/${encodeURIComponent(scope.environmentId)}/connection-bindings/host`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ connectionId: access.connectionId }) });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+        if (!deploymentRequestIsCurrent(scope)) return;
+        state.hostMachineCache = null;
+        invalidateDeploymentReadiness(state);
+        await loadManagedDeploy({ quiet: true });
+        void checkDeploymentReadiness();
+      } catch (error) { button.disabled = false; toast(error.message); }
+    } : () => openDeploymentGuide("machine");
+    row.append(button);
+    target.append(row);
+  }
+  const add = depText("button", "dep-mini-btn", "Add machine");
+  add.type = "button";
+  add.onclick = () => openDeploymentGuide("machine");
+  target.append(add);
 }
 
 /**
@@ -6217,11 +6593,10 @@ function renderManagedDeploy() {
   // One environment is not a choice, and a single chip reads like a control that
   // is broken rather than one the manifest never asked for.
   if (declared.length === 1) {
-    envs.append(depText(
-      "span",
-      "dep-env-note",
-      `Only ${declared[0].id} is declared. Staging is another environment in .psm/deployments.json, not a switch here.`,
-    ));
+    const add = depText("button", "dep-env", "＋ Add environment");
+    add.type = "button";
+    add.onclick = () => openAddDeploymentEnvironment(declared[0]);
+    envs.append(add);
   }
   renderDeploymentArtifacts(environment);
   renderManagedSummary(environment);
@@ -6234,6 +6609,46 @@ function renderManagedDeploy() {
   $("#dep-prepare").disabled = WS.managedDeploy.loading || !!WS.managedDeploy.preparation?.active || (!environment.canPrepare && !environment.source?.inputsDirty);
   renderDeploymentPreparation();
   renderDeploymentReadiness();
+}
+
+function openAddDeploymentEnvironment(existing) {
+  const environment = existing.id === "staging" ? "production" : "staging";
+  const dialog = document.createElement("dialog");
+  dialog.className = "dep-guide-dialog";
+  const form = document.createElement("form");
+  const hostname = document.createElement("input");
+  hostname.required = true;
+  hostname.placeholder = `${environment}.example.com`;
+  const zone = document.createElement("input");
+  zone.required = true;
+  zone.placeholder = "example.com";
+  const field = (label, control) => { const wrap = document.createElement("label"); wrap.append(depText("span", "", label), control); return wrap; };
+  const status = depText("p", "hint", "The new environment gets its own hostname, target, connections, credentials and release policy. Review the generated manifest before committing it.");
+  const submit = depText("button", "btn btn-primary", `Create ${environment} environment`);
+  submit.type = "submit";
+  const cancel = depText("button", "btn", "Cancel");
+  cancel.type = "button";
+  cancel.onclick = () => dialog.close();
+  form.append(depText("h2", "", `Add ${environment} environment`), field("Hostname", hostname), field("DNS zone", zone), status, submit, cancel);
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    submit.disabled = true;
+    try {
+      const scope = deploymentRequestScope();
+      const base = deploymentBase(scope.projectKey).slice(0, -"/deployments".length);
+      const response = await agentApi(`${base}/deployment-environments`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ environment, hostname: hostname.value, zone: zone.value }) });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      dialog.close();
+      WS.managedDeploy.environment = environment;
+      invalidateDeploymentReadiness();
+      await loadManagedDeploy();
+    } catch (error) { status.textContent = error.message; submit.disabled = false; }
+  };
+  dialog.append(form);
+  dialog.addEventListener("close", () => dialog.remove());
+  document.body.append(dialog);
+  dialog.showModal();
 }
 
 async function loadManagedDeploy({ quiet = false } = {}) {
@@ -6375,6 +6790,10 @@ async function renderDeploymentSetup(scope) {
     return;
   }
   if (!deploymentRequestIsCurrent(scope)) return;
+  const checklist = depText("button", "btn", "Deployment checklist");
+  checklist.type = "button";
+  checklist.onclick = openDeploymentGuide;
+  body.append(checklist);
   subtitle.textContent = setup.recipe === "node-service-ssh-nginx@1"
     ? "PSM can build this client and its Express server on GitHub Actions, run the server as a supervised service behind nginx, and verify and roll back every release."
     : setup.recipe
@@ -7259,6 +7678,34 @@ async function wsStop() {
   pollProcs();
 }
 
+async function wsRestart() {
+  if (!WS.name) return;
+  const name = WS.name;
+  $("#ws-restart").disabled = true;
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(name)}/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "run" }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      toast(body.error || "Restart failed");
+    } else if (WS.name === name) {
+      connectLogs(name);
+      setWsStatus("running");
+    }
+  } catch (error) {
+    toast(error.message || "Restart failed");
+  } finally {
+    if (WS.name === name) {
+      const state = await agentApi(`/api/projects/${encodeURIComponent(name)}/proc`).then((r) => r.json()).catch(() => null);
+      if (state) setWsStatus(state.status);
+    }
+    pollProcs();
+  }
+}
+
 function customKind(entry) { return `custom:${entry.id}`; }
 
 function customButton(label, action, disabled = false) {
@@ -7287,6 +7734,7 @@ function renderCustomCommands() {
     const actions = el("span", "ws-custom-actions");
     actions.append(
       customButton("▶ Run", () => runCustomCommand(entry), status === "running"),
+      customButton("↻ Restart", () => restartCustomCommand(entry), status !== "running"),
       customButton("■ Stop", () => stopCustomCommand(entry), status !== "running"),
       customButton("Logs", () => { connectLogs(WS.name, customKind(entry)); switchPane("logs"); }),
       customButton("Edit", () => openCustomCommandForm(entry), status === "running"),
@@ -7374,6 +7822,28 @@ async function stopCustomCommand(entry) {
   }
 }
 
+async function restartCustomCommand(entry) {
+  const name = WS.name;
+  try {
+    const response = await agentApi(`/api/projects/${encodeURIComponent(name)}/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: customKind(entry) }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      toast(body.error || "Command could not restart");
+    } else if (WS.name === name) {
+      connectLogs(name, customKind(entry));
+      switchPane("logs");
+    }
+  } catch (error) {
+    toast(error.message || "Command could not restart");
+  } finally {
+    pollProcs();
+  }
+}
+
 async function removeCustomCommand(entry) {
   const project = projectByName(WS.name);
   if (await saveCustomCommands((project?.customCommands || []).filter((saved) => saved.id !== entry.id))) {
@@ -7400,6 +7870,7 @@ $("#ws-working").onclick = toggleWorking;
 $("#ws-close").onclick = () => closeWorkspace();
 $("#ws-backdrop").onclick = () => closeWorkspace();
 $("#ws-run").onclick = wsRun;
+$("#ws-restart").onclick = wsRestart;
 $("#ws-stop").onclick = wsStop;
 $("#ws-custom-add").onclick = () => openCustomCommandForm();
 $("#ws-custom-cancel").onclick = () => { $("#ws-custom-form").hidden = true; };
@@ -7590,9 +8061,8 @@ const deploymentControlsSizer = typeof ResizeObserver === "function"
   }) : null;
 deploymentControlsSizer?.observe(document.querySelector(".dep-controls"));
 $("#dep-discover").onclick = async () => {
+  openDeploymentGuide();
   await checkDeploymentReadiness();
-  const section = $(WS.managedDeploy.readiness?.ready ? "#dep-plan-section" : "#dep-readiness");
-  if (section && !section.hidden) section.scrollIntoView({ behavior: "smooth", block: "start" });
 };
 $("#dep-make-ready").onclick = () => checkDeploymentReadiness(true);
 $("#dep-artifact").onchange = (event) => {
@@ -7801,8 +8271,6 @@ function closeModals() {
   $("#links-modal").hidden = true;
   $("#machines-modal").hidden = true;
   $("#resources-modal").hidden = true;
-  $("#executor-modal").hidden = true;
-  PsmExecutor.close();
   $("#questions-modal").hidden = true;
   $("#new-modal").hidden = true;
   $("#rules-modal").hidden = true;
@@ -8281,7 +8749,8 @@ async function openLinks() {
   openModal("#links-modal");
   setLinkError("");
   $("#link-browser").hidden = true;
-  await loadLinks();
+  $("#mcp-minted").hidden = true;
+  await Promise.all([loadLinks(), loadMcpClients()]);
 }
 
 /* ---- switches: executor and pairing, flipped here, remembered by psm ---- */
@@ -8332,14 +8801,14 @@ async function flipSwitch(change) {
 
 function executorNote(executor) {
   const status = executor.status || {};
-  if (!executor.on) return "Off — Todo notes tagged @project wait in the hub until an executor picks them up.";
+  if (!executor.on) return "Off — tasks wait in the hub until an executor picks them up.";
   if (status.paused) return "On, but paused by the kill switch (PSM_EXECUTOR_PAUSED or .psm-executor.json).";
   if (status.state === "hub-error") {
     return /sign in/i.test(status.lastError || "") ? "On — waiting for you to sign in with Werewolf." : `On — the hub is not answering: ${status.lastError || "unknown error"}. Retrying.`;
   }
   const last = status.lastClaimAt ? ` · last triage ${fmtAge(Math.round((Date.now() - status.lastClaimAt) / 1000))} ago` : "";
   const running = status.running?.length ? ` · ${status.running.length} running` : "";
-  if (status.state === "connected") return `On — connected, waiting for tagged notes${running}${last}.`;
+  if (status.state === "connected") return `On — connected, waiting for tasks${running}${last}.`;
   return `On — ${status.state || "starting"}…`;
 }
 
@@ -8350,14 +8819,17 @@ async function renderExecutorSwitch() {
   if (!data) return;
   const { executor } = data;
   $("#executor-switch-note").textContent = executorNote(executor);
-  renderSwitch($("#executor-switch"), executor.on, {
-    disabled: executor.forcedByEnv,
-    title: executor.forcedByEnv ? "On because psm was started with PSM_EXECUTOR=1" : "",
-    onChange: async (on) => {
-      await flipSwitch({ executor: on });
-      renderExecutorSwitch();
-    },
-  });
+  // The same switch in two places: the Running dialog and the Executor page.
+  for (const root of [$("#executor-switch"), $("#executor-page-switch")]) {
+    renderSwitch(root, executor.on, {
+      disabled: executor.forcedByEnv,
+      title: executor.forcedByEnv ? "On because psm was started with PSM_EXECUTOR=1" : "",
+      onChange: async (on) => {
+        await flipSwitch({ executor: on });
+        renderExecutorSwitch();
+      },
+    });
+  }
 }
 
 async function renderPairingSwitch() {
@@ -8407,6 +8879,133 @@ async function loadPairing() {
 function renderPairing() {
   $("#pairing-token").textContent = PAIRING.shown ? PAIRING.token : "•".repeat(24);
   $("#pairing-reveal").textContent = PAIRING.shown ? "Hide" : "Reveal";
+}
+
+/* ---- MCP clients: AI hosts that read psm through its MCP endpoint ---- */
+async function loadMcpClients() {
+  const box = $("#mcp-clients");
+  try {
+    const r = await agentApi("/api/mcp/clients");
+    if (!r.ok) return (box.hidden = true); // a paired page cannot manage these
+    const data = await r.json();
+    box.hidden = false;
+    $("#mcp-endpoint").textContent = data.endpoint;
+    renderMcpClients(data.clients || []);
+    loadMcpConnect();
+    const picker = $("#mcp-projects");
+    picker.replaceChildren(...STATE.projects.filter((project) => project.id).map((project) => {
+      const option = el("option");
+      option.value = project.id;
+      option.textContent = project.name;
+      return option;
+    }));
+  } catch {
+    box.hidden = true;
+  }
+}
+
+/* Connect: one click mints a client and adds psm to that host's MCP config. */
+async function loadMcpConnect() {
+  const box = $("#mcp-connect");
+  const r = await agentApi("/api/mcp/connect").catch(() => null);
+  if (!r?.ok) return (box.hidden = true);
+  const { providers } = await r.json();
+  box.hidden = false;
+  box.replaceChildren(...providers.map((provider) => {
+    const button = el("button", "btn mcp-connect-btn");
+    button.type = "button";
+    button.id = `mcp-connect-${provider.id}`;
+    button.textContent = provider.connectedAs ? `Reconnect ${provider.label}` : provider.id === "other" ? provider.label : `Connect ${provider.label}`;
+    button.title = provider.installed ? provider.does : `${provider.label} was not found on this machine.`;
+    button.disabled = !provider.installed;
+    button.onclick = () => connectMcpProvider(provider, button);
+    return button;
+  }));
+}
+
+async function connectMcpProvider(provider, button) {
+  const projects = $("#mcp-scope").value === "all" ? "all" : [...$("#mcp-projects").selectedOptions].map((option) => option.value);
+  if (projects !== "all" && !projects.length) return toast("Choose at least one project below, or pick All projects");
+  button.disabled = true;
+  const r = await agentApi("/api/mcp/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: provider.id, projects }) }).catch(() => null);
+  button.disabled = false;
+  const data = r ? await r.json().catch(() => ({})) : {};
+  if (!r?.ok) return toast(data.error || `Could not connect ${provider.label}`);
+  const box = $("#mcp-minted");
+  if (data.configured) {
+    box.innerHTML = `<p><strong>${esc(provider.label)} is connected</strong> as "${esc(data.client.name)}". ${esc(data.message)}</p>
+      <p>Its credential is in a private file only your user can read, not in any project or shell profile. Revoke it here to disconnect.</p>`;
+  } else {
+    box.innerHTML = `<p><strong>Created "${esc(data.client.name)}".</strong> Add psm to your host's MCP settings with one of these. The credential stays in a private file; the command only points at it.</p>
+      <p>Hosts that read an <code>mcpServers</code> block (Claude Desktop, Cursor, Cline, Continue, LM Studio and others):</p>
+      <pre>${esc(data.snippets.json)}</pre>
+      <p>Hosts configured in TOML:</p>
+      <pre>${esc(data.snippets.toml)}</pre>
+      <p>Hosts that take a command:</p>
+      <pre>${esc(data.snippets.shell)}</pre>
+      <p>A local model needs a host that lets it call tools; psm talks to the host, not to the model.</p>`;
+  }
+  box.hidden = false;
+  loadMcpClients();
+}
+
+function renderMcpClients(clients) {
+  const list = $("#mcp-list");
+  if (!clients.length) {
+    list.innerHTML = '<div class="links-empty">No AI clients yet.</div>';
+    return;
+  }
+  list.replaceChildren(...clients.map((client) => {
+    const row = el("div", `mcp-row${client.revokedAt ? " revoked" : ""}`);
+    const scope = client.projects === "all" ? "all projects" : `${client.projects.length} project${client.projects.length === 1 ? "" : "s"}`;
+    const used = `${client.connection ? "connected · " : ""}${client.lastUsedAt ? `last used ${new Date(client.lastUsedAt).toLocaleString()}` : "never used"}`;
+    row.innerHTML = `<div class="mcp-row-main"><strong>${esc(client.name)}</strong><span class="mcp-row-sub">${esc(scope)} · ${client.revokedAt ? "revoked" : esc(used)}</span></div>`;
+    if (!client.revokedAt) {
+      // submit_request: off until switched on here. Requests are triaged and still wait for Go.
+      const label = el("label", "mcp-row-requests");
+      const box = el("input");
+      box.type = "checkbox";
+      box.id = `mcp-requests-${client.id}`;
+      box.checked = client.mayRequest === true;
+      label.title = "Lets this client ask for bug fixes and features in its projects (submit_request). Each request is triaged and waits for your Go.";
+      label.append(box, document.createTextNode(client.requestsToday ? ` May send requests (${client.requestsToday} today)` : " May send requests"));
+      box.onchange = async () => {
+        box.disabled = true;
+        const r = await agentApi(`/api/mcp/clients/${encodeURIComponent(client.id)}/requests`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ allow: box.checked }) });
+        box.disabled = false;
+        if (!r.ok) {
+          box.checked = !box.checked;
+          return toast((await r.json().catch(() => ({}))).error || "Could not change that");
+        }
+        toast(box.checked ? `${client.name} may send requests` : `${client.name} may no longer send requests`);
+      };
+      row.append(label);
+      const revoke = el("button", "btn", "Revoke");
+      revoke.onclick = async () => {
+        const r = await agentApi(`/api/mcp/clients/${encodeURIComponent(client.id)}`, { method: "DELETE" });
+        if (!r.ok) return toast((await r.json().catch(() => ({}))).error || "Could not revoke");
+        toast(`Revoked ${client.name}`);
+        $("#mcp-minted").hidden = true;
+        loadMcpClients();
+      };
+      row.append(revoke);
+    }
+    return row;
+  }));
+}
+
+function showMintedMcp(data) {
+  const box = $("#mcp-minted");
+  const json = JSON.stringify({ mcpServers: { psm: { type: "http", url: data.endpoint, headers: { Authorization: `Bearer \${${data.tokenEnv}}` } } } }, null, 2);
+  box.innerHTML = `
+    <p><strong>Copy this credential now.</strong> psm keeps only a hash of it and will not show it again.</p>
+    <pre>export ${esc(data.tokenEnv)}=${esc(data.token)}</pre>
+    <p>Put that line where your AI client's shell reads it (for example <code>~/.profile</code>), never in a project file. psm removes it from everything it starts itself.</p>
+    <p>Claude Code (<code>.mcp.json</code>, or <code>claude mcp add-json psm '…'</code>):</p>
+    <pre>${esc(json)}</pre>
+    <p>Codex (<code>~/.codex/config.toml</code>):</p>
+    <pre>[mcp_servers.psm]\nurl = "${esc(data.endpoint)}"\nbearer_token_env_var = "${esc(data.tokenEnv)}"</pre>`;
+  box.hidden = false;
 }
 
 async function loadLinks() {
@@ -9077,24 +9676,131 @@ $("#stale-dismiss").onclick = () => {
 $("#links-open").onclick = openLinks;
 $("#machines-open").onclick = () => openMachines();
 $("#resources-open").onclick = () => openResources();
-$("#executor-activity-open").onclick = () => openExecutorActivity();
-$("#executor-close").onclick = closeModals;
-$("#executor-back").onclick = () => openProcs();
-
-/** Executor activity: each claimed note, the prompt, Claude's answer, the verdict. */
-function openExecutorActivity() {
+$("#agents-open").onclick = () => { location.hash = "#/agents"; };
+$("#models-open").onclick = () => { location.hash = "#/models"; };
+$("#models-home").onclick = () => { location.hash = "#/"; };
+$("#models-refresh").onclick = () => PsmModels.refresh();
+$("#agents-home").onclick = () => { location.hash = "#/"; };
+$("#executor-activity-open").onclick = () => {
   closeModals();
-  openModal("#executor-modal");
+  location.hash = "#/agents/executor";
+};
+
+/* ---- the Agents page (#/agents): every agent; the executor is one of them ---- */
+
+function openAgentsPage(agent = "executor", projectId = null) {
+  const already = AGENTS_PAGE;
+  AGENTS_PAGE = true;
+  $("#home-page").hidden = true;
+  $("#workspace").hidden = true;
+  $("#agents-page").hidden = false;
+  document.body.classList.add("exec-open");
+  renderQuickSwitch();
+  if (already) {
+    PsmAgents.select(agent);
+    if (agent === "executor") PsmExecutor.setProject(projectId);
+    return;
+  }
+  SWITCHES = null; // read the switch fresh: it may have been flipped elsewhere
+  void renderExecutorSwitch();
+  void PsmAgents.open({
+    api: agentApi,
+    selected: agent,
+    rail: $("#agents-rail"),
+    detail: $("#agents-detail"),
+    executorPane: $("#executor-page"),
+    summary: $("#agents-summary"),
+    isOpen: () => AGENTS_PAGE,
+    // Keep the address in step, without adding a history entry per choice.
+    onSelect: (id) => history.replaceState(null, "", `#/agents/${encodeURIComponent(id)}`),
+    openProject: (name, pane) => {
+      const project = STATE.projects.find((entry) => entry.name === name);
+      if (project) location.hash = projectHash(project.id || project.name, pane);
+      else toast(`${name} is not a linked project`);
+    },
+    showJob: (jobId) => PsmExecutor.showJob(jobId),
+    projects: () => STATE.projects.filter((project) => !project.archived).map((project) => project.name).sort((a, b) => a.localeCompare(b)),
+    toast,
+  });
   void PsmExecutor.open({
     api: agentApi,
+    view: "queue",
+    project: projectId,
+    projects: () => STATE.projects.map((project) => ({ id: project.id || null, name: project.name })),
+    statusText: (status) => executorNote({ on: !!status.enabled, status }),
+    onJobs: setExecutorCount,
     list: $("#executor-list"),
     detail: $("#executor-detail"),
     summary: $("#executor-summary"),
     queue: $("#executor-queue"),
     activityPane: $("#executor-activity"),
     tabs: { activity: $("#executor-tab-activity"), queue: $("#executor-tab-queue") },
-    isOpen: () => !$("#executor-modal").hidden,
+    filter: {
+      wrap: $("#executor-filter"),
+      select: $("#executor-project-filter"),
+      onChange: (id) => history.replaceState(null, "", id ? `#/executor?project=${encodeURIComponent(id)}` : "#/agents/executor"),
+    },
+    composer: {
+      form: $("#executor-composer"),
+      project: $("#executor-new-project"),
+      text: $("#executor-new-text"),
+      suggest: $("#executor-suggest"),
+      add: $("#executor-new-add"),
+      note: $("#executor-new-note"),
+    },
+    // The executor polls only while its own pane is the one showing.
+    isOpen: () => AGENTS_PAGE && PsmAgents.executorShown(),
   });
+}
+
+/* ---- the Models page (#/models): every model on this machine, compared and benchmarked ---- */
+let MODELS_PAGE = false;
+
+function openModelsPage(view = "models", params = new URLSearchParams()) {
+  MODELS_PAGE = true;
+  $("#home-page").hidden = true;
+  $("#workspace").hidden = true;
+  $("#models-page").hidden = false;
+  document.body.classList.add("exec-open");
+  renderQuickSwitch();
+  PsmModels.open({ api: agentApi, root: $("#models-root"), summary: $("#models-summary"), toast }, view, params);
+}
+
+function closeModelsPage() {
+  if (!MODELS_PAGE) return;
+  MODELS_PAGE = false;
+  PsmModels.close();
+  $("#models-page").hidden = true;
+  if (!AGENTS_PAGE) document.body.classList.remove("exec-open");
+}
+
+function closeAgentsPage() {
+  if (!AGENTS_PAGE) return;
+  AGENTS_PAGE = false;
+  PsmAgents.close();
+  PsmExecutor.close();
+  $("#agents-page").hidden = true;
+  document.body.classList.remove("exec-open");
+  void refreshExecutorCount();
+}
+
+/** The header's count: jobs waiting for your review, plus stalled ones. */
+function setExecutorCount(jobs) {
+  const count = jobs.filter((job) => job.status === "review" || job.status === "stalled").length;
+  $("#executor-count").textContent = String(count);
+  $("#executor-count").hidden = count === 0;
+  $("#agents-open").setAttribute("aria-label", count ? `Agents: ${count} executor jobs waiting for you` : "Agents");
+}
+
+async function refreshExecutorCount() {
+  if (document.hidden || AGENTS_PAGE) return; // the open page reports its own jobs
+  try {
+    const response = await agentApi("/api/executor/jobs");
+    // Signed out, or a paired page: there is nothing to count from here.
+    setExecutorCount(response.ok ? (await response.json()).jobs || [] : []);
+  } catch {
+    /* the agent being down has its own screen */
+  }
 }
 $("#resources-close").onclick = closeModals;
 $("#resources-refresh").onclick = () => void PsmResources.refresh();
@@ -9123,6 +9829,13 @@ function openMachines(options = {}) {
     root: $("#machines-body"),
     workspace: $("#workspace-select")?.value || "personal",
     projects: () => STATE.projects,
+    onDeploymentSetup: (projectId) => {
+      const project = STATE.projects.find((entry) => entry.id === projectId);
+      if (!project) return toast("Project is no longer available in this workspace");
+      closeModals();
+      openWorkspace(project, "deploy");
+    },
+    onDone: closeModals,
     ...options,
   });
 }
@@ -9146,6 +9859,23 @@ $("#link-browser-use").onclick = () => {
   $("#link-browser").hidden = true;
 };
 $("#link-browser-close").onclick = () => ($("#link-browser").hidden = true);
+$("#mcp-scope").onchange = () => ($("#mcp-projects").hidden = $("#mcp-scope").value !== "pick");
+$("#mcp-add").onsubmit = async (event) => {
+  event.preventDefault();
+  const name = $("#mcp-name").value.trim();
+  const projects = $("#mcp-scope").value === "all" ? "all" : [...$("#mcp-projects").selectedOptions].map((option) => option.value);
+  if (projects !== "all" && !projects.length) return toast("Choose at least one project");
+  const r = await agentApi("/api/mcp/clients", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name, projects }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) return toast(data.error || "Could not create the credential");
+  $("#mcp-name").value = "";
+  showMintedMcp(data);
+  loadMcpClients();
+};
 $("#pairing-reveal").onclick = () => {
   PAIRING.shown = !PAIRING.shown;
   renderPairing();
@@ -9310,3 +10040,7 @@ setInterval(() => {
 setInterval(() => fetchUsage(true, true), USAGE_REFRESH_MS);
 setInterval(() => fetchRuntimeServices(), 15_000);
 setInterval(checkPageFreshness, 20_000);
+setInterval(refreshExecutorCount, 30_000);
+setInterval(refreshTriageQuestions, 30_000);
+void refreshExecutorCount();
+void refreshTriageQuestions();

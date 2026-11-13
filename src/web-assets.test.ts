@@ -319,7 +319,74 @@ test("the environment chooser names the domain each environment publishes to", (
   assert.ok(chooser, "renderManagedDeploy should build #dep-envs from the declared environments");
   assert.match(chooser[0], /item\.hostname \|\| item\.target\?\.hostname/, "each chip reads its own hostname");
   assert.match(chooser[0], /dep-env-host/, "the hostname is rendered, not just read");
-  // One environment is not a choice; say so instead of showing a lone dead chip.
-  assert.match(chooser[0], /Only \$\{declared\[0\]\.id\} is declared/);
+  // One environment offers an explicit, reviewed path to add the other.
+  assert.match(chooser[0], /Add environment/);
+  assert.match(chooser[0], /openAddDeploymentEnvironment\(declared\[0\]\)/);
   assert.ok(read("styles.css").includes(".dep-env-host"), "the hostname line needs a style");
+});
+
+test("the executor is one agent on the Agents page, opened from a header button", () => {
+  // P17 moved the executor onto its own page; it is now one agent among the
+  // AI sessions, script agents and MCP clients the Agents page lists.
+  const html = read("index.html");
+  const app = read("app.js");
+  const executor = read("executor.js");
+  const agents = read("agents.js");
+
+  const actions = html.slice(html.indexOf('<div class="actions">'), html.indexOf("</header>"));
+  assert.match(actions, /<button id="agents-open"[^>]*>[^<]*Agents <span id="executor-count"/, "the header has the Agents button with the executor's count");
+  assert.ok(actions.indexOf('id="procs-open"') < actions.indexOf('id="agents-open"'), "it sits next to Running");
+
+  assert.match(html, /<section class="executor-page agents-page" id="agents-page"[^>]*hidden>/);
+  assert.match(html, /<nav class="agents-rail" id="agents-rail"[^>]*data-stream-private>/);
+  assert.match(html, /<div class="agents-detail" id="agents-detail" hidden data-stream-private>/);
+  const page = html.slice(html.indexOf('id="agents-page"'), html.indexOf("<!-- workspace / cockpit -->"));
+  assert.match(page, /<div class="agents-executor" id="executor-page">/, "the executor's page is inside the Agents page");
+  assert.match(html, /<script src="\/agents\.js"><\/script>/);
+  assert.doesNotMatch(html, /executor-modal|id="executor-open"/, "no modal and no separate Executor button");
+  assert.doesNotMatch(app, /executor-modal|openExecutorActivity|EXECUTOR_PAGE/);
+
+  assert.match(app, /location\.hash\.match\(\/\^#\\\/\(\?:agents/, "the hash router knows #/agents, with #/executor kept");
+  assert.match(app, /\$\("#agents-open"\)\.onclick = \(\) => \{ location\.hash = "#\/agents"; \};/);
+  assert.match(app, /isOpen: \(\) => AGENTS_PAGE && PsmAgents\.executorShown\(\)/, "the executor polls only while it is the agent shown");
+  assert.match(agents, /!document\.hidden/, "the agents list is not polled from a hidden tab");
+  assert.match(agents, /textContent/, "agent text is set as text");
+  assert.doesNotMatch(agents, /innerHTML/, "never as markup");
+  assert.match(app, /job\.status === "review" \|\| job\.status === "stalled"/, "the count is review plus stalled jobs");
+
+  // Task text, diffs and logs stay out of a shared screen.
+  for (const id of ["executor-composer", "executor-queue", "executor-activity"]) {
+    assert.match(html, new RegExp(`id="${id}"[^>]*data-stream-private`), `#${id} is stream-private`);
+  }
+
+  // The composer posts to psm, which makes the hub key; Edit and Withdraw are for PSM-made tasks only.
+  assert.match(executor, /send\("\/api\/executor\/intake", \{ projectId: project\.value, text: taken\.text, nonce: attempt\.nonce \}\)/);
+  assert.match(executor, /if \(fromPsm\) actions\.append\(\.\.\.ownTaskButtons/);
+  assert.match(executor, /!document\.hidden/, "nothing is polled from a hidden tab");
+});
+
+test("the operator token rides only on the cockpit's own requests (P02a.2)", () => {
+  const html = read("index.html");
+  const operator = read("operator.js");
+  const head = html.slice(0, html.indexOf("</head>"));
+  assert.ok(head.indexOf('<script src="/operator.js"></script>') >= 0, "operator.js is in the head");
+  assert.ok(head.indexOf("/operator.js") < head.indexOf("/privacy.js"), "it loads before anything that fetches");
+  assert.doesNotMatch(html, /name="psm-operator"/, "the token is injected when psm serves the page, never stored in the file");
+  assert.match(operator, /url\.origin === location\.origin/, "only same-origin requests get the header");
+  assert.match(operator, /if \(!sameOrigin\(input\)\) return original\(input, init\);/);
+  assert.match(operator, /meta\.remove\(\)/);
+  assert.doesNotMatch(operator, /localStorage|sessionStorage|document\.cookie/, "the token is not persisted in the browser");
+});
+
+test("every browser script parses", () => {
+  // web/ has no build step: a syntax error only shows up as a dead page.
+  for (const file of fs.readdirSync(WEB).filter((name) => name.endsWith(".js"))) {
+    assert.doesNotThrow(() => new vm.Script(read(file), { filename: file }), `${file} has a syntax error`);
+  }
+});
+
+test("the Models page renders model output as text, never markup", () => {
+  const js = read("models.js");
+  assert.doesNotMatch(js, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/, "run outputs are untrusted");
+  assert.match(read("index.html"), /<script src="\/models\.js"><\/script>[\s\S]*<script src="\/app\.js">/, "models.js loads before app.js");
 });

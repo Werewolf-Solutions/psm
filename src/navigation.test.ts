@@ -9,7 +9,7 @@ function browser(storage = new Map<string, string>()) {
   const nodes = new Map<string, any>();
   const element = () => ({
     children: [] as any[], hidden: false, value: "", dataset: {},
-    classList: { toggle() {}, add() {} },
+    classList: { toggle() {}, add() {}, remove() {} },
     append(...children: any[]) { this.children.push(...children); },
     querySelector() { return element(); },
   });
@@ -24,7 +24,16 @@ function browser(storage = new Map<string, string>()) {
     el: element, esc: (text: string) => text,
     document: { querySelectorAll: () => [], body: element() },
     window: {},
+    AGENTS_PAGE: false, URLSearchParams,
+    agentsPage: [] as (string | null)[],
   });
+  // The Agents page (#/agents) lives further down app.js; the router only opens and closes it.
+  context.openAgentsPage = (agent: string, projectId: string | null) => { context.AGENTS_PAGE = true; context.agentsPage.push(projectId ? `${agent}?${projectId}` : agent); };
+  context.PsmScripts = { open: () => {}, close: () => {} };
+  context.modelsPage = [] as string[];
+  context.openModelsPage = (view: string, params: URLSearchParams) => { context.MODELS_PAGE = true; context.modelsPage.push(params.toString() ? `${view}?${params}` : view); };
+  context.closeModelsPage = () => { if (context.MODELS_PAGE) context.modelsPage.push("closed"); context.MODELS_PAGE = false; };
+  context.closeAgentsPage = () => { if (context.AGENTS_PAGE) context.agentsPage.push("closed"); context.AGENTS_PAGE = false; };
   for (const name of ["clearDeploymentPoll", "clearPreparationPoll", "ensureAiConnected", "disconnectAi", "connectPlanner", "disconnectPlanner", "renderWorkingButton", "renderWebPane", "openDeployPane", "fetchSessionState", "loadChanges", "loadPlan", "loadCapabilities", "loadNotes", "fetchRecap", "fetchLimit", "stashDraft", "emptyPlannerState", "emptyManagedDeploymentState", "usageSelectionChanged", "renderMembers", "renderRoomDependencies", "renderCustomCommands", "clearConsole", "clearAiTranscript", "renderSessionPane", "loadDraft", "syncAiControls", "refreshAiModels", "loadDevNotes", "setWsStatus", "setAiBusy", "connectLogs", "toast", "closeWorkspace", "renderBoard"]) context[name] = () => {};
   context.emptyPlannerState = (project: string) => ({ project });
   context.emptyManagedDeploymentState = () => ({});
@@ -109,4 +118,46 @@ test("assigning a stable project id preserves the selected pane", async () => {
   b.context.agentApi = async () => ({ ok: true, json: async () => ({ id: "prj_new" }) });
   await b.context.assignProjectId(newProject);
   assert.equal(b.context.projectHash("prj_new"), "#/p/prj_new/deploy");
+});
+
+test("#/agents opens the Agents page on an agent; #/executor is the executor there; any other route closes it", () => {
+  const b = browser();
+  b.context.WS = { kind: "project", name: null, id: null, pane: "logs" };
+  b.context.location.hash = "#/agents";
+  b.context.routeFromHash();
+  b.context.location.hash = "#/agents/ai%3Atodo-app";
+  b.context.routeFromHash();
+  b.context.location.hash = "#/executor?project=prj_todo";
+  b.context.routeFromHash();
+  assert.deepEqual([...b.context.agentsPage], ["executor", "ai:todo-app", "executor?prj_todo"]);
+
+  b.context.location.hash = "#/p/prj_todo/plan";
+  b.context.routeFromHash();
+  assert.equal(b.context.agentsPage.at(-1), "closed", "opening a project leaves the Agents page");
+  assert.equal(b.context.WS.name, "todo-app");
+
+  b.context.location.hash = "#/agents/executor";
+  b.context.routeFromHash();
+  b.context.location.hash = "#/";
+  b.context.routeFromHash();
+  assert.equal(b.context.agentsPage.at(-1), "closed", "home closes it too");
+});
+
+test("#/models opens the Models page on a view with its compare selection; any other route closes it", () => {
+  const b = browser();
+  b.context.WS = { kind: "project", name: null, id: null, pane: "logs" };
+  b.context.location.hash = "#/models";
+  b.context.routeFromHash();
+  b.context.location.hash = "#/models/compare?m=claude%3Aclaude-opus-5-5%2Cgguf%3Aqwen3-1.7b-q8_0&c=reasoning";
+  b.context.routeFromHash();
+  assert.deepEqual([...b.context.modelsPage], ["models", "compare?m=claude%3Aclaude-opus-5-5%2Cgguf%3Aqwen3-1.7b-q8_0&c=reasoning"]);
+  b.context.location.hash = "#/agents";
+  b.context.routeFromHash();
+  assert.equal(b.context.modelsPage.at(-1), "closed", "the Agents page replaces it");
+  b.context.location.hash = "#/models/benchmarks";
+  b.context.routeFromHash();
+  assert.equal(b.context.agentsPage.at(-1), "closed", "and it replaces the Agents page");
+  b.context.location.hash = "#/";
+  b.context.routeFromHash();
+  assert.equal(b.context.modelsPage.at(-1), "closed", "home closes it");
 });

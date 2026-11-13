@@ -7,7 +7,7 @@ import { taskKey } from "./agent-policy.ts";
 import { configuredRemotes, explainAccess, taskRunnerStatus } from "./agent-access.ts";
 import { OperationReviews } from "./agent-reviews.ts";
 import { MachineCommands } from "./machines/commands.ts";
-import { AgentPermissionStore, agentPermissionRouter, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
+import { AgentPermissionStore, agentPermissionRouter, isPermissionOperatorRequest, reviewAgentPermissions, PREPARATION_OPERATIONS, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
 import { workspaceAgentPolicyRouter } from "./workspace-agent-policy.ts";
 import express from "express";
 import type { Request, Response } from "express";
@@ -33,9 +33,11 @@ import { ensureProjectId } from "../identity.ts";
 import { APP_VERSION } from "../version.ts";
 import { STATUS_META } from "../render.ts";
 import type { Attachment, Capability, Override, Project } from "../types.ts";
-import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, start, stop, stopAll, subscribe, transcript, type ProcKind } from "./procs.ts";
+import { MAX_LOG_LINES, activeProcesses, allProcStates, procState, processRoster, processSummaries, restart, start, stop, stopAll, subscribe, transcript, type ProcKind } from "./procs.ts";
 import {
   activeSessions,
+  sessionQueue,
+  sessionRoster,
   pendingQuestions,
   configureManagedAgents,
   stopProjectAgents,
@@ -45,7 +47,7 @@ import {
   answerQuestion as aiAnswerQuestion,
   cancel as aiCancel,
   cancelPlanning,
-  permittedFullAccess,
+  parseAiMode,
   resolveExtraDirs,
   planningOverview,
   planningSessionKey,
@@ -81,21 +83,28 @@ import {
   saveCustomCapability,
 } from "./catalog.ts";
 import { PlanConflictError, PlanNotFoundError, PlanValidationError, planStore } from "./plans.ts";
+import { McpClientError, McpClientStore, MCP_TOKEN_ENV } from "./mcp/clients.ts";
+import { McpOperations } from "./mcp/operations.ts";
+import { MCP_PATH, mcpHandler } from "./mcp/server.ts";
+import { McpRequestStore, REQUESTS_PER_DAY } from "./mcp/requests.ts";
+import { connectCommand, connectionFile, connectionName, installInto, isDescendantOf, isProviderId, listProviders, removeConnection, snippets, uninstallFrom, writeConnection, type ProviderId } from "./mcp/connect.ts";
 import { NOTE_KINDS, NoteNotFoundError, NoteValidationError, noteStore } from "./notes.ts";
 import { ensurePreviewProxy } from "./preview.ts";
 import { customCommandId, validateCustomCommands } from "./custom-commands.ts";
 import { BrowseError, browse } from "./browse.ts";
 import { StopError, machineProcesses, stopProcess } from "./machine.ts";
 import { resourceRouter } from "./resources/api.ts";
+import { modelBenchRouter } from "./model-bench.ts";
 import { ResourceStore } from "./resources/store.ts";
 import { projectDatabases } from "./resources/summary.ts";
-import { BLOCK_START as GUIDANCE_START, guidanceFiles, guidanceRows, publishGuidance, renderGuidance } from "./resources/guidance.ts";
+import { BLOCK_START as GUIDANCE_START, guidanceFiles, guidanceRows, keyLabel, publishGuidance, renderGuidance } from "./resources/guidance.ts";
 import {
   agentGuard,
   agentIdentity,
   agentSecret,
   hostedOrigins,
   isLoopbackHost,
+  isOwnLoopbackOrigin,
   rotateAgentToken,
 } from "./agent.ts";
 import {
@@ -107,7 +116,8 @@ import {
   signOut,
 } from "./session.ts";
 import { approvedSsoCallback, ssoAvailability, ssoConfig } from "./sso.ts";
-import { runWithSession } from "../store.ts";
+import { runWithSession, statePath } from "../store.ts";
+import { OperatorCredential, injectOperatorToken, operatorGate } from "./operator.ts";
 import { subscriptionUsage } from "./usage.ts";
 import { modelCatalog } from "./models.ts";
 import {
@@ -122,13 +132,25 @@ import {
   writeProjectRules,
 } from "./rules.ts";
 import { collectSkillUsage } from "./skills.ts";
-import { runtimeServices, startRuntimeDiscovery, werewolfApiUrl } from "./runtime.ts";
+import { refreshWerewolfRuntime, runtimeServices, startRuntimeDiscovery, werewolfApiUrl } from "./runtime.ts";
 import { activityLog } from "./executor/activity.ts";
-import { executorActivity, executorForcedByEnv, executorStatus, jobsDirectory, setExecutorRunning, startExecutorService } from "./executor/service.ts";
+import { agentId, buildRoster, type AgentSummary } from "./agents.ts";
+import { projectRunbook, readCurated, validateCurated, writeCurated, type Runbook } from "../runbook.ts";
+import { draftDescriptions } from "./runbook-draft.ts";
+import { StackError, StackStore, type Stack } from "./stacks.ts";
+import { UnitGrantStore } from "./unit-grants.ts";
+import { primaryCheckouts } from "./mcp/primary-checkout.ts";
+import { activeHub, hubMode, LOCAL_HUB_TARGET } from "./executor/hub.ts";
+import { databaseKey, envReferences } from "./resources/discover.ts";
+import { claudeEngine as draftEngine } from "./triage/run.ts";
+import { isUnitKind, mcpUnitControl, parseTargets, planUnits, portOpen, startUnits, stopUnits, type UnitDeps, type UnitTarget } from "./units.ts";
+import { executorActivity, executorForcedByEnv, executorStatus, jobsDirectory, reviewCauses, setExecutorRunning, startExecutorService } from "./executor/service.ts";
+import { causeLabel, parseReviewCause } from "./executor/review-causes.ts";
 import { clonePath } from "./executor/implement-job.ts";
 import { acceptJob, discardClone, readJobDiff } from "./executor/review.ts";
 import { readSwitches, writeSwitches } from "./switches.ts";
 import { executorId, hubClient } from "./executor/client.ts";
+import { intakeRoutes } from "./executor/intake-routes.ts";
 import { createProjectPublisher } from "./executor/publish.ts";
 import {
   account as cloudAccount,
@@ -207,7 +229,73 @@ app.use(agentGuard({
   publicPaths: ["/api/agent"],
   shortLivedQueryTicket: (request) => deploymentStreamTickets.validateRequest(request, agentSecret().createdAt),
 }));
+/* P02a.2: state-changing requests from this machine need the operator token,
+ * which only the cockpit page psm serves carries (see operator.ts). Paired
+ * origins already presented the pairing token to agentGuard; MCP has its own. */
+const operatorCredential = new OperatorCredential(process.env.PSM_OPERATOR_FILE || statePath(".psm-operator.json"));
+operatorCredential.current();
+app.use(operatorGate({
+  credential: operatorCredential,
+  pairedOrigin: (req) => !!req.headers.origin && !isOwnLoopbackOrigin(req),
+  ownAuth: [MCP_PATH],
+  sensitiveReads: ["/api/agent/token"],
+}));
 app.use(express.json({ limit: "2mb" }));
+
+/* ---- MCP server for local AI clients (docs/roadmaps/psm-mcp-operations.md) ----
+ * Its own credentials, never loopback trust; browser requests are refused.
+ * The credential is read by clients from PSM_MCP_TOKEN. psm drops it from its
+ * own environment so nothing it starts can inherit it (childEnv strips PSM_*
+ * too). */
+delete process.env[MCP_TOKEN_ENV];
+const mcpClients = new McpClientStore();
+const mcpRequests = new McpRequestStore();
+const mcpOperations = new McpOperations({
+  // One folder per id: a worktree or second clone shares the committed id and must not be picked by accident.
+  projects: () => primaryCheckouts(getProjects()),
+  plans: { list: (name) => planStore.list(name), get: (name, id) => planStore.get(name, id) },
+  processes: processSummaries,
+  // `machines` and `projectPublisher` are set further down; these run per call, after startup.
+  machines: () => machines.listMachines("personal"),
+  hub: async () => {
+    const api = hubMode() === "local" ? null : await refreshWerewolfRuntime();
+    return {
+      api: api ? { target: `${api.source} (${api.activeUrl})`, reachable: api.reachable } : { target: LOCAL_HUB_TARGET, reachable: true },
+      queue: hubMode(),
+      executor: executorStatus(),
+      publishing: projectPublisher?.status() ?? null,
+    };
+  },
+  questions: async () => ((await hubReady()) ? hubForCockpit().listQuestions() : []),
+  // Requests over MCP: a hub intake like the Agents page's composer makes, triaged and then waiting for Go.
+  requests: {
+    signedIn: () => hubReady(),
+    create: async (input) => {
+      const { intake, created } = await hubForCockpit().createIntake(input);
+      return { intakeId: intake.intakeId, status: intake.status, created };
+    },
+    withdraw: async (intakeId) => void (await hubForCockpit().withdrawIntake(intakeId)),
+    queue: () => hubForCockpit().listQueue(),
+    jobs: () => hubForCockpit().listJobs(),
+    store: mcpRequests,
+  },
+  // P18. runbookFor is hoisted; stackStore is read per call, after startup.
+  runbook: (name) => runbookFor(name),
+  unitStatus: (name, unit) => procState(name, `unit:${unit}`).status,
+  stacks: () => stackStore.list().map((stack) => ({ id: stack.id, title: stack.title, units: stack.units.map((target) => ({ ...target, status: procState(target.project, `unit:${target.unit}`).status })) })),
+  // The Agents page roster; agentRoster is hoisted and reads per call.
+  agents: () => agentRoster(),
+  // P18 R6: start/stop over MCP, only for units the operator allowed (unitGrants) on Full resources.
+  units: mcpUnitControl({
+    deps: () => unitDeps(),
+    projectId: (name) => findProject(name)?.id ?? null,
+    grant: (projectId, unit) => unitGrants.state(projectId, unit),
+    resources: (project, folder) => unitResources(project, folder),
+    stack: (id) => stackStore.get(id),
+    running: () => runningUnits(),
+  }),
+});
+app.all(MCP_PATH, mcpHandler({ store: mcpClients, operations: mcpOperations, startedByPsm: (pid) => isDescendantOf(pid, process.pid) }));
 
 /* ---- Sign in with Werewolf (authorization code + PKCE) ----
  * The browser runs the flow — the same web/auth.js the hosted page runs, against
@@ -261,7 +349,7 @@ app.post("/api/auth/logout", async (_req, res) => {
  * so the page can notice it has gone stale and offer a reload rather than
  * failing at whichever button is pressed first.
  */
-const WEB_ASSETS = ["index.html", "privacy.js", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "machines.js", "resources.js", "executor.js", "monitoring.js", "external-links.js", "styles.css"];
+const WEB_ASSETS = ["index.html", "operator.js", "privacy.js", "app.js", "auth.js", "agent.js", "cloud.js", "deployment-connections.js", "machines.js", "resources.js", "executor.js", "agents.js", "scripts.js", "monitoring.js", "external-links.js", "styles.css"];
 
 function webAssetVersion(): string {
   const parts: string[] = [];
@@ -297,17 +385,115 @@ app.get("/api/auth/session", async (req, res) => {
   res.json({ user, provider: "werewolf", sso, dapp, localApprovalWithoutSignIn: localRequest(req) && isLoopbackHost(req.hostname) });
 });
 
+/* ---------- MCP clients: minted and revoked only from the local cockpit ---------- */
+
+local.get("/api/mcp/clients", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Manage AI clients from the local cockpit." });
+  res.json({
+    endpoint: `http://127.0.0.1:${PORT}${MCP_PATH}`,
+    tokenEnv: MCP_TOKEN_ENV,
+    requestsPerDay: REQUESTS_PER_DAY,
+    clients: mcpClients.list().map((client) => ({ ...client, mayRequest: client.mayRequest === true, requestsToday: mcpRequests.recentCount(client.id), recent: mcpClients.recent(client.id, 5) })),
+  });
+});
+
+// The operator's switch for submit_request. Like minting, only the cockpit can set it.
+local.put("/api/mcp/clients/:id/requests", (req, res) => {
+  if (!isPermissionOperatorRequest(req)) return res.status(403).json({ error: "Allow requests from the local cockpit." });
+  if (typeof req.body?.allow !== "boolean") return res.status(400).json({ error: "allow must be true or false." });
+  try {
+    res.json({ client: mcpClients.setMayRequest(req.params.id, req.body.allow) });
+  } catch (error) {
+    const status = error instanceof McpClientError ? error.status : 500;
+    res.status(status).json({ error: (error as Error).message });
+  }
+});
+
+local.post("/api/mcp/clients", (req, res) => {
+  // Same-origin browser request from the cockpit itself (see agent-permissions.ts).
+  if (!isPermissionOperatorRequest(req)) return res.status(403).json({ error: "Mint AI client credentials from the local cockpit." });
+  try {
+    const { client, token } = mcpClients.mint(req.body ?? {}, `local:${os.userInfo().username}`);
+    res.status(201).json({ client, token, endpoint: `http://127.0.0.1:${PORT}${MCP_PATH}`, tokenEnv: MCP_TOKEN_ENV });
+  } catch (error) {
+    const status = error instanceof McpClientError ? error.status : 500;
+    res.status(status).json({ error: (error as Error).message });
+  }
+});
+
+/* ---- Connect: one click mints a client and adds psm to the host's own MCP config ---- */
+
+/** Undo a connection: delete the credential file and take psm out of the host's config. */
+async function disconnectMcpClient(client: { connection?: { provider: string; file: string } }): Promise<void> {
+  if (!client.connection) return;
+  removeConnection(client.connection.file);
+  if (isProviderId(client.connection.provider)) await uninstallFrom(client.connection.provider).catch(() => {});
+}
+
+local.get("/api/mcp/connect", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Connect AI clients from the local cockpit." });
+  const live = mcpClients.list().filter((client) => client.revokedAt == null && client.connection);
+  res.json({
+    providers: listProviders().map((provider) => ({ ...provider, connectedAs: live.find((client) => client.connection!.provider === provider.id && provider.id !== "other")?.id ?? null })),
+  });
+});
+
+local.post("/api/mcp/connect", async (req, res) => {
+  if (!isPermissionOperatorRequest(req)) return res.status(403).json({ error: "Connect AI clients from the local cockpit." });
+  const provider = req.body?.provider;
+  if (!isProviderId(provider)) return res.status(400).json({ error: "Unknown provider." });
+  let minted;
+  try {
+    minted = mcpClients.mint({ name: connectionName(provider), projects: req.body?.projects ?? "all" }, `local:${os.userInfo().username}`);
+  } catch (error) {
+    return res.status(error instanceof McpClientError ? error.status : 500).json({ error: (error as Error).message });
+  }
+  const { client, token } = minted;
+  const file = connectionFile(client.id);
+  try {
+    writeConnection(file, { url: `http://127.0.0.1:${PORT}${MCP_PATH}`, token });
+    const command = connectCommand(file);
+    const installed = await installInto(provider, command);
+    if (!installed.ok) throw new Error(installed.message);
+    // One live connection per host: the new entry replaced the old one in its config.
+    if (provider !== "other") {
+      for (const earlier of mcpClients.list()) {
+        if (earlier.id !== client.id && earlier.revokedAt == null && earlier.connection?.provider === provider) {
+          removeConnection(earlier.connection.file);
+          mcpClients.revoke(earlier.id);
+        }
+      }
+    }
+    let saved = mcpClients.setConnection(client.id, { provider, file });
+    if (req.body?.mayRequest === true) saved = mcpClients.setMayRequest(client.id, true);
+    res.status(201).json({ client: saved, provider, configured: installed.configured, message: installed.message, snippets: installed.configured ? null : snippets(command) });
+  } catch (error) {
+    // Nothing half-connected: no file, no live credential.
+    removeConnection(file);
+    mcpClients.revoke(client.id);
+    res.status(502).json({ error: (error as Error).message });
+  }
+});
+
+local.delete("/api/mcp/clients/:id", async (req, res) => {
+  if (!isPermissionOperatorRequest(req)) return res.status(403).json({ error: "Revoke AI clients from the local cockpit." });
+  try {
+    const client = mcpClients.revoke(req.params.id);
+    await disconnectMcpClient(client as { connection?: { provider: ProviderId; file: string } });
+    res.json({ client });
+  } catch (error) {
+    const status = error instanceof McpClientError ? error.status : 500;
+    res.status(status).json({ error: (error as Error).message });
+  }
+});
+
 /* ---------- agent identity + pairing ---------- */
 
 /** True when the caller is the local cockpit rather than a paired remote origin. */
 function localRequest(req: express.Request): boolean {
-  const origin = req.headers.origin;
-  if (!origin) return true; // same-origin navigations send no Origin
-  try {
-    return isLoopbackHost(new URL(origin).hostname);
-  } catch {
-    return false;
-  }
+  if (!req.headers.origin) return true; // same-origin navigations send no Origin
+  // Another localhost port is not the cockpit: it may be a project's dev server.
+  return isOwnLoopbackOrigin(req);
 }
 
 // Discovery: a hosted page fetches this to find out whether an agent is running
@@ -323,6 +509,13 @@ local.get("/api/agent/token", (req, res) => {
   if (!localRequest(req)) return res.status(403).json({ error: "read the pairing token from the local cockpit" });
   const secret = agentSecret();
   res.json({ token: secret.token, createdAt: secret.createdAt, origins: hostedOrigins() });
+});
+
+// A new operator token: every other open cockpit page must reload. This page gets the new one back.
+local.post("/api/operator/rotate", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Rotate the operator token from the local cockpit." });
+  const secret = operatorCredential.rotate();
+  res.json({ ok: true, token: secret.token, createdAt: secret.createdAt });
 });
 
 local.post("/api/agent/token/rotate", (req, res) => {
@@ -1180,6 +1373,7 @@ function findProject(name: string) {
 
 function parseKind(v: unknown): ProcKind {
   if (customCommandId(v)) return v as ProcKind;
+  if (isUnitKind(v)) return v;
   if (typeof v === "string" && /^script:[0-9a-f]{12}$/.test(v)) return v as ProcKind;
   return v === "deploy:staging" || v === "deploy:production" ? v : "run";
 }
@@ -1439,6 +1633,193 @@ local.post("/api/projects/:name/stop", (req, res) => {
   res.json({ ok: true, stopped });
 });
 
+local.post("/api/projects/:name/restart", async (req, res) => {
+  const kind = req.body?.kind ?? "run";
+  if (kind !== "run" && !customCommandId(kind)) {
+    return res.status(400).json({ error: "only project runs and custom commands can be restarted" });
+  }
+  const proj = findProject(req.params.name);
+  if (!proj) return res.status(404).json({ error: "unknown project" });
+  if (kind !== "run" && !proj.customCommands.some((entry) => `custom:${entry.id}` === kind)) {
+    return res.status(404).json({ error: "unknown custom command" });
+  }
+  try {
+    const p = await restart(proj.name, kind);
+    res.json({ ok: true, status: p.status, command: p.command });
+  } catch (error) {
+    res.status(409).json({ error: (error as Error).message || "restart failed" });
+  }
+});
+
+/* ---- runbooks (P18): every script a project has, and its units run one process each ---- */
+const runbookCache = new Map<string, { at: number; runbook: Runbook }>();
+function runbookFor(name: string): Runbook | null {
+  const project = findProject(name);
+  if (!project) return null;
+  const cached = runbookCache.get(name);
+  if (cached && Date.now() - cached.at < 10_000) return cached.runbook;
+  try {
+    const runbook = projectRunbook(project.path);
+    runbookCache.set(name, { at: Date.now(), runbook });
+    return runbook;
+  } catch {
+    return null;
+  }
+}
+const unitDeps = (): UnitDeps => ({
+  project: (name) => {
+    const project = findProject(name);
+    return project ? { name: project.name, path: project.path } : null;
+  },
+  projects: () => getProjects().filter((project) => !project.archived).map((project) => project.name),
+  runbook: runbookFor,
+  status: (name, kind) => {
+    const state = procState(name, kind);
+    return state.status === "idle" ? null : { status: state.status, port: (state as { port?: number | null }).port ?? null };
+  },
+  start: (name, kind, command, cwd, options) => { start(name, kind, command, cwd, options); },
+  stop,
+  portOpen,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+});
+const unitGrants = new UnitGrantStore();
+/** Databases a unit's folder points at (its .env), with this machine's access level. */
+function unitResources(projectName: string, folder: string): Array<{ label: string; level: string | null }> {
+  const project = findProject(projectName);
+  if (!project) return [];
+  const levels = new Map(resourceStore.list().map((setting) => [setting.key, setting.level]));
+  const seen = new Map<string, { label: string; level: string | null }>();
+  for (const ref of envReferences([{ name: project.name, path: project.path }])) {
+    if (ref.directory !== folder) continue;
+    const key = databaseKey(ref.target);
+    seen.set(key, { label: keyLabel(key), level: levels.get(key) ?? null });
+  }
+  return [...seen.values()];
+}
+const runningUnits = (): UnitTarget[] =>
+  processRoster().filter((proc) => proc.status === "running" && proc.kind.startsWith("unit:")).map((proc) => ({ project: proc.name, unit: proc.kind.slice("unit:".length) }));
+
+local.get("/api/projects/:name/runbook", (req, res) => {
+  const runbook = runbookFor(req.params.name);
+  if (!runbook) return res.status(404).json({ error: "unknown project" });
+  const projectId = findProject(req.params.name)?.id ?? null;
+  const status = Object.fromEntries(runbook.units.map((unit) => {
+    const state = procState(req.params.name, `unit:${unit.id}`);
+    return [unit.id, {
+      status: state.status,
+      mcp: projectId ? unitGrants.state(projectId, unit) : "no-project-id",
+      resources: unit.kind === "service" || unit.kind === "agent" || unit.kind === "task" ? unitResources(req.params.name, unit.folder) : [],
+    }];
+  }));
+  res.json({ runbook, status, curated: readCurated(findProject(req.params.name)!.path) ?? { version: 1, units: {} } });
+});
+
+// The operator's own text for this project's scripts, written to the committed .psm/runbook.json.
+local.put("/api/projects/:name/runbook", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Edit a project's scripts from the local cockpit." });
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  try {
+    writeCurated(project.path, validateCurated(req.body));
+  } catch (error) {
+    return res.status(400).json({ error: (error as Error).message });
+  }
+  runbookCache.delete(project.name);
+  res.json({ ok: true, runbook: runbookFor(project.name) });
+});
+
+// One tool-less model call proposes descriptions; the operator accepts or discards them in the pane.
+const draftsRunning = new Set<string>();
+local.post("/api/projects/:name/runbook/draft", async (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Draft descriptions from the local cockpit." });
+  const project = findProject(req.params.name);
+  const runbook = runbookFor(req.params.name);
+  if (!project || !runbook) return res.status(404).json({ error: "unknown project" });
+  if (draftsRunning.has(project.name)) return res.status(409).json({ error: "A draft for this project is already being written." });
+  draftsRunning.add(project.name);
+  try {
+    const result = await draftDescriptions(draftEngine({ model: "sonnet" }), project.name, project.path, runbook);
+    if (!result.ok) return res.status(502).json({ error: result.error });
+    res.json(result);
+  } finally {
+    draftsRunning.delete(project.name);
+  }
+});
+
+// Let MCP clients start this unit, for its current script (P18 R6). Only the cockpit, behind the operator token.
+local.post("/api/projects/:name/unit-grants", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Allow units for MCP from the local cockpit." });
+  const project = findProject(req.params.name);
+  if (!project) return res.status(404).json({ error: "unknown project" });
+  if (!project.id) return res.status(400).json({ error: "Give this project a stable id first (assign id on its card); MCP clients address projects by id." });
+  const unit = runbookFor(project.name)?.units.find((entry) => entry.id === req.body?.unit);
+  if (!unit) return res.status(404).json({ error: "No such script in this project." });
+  if (!["service", "agent", "task"].includes(unit.kind)) return res.status(400).json({ error: `${unit.kind} scripts cannot be started over MCP.` });
+  if (req.body?.allow === true) unitGrants.grant(project.id, unit);
+  else unitGrants.revoke(project.id, unit.id);
+  res.json({ ok: true, mcp: unitGrants.state(project.id, unit) });
+});
+
+local.post("/api/units/start", async (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Start units from the local cockpit." });
+  let targets: UnitTarget[];
+  try {
+    targets = parseTargets(req.body?.targets);
+  } catch (error) {
+    return res.status(400).json({ error: (error as Error).message });
+  }
+  res.json({ results: await startUnits(unitDeps(), targets) });
+});
+
+/* Stacks: named sets of units, started together. Local cockpit only. */
+const stackStore = new StackStore();
+const stackView = (stack: Stack) => ({
+  ...stack,
+  units: stack.units.map((target) => ({ ...target, status: procState(target.project, `unit:${target.unit}`).status, known: !!runbookFor(target.project)?.units.some((unit) => unit.id === target.unit) })),
+});
+const stackRoute = (handler: (req: express.Request, res: express.Response) => unknown) => async (req: express.Request, res: express.Response) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Manage stacks from the local cockpit." });
+  try {
+    await handler(req, res);
+  } catch (error) {
+    res.status(error instanceof StackError ? error.status : 500).json({ error: (error as Error).message });
+  }
+};
+local.get("/api/stacks", stackRoute((_req, res) => res.json({ stacks: stackStore.list().map(stackView) })));
+local.post("/api/stacks", stackRoute((req, res) => res.json({ stack: stackView(stackStore.create(req.body)) })));
+local.put("/api/stacks/:id", stackRoute((req, res) => res.json({ stack: stackView(stackStore.update(req.params.id, req.body)) })));
+local.delete("/api/stacks/:id", stackRoute((req, res) => {
+  if (!stackStore.remove(req.params.id)) throw new StackError("Unknown stack.", 404);
+  res.json({ ok: true });
+}));
+local.post("/api/stacks/:id/start", stackRoute(async (req, res) => {
+  const stack = stackStore.get(req.params.id);
+  if (!stack) throw new StackError("Unknown stack.", 404);
+  res.json({ results: await startUnits(unitDeps(), stack.units) });
+}));
+local.post("/api/stacks/:id/stop", stackRoute((req, res) => {
+  const stack = stackStore.get(req.params.id);
+  if (!stack) throw new StackError("Unknown stack.", 404);
+  // The stack's units and the dependencies they brought up; stopUnits keeps any
+  // of those that something outside the stack still needs.
+  const running = runningUnits();
+  const isRunning = (target: UnitTarget) => running.some((entry) => entry.project === target.project && entry.unit === target.unit);
+  const deps = unitDeps();
+  const active = planUnits(deps, stack.units).map(({ project, unit }) => ({ project, unit })).filter(isRunning).reverse(); // dependents first
+  res.json({ results: active.length ? stopUnits(deps, active, running, req.body?.force === true) : [] });
+}));
+
+local.post("/api/units/stop", (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "Stop units from the local cockpit." });
+  let targets: UnitTarget[];
+  try {
+    targets = parseTargets(req.body?.targets);
+  } catch (error) {
+    return res.status(400).json({ error: (error as Error).message });
+  }
+  res.json({ results: stopUnits(unitDeps(), targets, runningUnits(), req.body?.force === true) });
+});
+
 // SSE log stream (replays buffer, then live)
 local.get("/api/projects/:name/logs/stream", (req, res) => {
   subscribe(res, req.params.name, parseKind(req.query.kind));
@@ -1660,7 +2041,7 @@ local.post("/api/projects/:name/planner/question", (req, res) => {
     project.path,
     String(req.body?.requestId ?? ""),
     answers,
-    false,
+    "plan",
   );
   res.status(result.ok ? 200 : 409).json(result);
 });
@@ -1800,7 +2181,7 @@ local.post("/api/projects/:name/plans/:id/confirm", (req, res) => {
       project.aiModel,
       project.aiEffort,
       kickoffPrompt(plan),
-      project.aiFullAccess,
+      "auto",
       extraDirsFor(project),
     );
     if (ai.ok) plan = planStore.markStarted(project.name, plan.id);
@@ -1830,7 +2211,6 @@ interface AiConversation {
   engine: AiEngine;
   model: string | null;
   effort: string | null;
-  fullAccess: boolean; // retained for legacy callers; always false
   extraDirs: string[];
   extraContext: string;
   onTurn?: () => void;
@@ -1851,7 +2231,6 @@ function projectConversation(name: string): AiConversation {
     engine: t.aiEngine,
     model: t.aiModel,
     effort: t.aiEffort,
-    fullAccess: false,
     extraDirs: extraDirsFor(t),
     extraContext: t.name === WORKSPACE_NAME ? workspaceRundown() : "",
   };
@@ -1884,7 +2263,6 @@ function workroomConversation(id: string): AiConversation {
     engine: parseEngine(room.engine, "claude"),
     model: room.model,
     effort: room.effort,
-    fullAccess: false,
     extraDirs: resolveExtraDirs(paths[0], paths.slice(1)),
     extraContext: workroomContext(room),
     onTurn: () => workSessions.touch(room.id),
@@ -1987,7 +2365,7 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
     const engine = parseEngine(req.body?.engine, t.engine);
     const model = parseModel(req.body?.model, t.model);
     const effort = parseEffort(req.body?.effort, t.effort);
-    const fullAccess = permittedFullAccess(t.fullAccess, req.body?.fullAccess);
+    const mode = parseAiMode(req.body?.mode);
     const r = aiSend(
       t.name,
       t.path,
@@ -1995,7 +2373,7 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
       model,
       effort,
       String(req.body?.message ?? ""),
-      fullAccess,
+      mode,
       t.extraContext,
       t.extraDirs,
     );
@@ -2012,13 +2390,13 @@ function mountAiRoutes(base: string, resolve: (req: Request) => AiConversation):
       return guard(res, err);
     }
     const answers = req.body?.answers && typeof req.body.answers === "object" ? req.body.answers : {};
-    const fullAccess = permittedFullAccess(t.fullAccess, req.body?.fullAccess);
+    const mode = parseAiMode(req.body?.mode);
     const r = aiAnswerQuestion(
       t.name,
       t.path,
       String(req.body?.requestId ?? ""),
       answers,
-      fullAccess,
+      mode,
       t.extraContext,
     );
     res.status(r.ok ? 200 : 409).json(r);
@@ -2293,6 +2671,12 @@ const managedMcp = new ManagedMcpTools(agentPermissions, (snapshot) => {
   return currentCatalog().filter((capability): capability is import("../types.ts").McpCapability => capability.kind === "mcp" && capability.providerProject !== project.name && project.attachments.some((attachment) => attachment.capabilityRef === capability.ref && attachment.manifestDigest === capability.manifestDigest));
 }, undefined, async (capability) => connectAttachedMcp(capability, await mcpCredentials(capability)));
 configureManagedAgents((scope) => {
+  // Chat runs the CLI directly, like a terminal session, with the mode picked in
+  // the chat bar. Only deployment-preparation workrooms go through the broker,
+  // because their deploy operations are psm tools that only exist there.
+  const preparation = scope.name.startsWith("__psm_work__:")
+    && workSessions.get(scope.name.slice("__psm_work__:".length)).permissionProfile === "deployment-preparation";
+  if (!preparation) return null;
   const projects = getProjects();
   const snapshots = [scope.cwd, ...scope.extraDirs].map((directory) => {
     const root = fs.realpathSync(directory);
@@ -2302,9 +2686,7 @@ configureManagedAgents((scope) => {
     // Task-scoped rules ("allow for this task") match this session only.
     return { ...agentPermissions.snapshot(permissionProject(project.name)), task: taskKey(scope.name) };
   });
-  const preparation = scope.name.startsWith("__psm_work__:")
-    && workSessions.get(scope.name.slice("__psm_work__:".length)).permissionProfile === "deployment-preparation";
-  const gap = reviewAgentPermissions(snapshots, scope.engine, preparation ? PREPARATION_OPERATIONS.map((entry) => entry.permission) : ["repo.read"]);
+  const gap = reviewAgentPermissions(snapshots, scope.engine, PREPARATION_OPERATIONS.map((entry) => entry.permission));
   if (gap) throw new PermissionError(gap);
   // An attached executable provider cannot also be edited by this managed turn.
   const attachedRefs = new Set(projects.filter((project) => snapshots.some((snapshot) => snapshot.project.id === project.id)).flatMap((project) => project.attachments.map((attachment) => attachment.capabilityRef)));
@@ -2417,7 +2799,7 @@ const deploymentPreparation = new DeploymentPreparationController({
         conversation.model,
         conversation.effort,
         message,
-        false,
+        "auto",
         conversation.extraContext,
         conversation.extraDirs,
         preparation,
@@ -2466,6 +2848,7 @@ const machineTransport = new SshMachineTransport({ broker: deploymentSecretBroke
 const machines = new MachineService({
   store: machineStore, deployments: deploymentStore, broker: deploymentSecretBroker, transport: machineTransport,
   hostTarget: (projectId, environmentId) => deploymentEngine.service.hostTarget(projectId, environmentId),
+  requireManifestTarget: true,
 });
 // Managed agents reach connected servers only through this, as each project's command account.
 machineCommands = new MachineCommands(machineStore, machineTransport);
@@ -2506,6 +2889,12 @@ local.use(resourceRouter({
   localRequest,
   actor: () => `local:${os.userInfo().username}`,
   changed: () => publishResourceGuidance(),
+}));
+// The Models page (#/models) and the model-bench library beside psm.
+local.use(modelBenchRouter({
+  catalog: (engine) => modelCatalog(engine, process.cwd()),
+  usage: async (engine) => (await subscriptionUsage(engine, null)).providers[0],
+  actor: () => `local:${os.userInfo().username}`,
 }));
 try {
   publishResourceGuidance(true);
@@ -2563,25 +2952,165 @@ local.get("/api/executor/activity/:jobId/log", (req, res) => {
 
 // The hub's whole queue for this user: waiting, being triaged (and by which
 // executor), and done with its verdict. Read through the Werewolf session.
-let cockpitHub: ReturnType<typeof hubClient> | null = null;
-const hubForCockpit = () =>
-  (cockpitHub ??= hubClient({ apiUrl: () => werewolfApiUrl(), token: async () => (await sessionContext()).accessToken, executorId: executorId() }));
+const hubForCockpit = () => activeHub();
+/** Can the queue be used? The local queue always can; the Werewolf hub needs a signed-in session. */
+async function hubReady(): Promise<boolean> {
+  return hubMode() === "local" || !!(await currentUser().catch(() => null));
+}
+/**
+ * What triage is waiting on you to decide (hub contract C2). Todo items are
+ * answered in Todo, so each one comes with a link there; PSM-written ones are
+ * answered here by editing them, and either kind can take Go.
+ */
+async function todoOrigin(): Promise<string> {
+  if (process.env.PSM_TODO_URL) return process.env.PSM_TODO_URL.replace(/\/+$/, "");
+  const api = await refreshWerewolfRuntime();
+  return api.source === "local" ? "http://localhost:5200" : "https://todo.werewolf.solutions";
+}
+local.get("/api/executor/questions", async (_req, res) => {
+  if (!(await hubReady())) return res.json({ signedIn: false, questions: [], todoUrl: null });
+  try {
+    const names = new Map(primaryCheckouts(getProjects()).filter((project) => project.id).map((project) => [project.id!, project.name]));
+    const todoUrl = await todoOrigin();
+    const questions = (await hubForCockpit().listQuestions()).map((question) => ({
+      ...question,
+      projectName: names.get(question.projectId) ?? question.project,
+      todoLink: question.kind === "task" && question.date ? `${todoUrl}/?week=${question.date}`
+        : question.kind === "note" ? `${todoUrl}/notes${question.project ? `?project=${encodeURIComponent(question.project)}` : ""}`
+        : question.kind === "task" ? `${todoUrl}/questions` : null,
+    }));
+    res.json({ signedIn: true, questions, todoUrl });
+  } catch (error) {
+    res.status(502).json({ error: `The hub did not answer: ${(error as Error).message}` });
+  }
+});
 local.get("/api/executor/queue", async (_req, res) => {
-  if (!(await currentUser())) return res.status(401).json({ error: "Sign in with Werewolf to see the queue." });
+  if (!(await hubReady())) return res.status(401).json({ error: "Sign in with Werewolf to see the queue." });
   const cockpitHub = hubForCockpit();
   try {
-    const names = new Map(getProjects().filter((project) => project.id).map((project) => [project.id!, project.name]));
-    const items = (await cockpitHub.listQueue())
-      .filter((item) => item.status !== "withdrawn")
-      .map((item) => ({ ...item, projectName: names.get(item.projectId) ?? null, mine: item.claim?.executorId === executorStatus().executorId }));
+    const names = new Map(primaryCheckouts(getProjects()).filter((project) => project.id).map((project) => [project.id!, project.name]));
+    const queue = (await cockpitHub.listQueue()).filter((item) => item.status !== "withdrawn");
+    // Requests an MCP client sent: name the client, so the queue says who asked.
+    const askedBy = mcpRequests.clientsFor(queue.map((item) => item.intakeId));
+    const items = queue.map((item) => {
+      const asked = askedBy.get(item.intakeId);
+      return {
+        ...item,
+        projectName: names.get(item.projectId) ?? null,
+        mine: item.claim?.executorId === executorStatus().executorId,
+        requestedBy: asked ? { clientId: asked.clientId, name: mcpClients.get(asked.clientId)?.name ?? "a removed MCP client", kind: asked.kind } : null,
+      };
+    });
     res.json({ executorId: executorStatus().executorId, items });
   } catch (error) {
     res.status(502).json({ error: `The hub did not answer: ${(error as Error).message}` });
   }
 });
 
+/* ---- the Agents page: everything working on this machine's projects ---- */
+// The hub's queue and target are read at most every 15 s, and a slow hub never
+// holds the page up for more than 2.5 s: it shows what it had last.
+let agentHubCache: { at: number; signedIn: boolean; hub: { target: string; reachable: boolean } | null; queue: Awaited<ReturnType<ReturnType<typeof hubClient>["listQueue"]>> | null } | null = null;
+let agentHubRefresh: Promise<void> | null = null;
+async function agentHubState() {
+  if (agentHubCache && Date.now() - agentHubCache.at < 15_000) return agentHubCache;
+  agentHubRefresh ??= (async () => {
+    const signedIn = await hubReady();
+    const hub = hubMode() === "local"
+      ? { target: LOCAL_HUB_TARGET, reachable: true }
+      : await refreshWerewolfRuntime().then((api) => ({ target: `${api.source} (${api.activeUrl})`, reachable: api.reachable })).catch(() => null);
+    const queue = signedIn ? await hubForCockpit().listQueue().catch(() => null) : null;
+    agentHubCache = { at: Date.now(), signedIn, hub, queue };
+  })().finally(() => { agentHubRefresh = null; });
+  const timeout = new Promise<void>((resolve) => setTimeout(resolve, 2_500).unref());
+  await Promise.race([agentHubRefresh, timeout]);
+  return agentHubCache ?? { at: 0, signedIn: false, hub: null, queue: null };
+}
+
+const AGENT_HISTORY_MS = 24 * 60 * 60_000;
+/** Every project's runbook agents (scripts classified `agent`), main checkouts only. */
+function scriptAgentRoster() {
+  return primaryCheckouts(getProjects()).flatMap((project) =>
+    (runbookFor(project.name)?.units ?? [])
+      .filter((unit) => unit.kind === "agent")
+      .map((unit) => ({
+        project: project.name,
+        unit: unit.id,
+        title: unit.title,
+        command: unit.command,
+        folder: path.basename(path.join(project.path, unit.folder)),
+        summary: unit.summary,
+        port: unit.port,
+        costs: unit.costs,
+        aliases: unit.aliases.map((alias) => ({ command: alias === "start" ? "npm start" : `npm run ${alias}`, folder: path.basename(project.path) })),
+      })));
+}
+async function agentRoster(): Promise<AgentSummary[]> {
+  const hub = await agentHubState();
+  return buildRoster({
+    machine: os.hostname(),
+    executor: executorStatus(),
+    hub: hub.hub,
+    signedIn: hub.signedIn,
+    localQueue: hubMode() === "local",
+    jobs: executorActivity().list(),
+    queue: hub.queue,
+    sessions: sessionRoster(Date.now() - AGENT_HISTORY_MS),
+    rooms: openWorkrooms().map((room) => ({ id: room.id, title: room.title, projects: room.projects })),
+    processes: processRoster(),
+    scriptAgents: scriptAgentRoster(),
+    mcpClients: mcpClients.list().map((client) => ({ ...client, recent: mcpClients.recent(client.id, 1) })),
+    projects: primaryCheckouts(getProjects()),
+    now: Date.now(),
+  });
+}
+
+local.get("/api/agents", async (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "The Agents page is local to this machine." });
+  res.json({ machine: os.hostname(), agents: await agentRoster() });
+});
+
+/** One agent with what it is doing: its transcript, queue, log tail or calls. */
+local.get("/api/agents/:id", async (req, res) => {
+  if (!localRequest(req)) return res.status(403).json({ error: "The Agents page is local to this machine." });
+  const id = req.params.id;
+  const agent = (await agentRoster()).find((entry) => entry.id === id);
+  if (!agent) return res.status(404).json({ error: "That agent is not running any more." });
+  let detail: Record<string, unknown> = {};
+  if (agent.kind === "project-agent") {
+    const entry = agent.jobId ? executorActivity().get(agent.jobId) : null;
+    if (entry) detail = { jobId: entry.jobId, jobKind: entry.kind, text: entry.text, attempt: entry.attempt, timeline: entry.timeline.slice(-30), lines: entry.agent.slice(-40), error: entry.error };
+  } else if (agent.kind === "remote-executor") {
+    const executor = id.slice("remote:".length);
+    const names = new Map(primaryCheckouts(getProjects()).filter((project) => project.id).map((project) => [project.id!, project.name]));
+    detail = { items: (agentHubCache?.queue ?? []).filter((item) => item.claim?.executorId === executor).map((item) => ({ intakeId: item.intakeId, project: names.get(item.projectId) ?? item.projectId, text: item.text.slice(0, 400), status: item.status, updatedAt: item.updatedAt })) };
+  } else if (agent.kind === "ai-session") {
+    const name = decodeURIComponent(id.slice("ai:".length));
+    const state = aiState(name);
+    detail = {
+      session: { name, sessionId: state.sessionId, engine: state.engine, model: state.model, actualModel: state.actualModel, effort: state.effort, messages: state.messages, busy: state.busy },
+      question: state.question,
+      queue: sessionQueue(name),
+      recent: state.recent.filter((event) => event.role !== "system" || /^→\s+/.test(event.text)).slice(-30).map((event) => ({ t: event.t, role: event.role, text: event.text.slice(0, 800) })),
+    };
+  } else if (agent.kind === "process") {
+    const proc = processRoster(40).find((entry) => agentId.process(entry.name, entry.kind) === id);
+    if (proc) detail = { command: proc.command, folder: proc.folder, pid: proc.pid, exitCode: proc.exitCode, kind: proc.kind, log: proc.log };
+    else if (agent.control?.unit) {
+      // A runbook agent nothing has started yet: what Start would run.
+      const unit = runbookFor(agent.control.project)?.units.find((entry) => entry.id === agent.control!.unit);
+      if (unit) detail = { command: unit.command, folder: unit.folder || ".", script: unit.scriptText, summary: unit.summary, whenToUse: unit.whenToUse, costs: unit.costs };
+    }
+  } else if (agent.kind === "mcp-client") {
+    const client = mcpClients.get(id.slice("mcp:".length));
+    if (client) detail = { createdAt: client.createdAt, createdBy: client.createdBy, calls: mcpClients.recent(client.id, 30) };
+  }
+  res.json({ agent, detail });
+});
+
 /* ---- implement jobs (P14 phase E): Go, and review where the branch lives ---- */
-const projectById = (id: string) => getProjects().find((project) => project.id === id) ?? null;
+// By id, the main checkout: a linked worktree carries the same committed id.
+const projectById = (id: string) => primaryCheckouts(getProjects()).find((project) => project.id === id) ?? null;
 /** The clone of a job this machine ran, or null. */
 const localClone = (job: { jobId: string; projectId: string }) => {
   const project = projectById(job.projectId);
@@ -2591,7 +3120,7 @@ const localClone = (job: { jobId: string; projectId: string }) => {
 };
 const jobRoute = (handler: (req: express.Request, res: express.Response) => Promise<unknown>) => async (req: express.Request, res: express.Response) => {
   if (!localRequest(req)) return res.status(403).json({ error: "Review implement jobs from the local cockpit." });
-  if (!(await currentUser())) return res.status(401).json({ error: "Sign in with Werewolf first." });
+  if (!(await hubReady())) return res.status(401).json({ error: "Sign in with Werewolf first." });
   try {
     await handler(req, res);
   } catch (error) {
@@ -2621,7 +3150,7 @@ local.post("/api/executor/jobs", jobRoute(async (req, res) => {
 }));
 local.get("/api/executor/job-models", jobRoute(async (req, res) => {
   const engine = req.query.engine;
-  const project = getProjects().find((candidate) => candidate.id === req.query.projectId);
+  const project = projectById(String(req.query.projectId ?? ""));
   if ((engine !== "claude" && engine !== "codex") || !project) return res.status(400).json({ error: "Choose a local project and provider." });
   res.json(await modelCatalog(engine, project.path));
 }));
@@ -2629,7 +3158,8 @@ local.get("/api/executor/jobs/:jobId/diff", jobRoute(async (req, res) => {
   const job = await findJob(req.params.jobId);
   const clone = job && localClone(job);
   if (!job || !clone) return res.status(404).json({ error: "This machine does not hold that job's branch." });
-  res.json({ job, diff: readJobDiff(clone.dir, job.jobId) });
+  // Earlier "the project made this easy" causes, so a repeat shows while reviewing.
+  res.json({ job, diff: readJobDiff(clone.dir, job.jobId), projectCauses: reviewCauses().projectCauses(job.projectId).slice(0, 10) });
 }));
 local.post("/api/executor/jobs/:jobId/accept", jobRoute(async (req, res) => {
   const job = await findJob(req.params.jobId);
@@ -2648,8 +3178,11 @@ local.post("/api/executor/jobs/:jobId/accept", jobRoute(async (req, res) => {
 local.post("/api/executor/jobs/:jobId/reject", jobRoute(async (req, res) => {
   const job = await findJob(req.params.jobId);
   if (!job) return res.status(404).json({ error: "No such job." });
+  const why = parseReviewCause(req.body);
+  if ("error" in why) return res.status(400).json({ error: why.error });
   const saved = await hubForCockpit().reviewJob(job.jobId, "reject");
-  executorActivity().reviewed(job.jobId, "reject");
+  reviewCauses().record({ jobId: job.jobId, projectId: job.projectId, action: "reject", ...why, task: executorActivity().get(job.jobId)?.text ?? "" });
+  executorActivity().reviewed(job.jobId, "reject", causeLabel(why.cause, why.note));
   const clone = localClone(job);
   if (clone) discardClone(clone.dir);
   res.json({ job: saved });
@@ -2657,8 +3190,11 @@ local.post("/api/executor/jobs/:jobId/reject", jobRoute(async (req, res) => {
 local.post("/api/executor/jobs/:jobId/revise", jobRoute(async (req, res) => {
   const comment = String(req.body?.comment || "").trim();
   if (!comment) return res.status(400).json({ error: "Say what to change." });
+  const why = parseReviewCause(req.body, comment);
+  if ("error" in why) return res.status(400).json({ error: why.error });
   const saved = await hubForCockpit().reviewJob(req.params.jobId, "revise", comment);
-  executorActivity().reviewed(req.params.jobId, "revise", comment.slice(0, 300));
+  reviewCauses().record({ jobId: saved.jobId, projectId: saved.projectId, action: "revise", ...why, task: executorActivity().get(saved.jobId)?.text ?? "" });
+  executorActivity().reviewed(req.params.jobId, "revise", `${comment.slice(0, 300)} (${causeLabel(why.cause, why.note)})`);
   res.json({ job: saved });
 }));
 local.post("/api/executor/jobs/:jobId/cancel", jobRoute(async (req, res) => {
@@ -2666,6 +3202,15 @@ local.post("/api/executor/jobs/:jobId/cancel", jobRoute(async (req, res) => {
   const clone = localClone(job);
   if (clone) discardClone(clone.dir);
   res.json({ job });
+}));
+
+// Tasks written in PSM itself (P17): the Executor page's composer, Edit and Withdraw.
+local.use(intakeRoutes({
+  isLocal: localRequest,
+  signedIn: () => hubReady(),
+  hub: hubForCockpit,
+  projects: getProjects,
+  executorId: () => executorStatus().executorId ?? executorId(),
 }));
 
 // The hub's project registry, which the Todo `@project` picker reads.
@@ -2695,7 +3240,20 @@ app.use("/api", (req, res) => {
   res.status(404).json({ error: `unknown API route: ${req.method} /api${req.path}`, code: "unknown_route" });
 });
 
-app.use(express.static(WEB_DIR));
+/** The cockpit page, carrying this install's operator token. Never cached: a rotated token must reach the next load. */
+function sendCockpit(res: express.Response) {
+  let html: string;
+  try {
+    html = fs.readFileSync(path.join(WEB_DIR, "index.html"), "utf8");
+  } catch {
+    return res.status(500).type("text/plain").send("psm could not read its page.");
+  }
+  res.setHeader("Cache-Control", "no-store");
+  res.type("html").send(injectOperatorToken(html, operatorCredential.current().token));
+}
+app.get(["/", "/index.html"], (_req, res) => sendCockpit(res));
+
+app.use(express.static(WEB_DIR, { index: false }));
 
 /**
  * SPA fallback. The cockpit is a single page, and sign-in returns the browser to
@@ -2708,7 +3266,7 @@ app.use(express.static(WEB_DIR));
  */
 app.get(/^(?!\/api\/).*/, (req, res, next) => {
   if (req.method !== "GET" || req.path.includes(".")) return next();
-  res.sendFile(path.join(WEB_DIR, "index.html"));
+  sendCockpit(res);
 });
 
 // psm never leaves loopback. The public face is a static site; see src/mode.ts.
