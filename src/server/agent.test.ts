@@ -101,6 +101,41 @@ test("a loopback Origin passes without any token", () => {
   assert.equal(passed, true, "the local cockpit must never need pairing");
 });
 
+test("another localhost port is not the cockpit and needs the token", () => {
+  for (const mode of ["dev", "agent"] as const) {
+    setModeForTesting(mode);
+    // a project's dev server or psm's own preview proxy runs code psm did not write
+    for (const origin of ["http://localhost:5173", "http://127.0.0.1:4318", "http://localhost"]) {
+      const { res, passed } = run(agentGuard(), fakeReq({ headers: { origin } }));
+      assert.equal(passed, false, `${origin} in ${mode} mode`);
+      assert.equal(res.statusCode, 401);
+      assert.equal(res.body.code, "agent_unpaired");
+    }
+  }
+});
+
+test("another localhost port passes once it presents the token", () => {
+  setModeForTesting("dev");
+  const { passed } = run(
+    agentGuard(),
+    fakeReq({ headers: { origin: "http://localhost:8080", authorization: `Bearer ${agentSecret().token}` } }),
+  );
+  assert.equal(passed, true, "the static page on :8080 pairs like the hosted page");
+});
+
+test("isOwnLoopbackOrigin matches only the agent's port on loopback", async () => {
+  const { isOwnLoopbackOrigin } = await import("./agent.ts");
+  const own = (origin: string, host = "127.0.0.1:4317") => isOwnLoopbackOrigin(fakeReq({ headers: { origin, host } }));
+  assert.equal(own("http://localhost:4317"), true);
+  assert.equal(own("http://127.0.0.1:4317"), true);
+  assert.equal(own("http://[::1]:4317"), true);
+  assert.equal(own("http://localhost:4318"), false);
+  assert.equal(own("https://localhost:4317"), false);
+  assert.equal(own("http://evil.example:4317"), false);
+  assert.equal(own("not a url"), false);
+  assert.equal(isOwnLoopbackOrigin(fakeReq()), false, "no Origin is not an origin");
+});
+
 test("dev mode refuses the hosted origin outright", () => {
   setModeForTesting("dev");
   const { res, passed } = run(
@@ -213,9 +248,12 @@ test("a loopback origin on another port still gets CORS headers", () => {
   // talking to the agent on 127.0.0.1:4317 is cross-origin by every rule the
   // browser applies. Without these headers the response is blocked, which looks
   // exactly like "the agent is not running" — and did, for a while.
+  // It still needs the token (P02a.1): the headers only let the browser read
+  // the 401, so the page can show its pairing screen instead of "unreachable".
   setModeForTesting("agent");
   const { res, passed } = run(agentGuard(), fakeReq({ headers: { origin: "http://localhost:8080" } }));
-  assert.equal(passed, true, "a loopback origin needs no token");
+  assert.equal(passed, false, "another loopback port needs the token");
+  assert.equal(res.statusCode, 401);
   assert.equal(res.headers["access-control-allow-origin"], "http://localhost:8080");
   assert.equal(res.headers["vary"], "Origin");
 });

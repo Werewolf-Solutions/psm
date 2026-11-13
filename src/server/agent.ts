@@ -9,8 +9,9 @@
  * the most security-sensitive file in the repo. The rules:
  *
  *   - The socket stays on 127.0.0.1. Never 0.0.0.0.
- *   - Same-origin and loopback requests keep working unauthenticated, exactly as
- *     before. The local cockpit is unchanged.
+ *   - Same-origin requests, and requests from the agent's own loopback origin,
+ *     work unauthenticated. A page on any other localhost port (a project's dev
+ *     server, the preview proxy) needs the pairing token like a hosted page.
  *   - A cross-origin request is allowed only when all of: the process is in agent
  *     mode, the Origin is on the allowlist, and it carries the pairing token.
  *   - `Origin` alone is never enough. It is a browser-supplied header, so any
@@ -99,6 +100,25 @@ export function hostedOrigins(): string[] {
 export const isLoopbackHost = (hostname: string) =>
   hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]";
 
+/**
+ * True only for this agent's own origin: a loopback Origin on the port the
+ * request arrived at. Any other loopback port (a project's dev server, psm's
+ * preview proxy, the static page on :8080) runs code psm did not write, so it
+ * is treated like a paired origin and needs the token.
+ */
+export function isOwnLoopbackOrigin(req: express.Request): boolean {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string") return false;
+  try {
+    const from = new URL(origin);
+    const to = new URL(`http://${req.headers.host || "invalid"}`);
+    const port = (url: URL) => url.port || (url.protocol === "https:" ? "443" : "80");
+    return from.protocol === "http:" && isLoopbackHost(from.hostname) && isLoopbackHost(to.hostname) && port(from) === port(to);
+  } catch {
+    return false;
+  }
+}
+
 function originAllowed(origin: string): boolean {
   let url: URL;
   try {
@@ -163,13 +183,9 @@ export function agentGuard(options: GuardOptions = {}): express.RequestHandler {
       return res.status(403).json({ error: "cross-origin requests are not allowed" });
     }
 
-    let originHost = "";
-    try {
-      originHost = new URL(origin).hostname;
-    } catch {
-      return res.status(400).json({ error: "invalid Origin header" });
-    }
-    const loopbackOrigin = isLoopbackHost(originHost);
+    // Only the agent's own origin is the local cockpit. Other loopback ports
+    // are allowed through CORS but must present the pairing token below.
+    const ownOrigin = isOwnLoopbackOrigin(req);
 
     // Any allowed origin that is not this exact origin needs CORS headers.
     //
@@ -194,10 +210,10 @@ export function agentGuard(options: GuardOptions = {}): express.RequestHandler {
     }
     if (req.method === "OPTIONS") return res.status(204).end();
 
-    // The token is what actually authenticates, and only a non-loopback origin
-    // has to present one: reaching loopback already means being on this machine.
+    // The token is what actually authenticates. Only the agent's own origin is
+    // exempt: a page on another localhost port is someone else's code.
     const shortTicket = options.shortLivedQueryTicket?.(req) === true;
-    if (!loopbackOrigin && !publicPaths.has(req.path) && !shortTicket && !tokenMatches(presentedToken(req))) {
+    if (!ownOrigin && !publicPaths.has(req.path) && !shortTicket && !tokenMatches(presentedToken(req))) {
       return res.status(401).json({
         error: "pair this browser with the agent first",
         code: "agent_unpaired",

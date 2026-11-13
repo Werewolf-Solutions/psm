@@ -5,6 +5,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { McpCapability } from "../types.ts";
 import { db } from "./db.ts";
+import { selfAttachmentReason } from "./mcp/clients.ts";
 import { AgentPermissionStore, PermissionError, type PermissionProject, type PermissionSnapshot } from "./agent-permissions.ts";
 
 export interface AttachedCall {
@@ -22,8 +23,10 @@ export type McpConnection = { client: Pick<Client, "listTools" | "callTool">; cl
  */
 export async function connectAttachedMcp(capability: McpCapability, credentials: Record<string, string> | null = null): Promise<McpConnection> {
   const value = (name: string) => credentials?.[name] ?? process.env[name];
-  const client = new Client({ name: "psm-managed", version: "1" });
   const wire = capability.mcp;
+  const selfAttachment = selfAttachmentReason(wire as Parameters<typeof selfAttachmentReason>[0], capability.requiredEnv);
+  if (selfAttachment) throw new Error(selfAttachment);
+  const client = new Client({ name: "psm-managed", version: "1" });
   if (wire.transport === "stdio") {
     const env: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin", ...wire.env };
     for (const name of capability.requiredEnv) { const found = value(name); if (found) env[name] = found; }

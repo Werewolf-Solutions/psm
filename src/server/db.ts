@@ -441,6 +441,54 @@ const MIGRATIONS: readonly string[] = [
   `CREATE TABLE resources (
      key TEXT PRIMARY KEY, revision INTEGER NOT NULL, document TEXT NOT NULL CHECK(json_valid(document))
    );`,
+  // AI clients that reach psm's MCP server (Codex, Claude, ai-mesh). Only a hash
+  // of each credential is kept; the value is shown once when it is minted. The
+  // audit table records which client called which tool on which project.
+  `CREATE TABLE mcp_clients (
+     id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, document TEXT NOT NULL CHECK(json_valid(document))
+   );
+   CREATE TABLE mcp_audit (
+     id INTEGER PRIMARY KEY AUTOINCREMENT, client_id TEXT NOT NULL, tool TEXT NOT NULL,
+     project_id TEXT, outcome TEXT NOT NULL, at INTEGER NOT NULL
+   );
+   CREATE INDEX mcp_audit_by_client ON mcp_audit (client_id, at DESC);`,
+  // Stacks (P18): named sets of runbook units, possibly across projects, started
+  // together. They name this machine's projects, so they live here, not in a repo.
+  `CREATE TABLE stacks (
+     id TEXT PRIMARY KEY, document TEXT NOT NULL CHECK(json_valid(document))
+   );`,
+  // Units the operator lets MCP clients start (P18 R6), bound to a digest of the
+  // script: editing the script, its folder or its kind drops the grant.
+  `CREATE TABLE unit_mcp_grants (
+     project_id TEXT NOT NULL, unit_id TEXT NOT NULL, digest TEXT NOT NULL, granted_at INTEGER NOT NULL,
+     PRIMARY KEY (project_id, unit_id)
+   );`,
+  // Requests an MCP client sent for a project (submit_request): which client
+  // made which hub intake. The intake itself lives in the hub; this is the
+  // attribution, the client's daily count and what it may read back.
+  `CREATE TABLE mcp_requests (
+     intake_id TEXT PRIMARY KEY, client_id TEXT NOT NULL, project_id TEXT NOT NULL,
+     kind TEXT NOT NULL, key TEXT NOT NULL, created_at INTEGER NOT NULL
+   );
+   CREATE INDEX mcp_requests_by_client ON mcp_requests (client_id, created_at DESC);
+   CREATE UNIQUE INDEX mcp_requests_by_key ON mcp_requests (client_id, key);`,
+  // The queue kept in psm itself (executor/local-hub.ts): intake waiting for
+  // triage, and the implement jobs Go makes from it. Same rules as the Werewolf hub.
+  `CREATE TABLE hub_intake (
+     intake_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, source TEXT NOT NULL, key TEXT NOT NULL UNIQUE,
+     text TEXT NOT NULL, status TEXT NOT NULL, claim_executor TEXT, lease_until INTEGER,
+     attempts INTEGER NOT NULL DEFAULT 0, verdict TEXT, error TEXT,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+   );
+   CREATE INDEX hub_intake_by_status ON hub_intake (status, created_at);
+   CREATE TABLE hub_jobs (
+     job_id TEXT PRIMARY KEY, intake_id TEXT NOT NULL, project_id TEXT NOT NULL, selection TEXT NOT NULL,
+     status TEXT NOT NULL, claim_executor TEXT, lease_until INTEGER, attempts INTEGER NOT NULL DEFAULT 0,
+     pinned_executor TEXT, revisions TEXT NOT NULL DEFAULT '[]', progress TEXT, result TEXT, error TEXT,
+     created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+   );
+   CREATE INDEX hub_jobs_by_status ON hub_jobs (status, created_at);
+   CREATE INDEX hub_jobs_by_intake ON hub_jobs (intake_id);`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */
