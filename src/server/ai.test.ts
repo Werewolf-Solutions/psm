@@ -18,7 +18,7 @@ process.env.PSM_SESSIONS_FILE = sessionsFile;
 
 const {
   buildCommand,
-  permittedFullAccess,
+  parseAiMode,
   planningSessionKey,
   parseWorkroomProposal,
   resolveExtraDirs,
@@ -91,12 +91,12 @@ function repo(name: string): string {
 
 /* ---------- how much authority one turn runs with ---------- */
 
-test("legacy full access values and requests cannot disable the sandbox", () => {
-  for (const saved of [false, true]) {
-    for (const requested of [undefined, false, true, null, 0, "true", {}]) {
-      assert.equal(permittedFullAccess(saved, requested), false);
-    }
+test("an unknown or missing chat mode falls back to the CLI's own default", () => {
+  for (const requested of [undefined, null, true, "bypassPermissions", "acceptEdits", {}]) {
+    assert.equal(parseAiMode(requested), "default");
   }
+  assert.equal(parseAiMode("plan"), "plan");
+  assert.equal(parseAiMode("auto"), "auto");
 });
 
 /* ---------- what psm hands the CLI ---------- */
@@ -225,72 +225,63 @@ test("no extra directories means no extra flags", () => {
 
 /* ---------- the command line psm actually spawns ---------- */
 
-test("claude is given each extra repository, and told to edit rather than ask", () => {
+test("claude is given each extra repository, and the default mode adds no permission flag", () => {
   const { cmd, args } = buildCommand(
     spec({ extraDirs: ["/w/provider"] }),
     "do the thing",
-    false,
+    "default",
   );
   assert.equal(cmd, "claude");
   assert.deepEqual(
     args.slice(args.indexOf("--add-dir"), args.indexOf("--add-dir") + 2),
     ["--add-dir", "/w/provider"],
   );
-  assert.equal(args[args.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.ok(!args.includes("--permission-mode"), "default leaves the CLI's own setting in charge");
   assert.equal(args.at(-1), "do the thing", "the prompt is an argument, never a shell string");
 });
 
-test("codex is given the same directories, with its own sandbox flag", () => {
+test("codex is given the same directories, and the default mode adds no sandbox flag", () => {
   const { cmd, args } = buildCommand(
     spec({ engine: "codex", extraDirs: ["/w/provider"] }),
     "do the thing",
-    false,
+    "default",
   );
   assert.equal(cmd, "codex");
   assert.deepEqual(args.slice(0, 2), ["exec", "--json"]);
-  assert.equal(args[args.indexOf("-s") + 1], "workspace-write");
+  assert.ok(!args.includes("-s"), "default leaves config.toml in charge");
   assert.ok(args.includes("--add-dir") && args.includes("/w/provider"));
+});
+
+test("plan and auto map onto each CLI's own flags", () => {
+  const flag = (args: string[], name: string) => args[args.indexOf(name) + 1];
+  assert.equal(flag(buildCommand(spec(), "go", "plan").args, "--permission-mode"), "plan");
+  assert.equal(flag(buildCommand(spec(), "go", "auto").args, "--permission-mode"), "auto");
+  assert.equal(flag(buildCommand(spec({ engine: "codex" }), "go", "plan").args, "-s"), "read-only");
+  assert.equal(flag(buildCommand(spec({ engine: "codex" }), "go", "auto").args, "-s"), "workspace-write");
+  assert.equal(flag(buildCommand(spec({ name: WORKSPACE_NAME }), "go", "auto").args, "--permission-mode"), "auto");
 });
 
 test("a planner may read the other repository but not write anywhere", () => {
   const { args } = buildCommand(
     spec({ name: planningSessionKey("consumer", "planner"), extraDirs: ["/w/provider"] }),
     "plan it",
-    true, // even asking for full access
+    "auto", // even when the chat bar says auto
   );
-  assert.equal(
-    args[args.indexOf("--permission-mode") + 1],
-    "plan",
-    "a planner stays a planner whatever the project's full-access setting says",
-  );
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "plan", "a planner stays a planner");
+  const codex = buildCommand(spec({ name: planningSessionKey("consumer", "reviewer"), engine: "codex" }), "review", "default");
+  assert.equal(codex.args[codex.args.indexOf("-s") + 1], "read-only");
   assert.ok(args.includes("--add-dir"), "it still has to be able to read the other side");
 });
 
-test("every CLI scope remains sandboxed even when passed a legacy full-access value", () => {
-  const wide = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", true);
-  assert.equal(wide.args[wide.args.indexOf("--permission-mode") + 1], "acceptEdits");
-  assert.ok(wide.args.includes("--add-dir"));
-  const project = buildCommand(spec(), "go", true);
-  assert.equal(project.args[project.args.indexOf("--permission-mode") + 1], "acceptEdits");
-  const codexRoom = buildCommand(spec({ engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
-  assert.equal(codexRoom.args[codexRoom.args.indexOf("-s") + 1], "workspace-write");
-  const workspace = buildCommand(spec({ name: WORKSPACE_NAME }), "go", true);
-  assert.equal(workspace.args[workspace.args.indexOf("--permission-mode") + 1], "acceptEdits");
-  const workspaceWide = buildCommand(spec({ name: WORKSPACE_NAME, engine: "codex", extraDirs: ["/w/provider"] }), "go", true);
-  assert.equal(workspaceWide.args[workspaceWide.args.indexOf("-s") + 1], "workspace-write");
-  const workspaceCodex = buildCommand(spec({ name: WORKSPACE_NAME, engine: "codex" }), "go", true);
-  assert.equal(workspaceCodex.args[workspaceCodex.args.indexOf("-s") + 1], "workspace-write");
-});
-
 test("the scope the AI is told matches the scope it is given", () => {
-  const { args } = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", false);
+  const { args } = buildCommand(spec({ extraDirs: ["/w/provider"] }), "go", "default");
   const prompt = args[args.indexOf("--append-system-prompt") + 1];
   assert.match(prompt, /\/w\/provider/, "the directory in the argv has to be the one named in the prompt");
   assert.match(prompt, /Nothing outside them is writable/);
 });
 
 test("one project on its own gets no scope section and no extra flags", () => {
-  const { args } = buildCommand(spec(), "go", false);
+  const { args } = buildCommand(spec(), "go", "default");
   assert.ok(!args.includes("--add-dir"), "the common case must stay exactly as it was");
   const prompt = args[args.indexOf("--append-system-prompt") + 1] ?? "";
   assert.ok(!prompt.includes("## Scope"), "nothing to say when there is nothing else in scope");
@@ -300,7 +291,7 @@ test("resuming carries the scope flags too, not just the session id", () => {
   const { args } = buildCommand(
     spec({ sessionId: "abc-123", extraDirs: ["/w/provider"] }),
     "carry on",
-    false,
+    "default",
   );
   assert.equal(args[args.indexOf("--resume") + 1], "abc-123");
   assert.ok(
@@ -313,7 +304,7 @@ test("every turn asks for diagrams as rendered figures, not ASCII art", () => {
   // The transcript renders a ```html block inline (web/app.js renderAiText); box
   // art drawn in a text fence is unreadable in a proportional bubble, so the ask
   // has to reach the model on every turn, resumed turns included.
-  const { args } = buildCommand(spec({ sessionId: "abc-123" }), "explain the architecture", false);
+  const { args } = buildCommand(spec({ sessionId: "abc-123" }), "explain the architecture", "default");
   const prompt = args[args.indexOf("--append-system-prompt") + 1];
   assert.match(prompt, /```psm-figure/, "the fence psm renders is the one the model is told to write");
   assert.match(prompt, /do not draw it as ASCII or box art/);
@@ -326,7 +317,7 @@ test("codex hears the same figure rule when it resumes", () => {
   const { args } = buildCommand(
     spec({ engine: "codex", sessionId: "abc-123" }),
     "explain the architecture",
-    false,
+    "default",
   );
   assert.match(String(args.at(-1)), /```psm-figure/);
 });

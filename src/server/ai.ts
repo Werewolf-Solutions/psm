@@ -27,6 +27,16 @@ const SESSIONS_FILE =
 export type AiEngine = "claude" | "codex";
 export type AiModel = string | null;
 export type AiEffort = string | null;
+/**
+ * How a chat turn runs, picked in the chat bar. "default" passes no permission
+ * flag at all, so the CLI uses whatever the user configured for it (Claude's
+ * settings.json, Codex's config.toml) — exactly like running it in a terminal.
+ */
+export type AiMode = "default" | "plan" | "auto";
+export const AI_MODES: readonly AiMode[] = ["default", "plan", "auto"];
+export function parseAiMode(value: unknown, fallback: AiMode = "default"): AiMode {
+  return AI_MODES.includes(value as AiMode) ? (value as AiMode) : fallback;
+}
 
 /** Reserved session key for the workspace-wide chat (cwd = workspace root). */
 export const WORKSPACE_NAME = "__workspace__";
@@ -156,7 +166,7 @@ interface QueuedTurn {
   message: string;
   model: AiModel;
   effort: AiEffort;
-  fullAccess: boolean;
+  mode: AiMode;
   extraContext: string;
 }
 
@@ -743,7 +753,7 @@ function continuePlanningAfterPlan(s: AiSession, plan: ImplementationPlan): Impl
     loop.reviewer.model,
     loop.reviewer.effort,
     modelReviewPrompt(reviewing, nextRound, loop.maxRounds),
-    false,
+    "plan",
     plannerSystemContext("reviewer"),
   );
   if (!queued.ok) failPlanning(identity.project, queued.error || "reviewer could not start", reviewing);
@@ -795,7 +805,7 @@ function continuePlanningAfterReview(s: AiSession, plan: ImplementationPlan): vo
     loop.planner.model,
     loop.planner.effort,
     revisionPrompt(plan),
-    false,
+    "plan",
     plannerSystemContext("planner"),
   );
   if (!queued.ok) failPlanning(identity.project, queued.error || "planner could not revise");
@@ -1077,6 +1087,51 @@ export function activeSessions() {
   return out.sort((a, b) => b.lastActive - a.lastActive);
 }
 
+/**
+ * Every conversation the Agents page lists: live ones, and ones active since
+ * `since`. Unlike activeSessions() it keeps planners, reviewers, the workspace
+ * chat and workrooms, and says where each one works.
+ */
+export function sessionRoster(since: number) {
+  const out = [];
+  for (const [name, s] of sessions) {
+    const identity = sessionIdentity(name);
+    const lastEvent = s.log[s.log.length - 1];
+    const lastActive = lastEvent?.t ?? 0;
+    const open = s.subscribers.size > 0;
+    const live = s.busy || open || s.queue.length > 0 || !!s.question;
+    if (!live && lastActive < since) continue;
+    out.push({
+      name,
+      role: identity.role,
+      project: identity.project,
+      roomId: name.startsWith(WORK_PREFIX) ? name.slice(WORK_PREFIX.length) : null,
+      workspace: name === WORKSPACE_NAME,
+      engine: s.engine,
+      model: s.model,
+      effort: s.effort,
+      actualModel: s.actualModel,
+      sessionId: s.sessionId,
+      sessionShort: short(s.sessionId),
+      busy: s.busy,
+      open,
+      waiting: !!s.question,
+      queueDepth: s.queue.length,
+      messages: s.log.filter((e) => e.role === "user").length,
+      lastActive,
+      activity: sessionActivity(s),
+      folder: path.basename(s.cwd),
+      extraFolders: s.extraDirs.map((dir) => path.basename(dir)),
+    });
+  }
+  return out.sort((a, b) => b.lastActive - a.lastActive);
+}
+
+/** The messages waiting behind a running turn, trimmed for display. */
+export function sessionQueue(name: string): Array<{ message: string; model: AiModel }> {
+  return (sessions.get(name)?.queue ?? []).map((turn) => ({ message: turn.message.slice(0, 400), model: turn.model }));
+}
+
 /** Pending questions survive page/server reloads, including conversations with no open tab. */
 export function pendingQuestions() {
   return [...sessions].flatMap(([name, session]) => {
@@ -1103,10 +1158,6 @@ export function effortArgs(engine: AiEngine, effort: AiEffort): string[] {
     : ["--effort", value];
 }
 
-/** Retired legacy setting: old saved values and clients cannot disable the sandbox. */
-export function permittedFullAccess(_saved: boolean, _requested: unknown): boolean {
-  return false;
-}
 
 /**
  * Everything one turn's command line depends on.
@@ -1129,13 +1180,13 @@ export interface TurnSpec {
 export function buildCommand(
   s: TurnSpec,
   message: string,
-  fullAccess: boolean,
+  mode: AiMode,
   extraContext = "",
 ): { cmd: string; args: string[] } {
   const readOnly = sessionIdentity(s.name).role !== "agent";
-  // Keep sandboxing even if an old caller passes fullAccess=true.
-  void fullAccess;
-  const sandbox = readOnly ? "read-only" : "workspace-write";
+  // Planners and reviewers are always read-only. A chat turn runs like the CLI
+  // in a terminal: the chosen mode, or nothing at all so the CLI's own default applies.
+  const effective: AiMode = readOnly ? "plan" : mode;
   const scope = writableRootArgs(s.extraDirs);
   const rules = [
     composeSystemRules(s.cwd),
@@ -1147,7 +1198,7 @@ export function buildCommand(
     .filter(Boolean)
     .join("\n\n");
   if (s.engine === "codex") {
-    const sandboxArgs = ["-s", sandbox];
+    const sandboxArgs = effective === "plan" ? ["-s", "read-only"] : effective === "auto" ? ["-s", "workspace-write"] : [];
     const model = s.model ? ["--model", s.model] : [];
     const base = ["--json", "--skip-git-repo-check", ...model, ...effortArgs(s.engine, s.effort), ...sandboxArgs, ...scope];
     if (s.sessionId) {
@@ -1163,10 +1214,7 @@ export function buildCommand(
   if (s.model) args.push("--model", s.model);
   args.push(...effortArgs(s.engine, s.effort));
   args.push(...scope);
-  args.push(
-    "--permission-mode",
-    readOnly ? "plan" : "acceptEdits",
-  );
+  if (effective !== "default") args.push("--permission-mode", effective);
   if (rules) args.push("--append-system-prompt", rules);
   if (s.sessionId) args.push("--resume", s.sessionId);
   args.push(message);
@@ -1258,7 +1306,7 @@ function handleClaudeLine(s: AiSession, line: string) {
       noteLimit(s, "claude", text || "Claude usage limit reached.", parseResetAt(text), true);
     }
     if (Array.isArray(ev.permission_denials) && ev.permission_denials.length)
-      pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked — review effective Agent permissions in Capabilities`));
+      pushEvent(s, sys(`⚠ ${ev.permission_denials.length} action(s) blocked by the CLI permission mode — switch the chat mode to Auto, or allow the tool in the CLI settings`));
   }
 }
 
@@ -1381,7 +1429,7 @@ export function send(
   model: AiModel,
   effort: AiEffort,
   message: string,
-  fullAccess: boolean,
+  mode: AiMode,
   extraContext = "",
   extraDirs: string[] = [],
   preparation?: AiEvent["preparation"],
@@ -1401,12 +1449,12 @@ export function send(
 
   if (s.busy) {
     // a turn is in flight — hold this one and run it when the current turn ends
-    s.queue.push({ message, model: s.model, effort: s.effort, fullAccess, extraContext });
+    s.queue.push({ message, model: s.model, effort: s.effort, mode, extraContext });
     broadcast(s, "queued", { depth: s.queue.length });
     return { ok: true, queued: true };
   }
 
-  startTurn(s, message, fullAccess, extraContext, s.model, s.effort);
+  startTurn(s, message, mode, extraContext, s.model, s.effort);
   return { ok: true };
 }
 
@@ -1491,7 +1539,7 @@ export function startPlanningLoop(
       state.planner.model,
       state.planner.effort,
       initialPlanningPrompt(project, request),
-      false,
+      "plan",
       plannerSystemContext("planner"),
     );
     if (!result.ok) {
@@ -1529,7 +1577,7 @@ export function sendPlanningMessage(
     current.planner.model,
     current.planner.effort,
     message,
-    false,
+    "plan",
     plannerSystemContext("planner"),
   );
 }
@@ -1563,7 +1611,7 @@ export function queuePlanReview(
     state.reviewer.model,
     state.reviewer.effort,
     modelReviewPrompt(plan, 1, state.maxRounds),
-    false,
+    "plan",
     plannerSystemContext("reviewer"),
   );
   if (!result.ok) failPlanning(project, result.error || "reviewer could not start", plan);
@@ -1598,7 +1646,7 @@ export function startFreshAgentSession(
   model: AiModel,
   effort: AiEffort,
   message: string,
-  fullAccess: boolean,
+  mode: AiMode,
   extraDirs: string[] = [],
 ): { ok: boolean; error?: string; limited?: boolean; queued?: boolean; question?: boolean } {
   const limit = aiLimit(engine, model);
@@ -1608,7 +1656,7 @@ export function startFreshAgentSession(
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
-  return send(project, cwd, engine, model, effort, message, fullAccess, "", extraDirs);
+  return send(project, cwd, engine, model, effort, message, mode, "", extraDirs);
 }
 
 export function answerQuestion(
@@ -1616,7 +1664,7 @@ export function answerQuestion(
   cwd: string,
   requestId: string,
   answers: Record<string, unknown>,
-  fullAccess: boolean,
+  mode: AiMode,
   extraContext = "",
 ): { ok: boolean; error?: string; queued?: boolean } {
   const s = sessions.get(name);
@@ -1644,7 +1692,7 @@ export function answerQuestion(
   broadcast(s, "question-cleared", { id: request.id });
   pushEvent(s, { t: Date.now(), role: "user", text: transcriptLines.join("\n") });
 
-  const turn = { message, model: s.model, effort: s.effort, fullAccess, extraContext };
+  const turn = { message, model: s.model, effort: s.effort, mode, extraContext };
   if (s.busy && (s.child || s.managedAbort)) {
     s.queue.unshift(turn);
     s.turnPausedForQuestion = true;
@@ -1661,7 +1709,7 @@ export function answerQuestion(
 
   s.busy = false;
   s.child = null;
-  startTurn(s, message, fullAccess, extraContext, s.model, s.effort);
+  startTurn(s, message, mode, extraContext, s.model, s.effort);
   return { ok: true };
 }
 
@@ -1669,7 +1717,7 @@ export function answerQuestion(
 function startTurn(
   s: AiSession,
   message: string,
-  fullAccess: boolean,
+  mode: AiMode,
   extraContext: string,
   model: AiModel = s.model,
   effort: AiEffort = s.effort,
@@ -1744,7 +1792,7 @@ function startTurn(
     return;
   }
 
-  const { cmd, args } = buildCommand(s, message, fullAccess, extraContext);
+  const { cmd, args } = buildCommand(s, message, mode, extraContext);
   const handleLine = s.engine === "codex" ? handleCodexLine : handleClaudeLine;
 
   let child: ChildProcess;
@@ -1831,7 +1879,7 @@ function finishTurn(s: AiSession) {
   const next = s.queue.shift();
   if (next) {
     saveSessions();
-    startTurn(s, next.message, next.fullAccess, next.extraContext, next.model, next.effort);
+    startTurn(s, next.message, next.mode, next.extraContext, next.model, next.effort);
     return;
   }
 
