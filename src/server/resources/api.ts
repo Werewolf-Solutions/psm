@@ -17,6 +17,7 @@ import { procState, start, type ProcKind } from "../procs.ts";
 import { assemble, dockerView, envReferences, folderKey, folderSummary, type Discovery } from "./discover.ts";
 import { suggest } from "./levels.ts";
 import { detectScripts, scriptCommand, type DbScript } from "./scripts.ts";
+import { GIT_STATE_TEXT, scriptDigest, scriptGitState } from "./script-binding.ts";
 import { ResourceStoreError, isLevel, type Level, type ResourceStore } from "./store.ts";
 
 export interface ResourceApiOptions {
@@ -53,7 +54,8 @@ export function resourceRouter(options: ResourceApiOptions): express.Router {
   const router = express.Router();
   const { store } = options;
   /** Last preview per script kind: which target it ran against, and when. */
-  const previews = new Map<string, { target: string; command: string; startedAt: number }>();
+  /** Last preview per script kind: target, command, start, and the digest of what ran (P02a.4). */
+  const previews = new Map<string, { target: string; command: string; startedAt: number; digest: string }>();
 
   const discover = options.discover ?? (() => {
     const projects = options.projects();
@@ -89,7 +91,14 @@ export function resourceRouter(options: ResourceApiOptions): express.Router {
     const level = script.target ? store.effective(script.target.key) : "none";
     const levelSet = script.target ? !!store.get(script.target.key)?.level : false;
     const state = procState(script.project, scriptKind(script));
-    return { ...script, kind: scriptKind(script), level, levelSet, allowed: allowed(level, script), state };
+    const owner = project(script.project);
+    const git = owner ? scriptGitState(owner.path, script.path) : "no-git";
+    const verdict = allowed(level, script);
+    // A Read target previews committed code only (P02a.4); say so before the click.
+    const gated = level === "read" && verdict.preview && git !== "committed"
+      ? { ...verdict, preview: false, why: `On a Read database Preview runs committed code only; this script ${GIT_STATE_TEXT[git as Exclude<typeof git, "committed">]}.` }
+      : verdict;
+    return { ...script, kind: scriptKind(script), level, levelSet, allowed: gated, state, git };
   };
 
   router.get("/api/resources", (_req, res) => {
@@ -177,6 +186,12 @@ export function resourceRouter(options: ResourceApiOptions): express.Router {
       const level = script.target ? store.effective(script.target.key) : "none";
       const verdict = allowed(level, script);
       if (mode === "preview" ? !verdict.preview : !verdict.apply) return res.status(403).json({ error: verdict.why, code: "resource-level" });
+      // Preview executes the script with the database's credentials: on a Read target, only committed code.
+      const git = scriptGitState(owner.path, script.path);
+      if (mode === "preview" && level === "read" && git !== "committed") {
+        return res.status(403).json({ error: `On a Read database Preview runs committed code only; this script ${GIT_STATE_TEXT[git]}. Commit it, or set the database to Full.`, code: "uncommitted-script" });
+      }
+      const digest = scriptDigest(owner.path, script, script.target!.key);
 
       const kind = scriptKind(script);
       const state = procState(owner.name, kind);
@@ -192,12 +207,16 @@ export function resourceRouter(options: ResourceApiOptions): express.Router {
           && state.exitCode === 0
           && Date.now() - last.startedAt < PREVIEW_FRESH_MS;
         if (!clean) return res.status(409).json({ error: "Run Preview first; Apply follows a clean preview of the same database.", code: "preview-required" });
+        if (last.digest !== digest) {
+          previews.delete(kind);
+          return res.status(409).json({ error: "The script or its lockfile changed since its Preview. Preview it again before Apply.", code: "preview-stale" });
+        }
       }
 
       const command = scriptCommand(script, mode);
       const cwd = path.join(owner.path, script.directory);
       const entry = start(owner.name, kind, command, cwd, { unsetEnv: script.unset, redact: true });
-      if (mode === "preview") previews.set(kind, { target: script.target!.key, command, startedAt: entry.startedAt });
+      if (mode === "preview") previews.set(kind, { target: script.target!.key, command, startedAt: entry.startedAt, digest });
       else previews.delete(kind); // an Apply always needs its own fresh preview
       res.json({ ok: true, kind, command, target: script.target, status: entry.status });
     } catch (error) { fail(res, error); }

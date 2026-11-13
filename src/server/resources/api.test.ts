@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -33,11 +34,18 @@ function fixture(t: test.TestContext) {
     "console.log(process.argv.includes('--apply') ? 'APPLIED' : 'REPORT');",
   ].join("\n"));
   fs.writeFileSync(path.join(server, "scripts", "plain.js"), "console.log('no apply flag here')\n");
-  return { root, server };
+  fs.writeFileSync(path.join(server, "package-lock.json"), "{\"lockfileVersion\":3}\n");
+  fs.writeFileSync(path.join(root, ".gitignore"), ".env\n");
+  // Committed, as a real project's script is: Preview on a Read target runs committed code only (P02a.4).
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], { stdio: "ignore" });
+  git("init", "-q");
+  git("add", "-A");
+  git("commit", "-q", "-m", "fixture");
+  return { root, server, git };
 }
 
 async function harness(t: test.TestContext, options: { local?: boolean } = {}) {
-  const { root, server } = fixture(t);
+  const { root, server, git } = fixture(t);
   const database = openDatabase(":memory:");
   const store = new ResourceStore(() => database);
   const projects = () => [{ name: "dapp", path: root }];
@@ -65,7 +73,7 @@ async function harness(t: test.TestContext, options: { local?: boolean } = {}) {
     const text = await response.text();
     return { status: response.status, text, body: JSON.parse(text) as any };
   };
-  return { call, root, server, store };
+  return { call, root, server, store, git };
 }
 
 async function finished(project: string, kind: string) {
@@ -166,5 +174,53 @@ test("a folder is listed by name only until it is Read or Full", async (t) => {
   assert.equal(unset.summary, undefined, "no counting at None");
   await call("PUT", "/api/resources/level", { key: unset.key, level: "read", revision: unset.revision });
   const read = (await call("GET", "/api/resources")).body.resources.find((row: any) => row.kind === "folder");
-  assert.equal(read.summary.items, 1);
+  assert.equal(read.summary.items, fs.readdirSync(root).length, "server/, plus the fixture's .git and .gitignore");
+});
+
+test("P02a.4: Apply runs only what was previewed; an edited script or lockfile needs a new Preview", async (t) => {
+  const { call, server } = await harness(t);
+  const [script] = (await call("GET", "/api/resources/scripts?project=dapp")).body.scripts;
+  const run = (mode: string) => call("POST", "/api/resources/scripts/run", { project: "dapp", id: script.id, mode });
+  await call("PUT", "/api/resources/level", { key: MONGO, level: "full", revision: 0 });
+
+  assert.equal((await run("preview")).status, 200);
+  await finished("dapp", script.kind);
+  const file = path.join(server, "scripts", "migrate-owner.js");
+  fs.appendFileSync(file, "\nconsole.log('added after the preview');\n");
+  const stale = await run("apply");
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, "preview-stale");
+  assert.equal((await run("apply")).body.code, "preview-required", "a stale preview is spent");
+
+  assert.equal((await run("preview")).status, 200, "Full previews uncommitted code");
+  await finished("dapp", script.kind);
+  fs.writeFileSync(path.join(server, "package-lock.json"), "{\"lockfileVersion\":3,\"packages\":{\"evil\":{}}}\n");
+  assert.equal((await run("apply")).body.code, "preview-stale", "a changed lockfile changes what runs");
+
+  assert.equal((await run("preview")).status, 200);
+  await finished("dapp", script.kind);
+  assert.equal((await run("apply")).status, 200, "unchanged since the preview");
+  await finished("dapp", script.kind);
+});
+
+test("P02a.4: on a Read database, Preview runs committed code only", async (t) => {
+  const { call, server, git } = await harness(t);
+  const list = async () => (await call("GET", "/api/resources/scripts?project=dapp")).body.scripts[0];
+  const [script] = (await call("GET", "/api/resources/scripts?project=dapp")).body.scripts;
+  const run = (mode: string) => call("POST", "/api/resources/scripts/run", { project: "dapp", id: script.id, mode });
+  await call("PUT", "/api/resources/level", { key: MONGO, level: "read", revision: 0 });
+  assert.equal((await list()).git, "committed");
+
+  fs.appendFileSync(path.join(server, "scripts", "migrate-owner.js"), "\n// edited\n");
+  const view = await list();
+  assert.equal(view.git, "modified");
+  assert.equal(view.allowed.preview, false, "the Data card says so before the click");
+  assert.match(view.allowed.why, /committed code only; this script has uncommitted changes/);
+  const refused = await run("preview");
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.code, "uncommitted-script");
+
+  git("commit", "-q", "-am", "reviewed");
+  assert.equal((await run("preview")).status, 200, "once committed it previews");
+  await finished("dapp", script.kind);
 });

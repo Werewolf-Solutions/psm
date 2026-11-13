@@ -109,6 +109,8 @@
     apply.disabled = !script.allowed.apply;
     actions.append(preview, apply);
     if (script.allowed.why) actions.append(node("span", script.allowed.why, "res-script-why"));
+    // Preview runs this file with the database's credentials; say when it is not what the repository has.
+    else if (script.git && script.git !== "committed") actions.append(node("span", { modified: "This script has uncommitted changes.", untracked: "This script is not committed to git.", "no-git": "This project is not a git repository." }[script.git] || "", "res-script-why"));
     card.append(actions);
 
     const log = node("pre", "", "res-log");
