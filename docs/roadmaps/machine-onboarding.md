@@ -182,6 +182,44 @@ part of per-project onboarding.
 
 ## Ongoing machine management
 
+The deployment environment must exist in `.psm/deployments.json` before PSM
+enrolls deploy access. If an older wizard already enrolled an unbound fallback
+target, Machines offers a reviewed target repair after the environment is
+created. Repair reuses the verified account keys, enrolls the manifest target,
+and archives the exact old contract only when its digest matches and it has no
+active release. Existing service targets, CI keys and bound connections need a
+separate traffic and credential review before retirement.
+
+### Security audit delivery and remaining work
+
+The Machines view now offers on-demand, read-only host and agent-side audits for
+a trusted registered machine. The host audit checks effective default SSH
+settings, UFW, listening sockets, unattended upgrades and Lynis when installed.
+The agent-side audit uses Nmap for all TCP ports and common UDP ports, plus
+ssh-audit for SSH algorithms. Reports mark inconclusive and unavailable checks
+explicitly and can be downloaded as JSON. These observations do not grant deploy
+authority or satisfy the production recovery and traffic gates.
+
+Remaining implementation:
+
+- Run the external scan from an independently located, durable runner, including
+  IPv4 and IPv6 where assigned. Verify provider firewall rules separately and
+  retain the report with the exact host identity and deployment gate.
+- Add reviewed SSH hardening after a separate administrator account and recovery
+  path are proven: disable root and password/keyboard-interactive login, evaluate
+  `Match` contexts, test that password-only login fails, and prove key login again.
+  The current audit flags weak settings but does not change them.
+- Make Lynis installation and updates a reviewed host operation; parse its
+  findings into stable checks and compare reports over time. A single hardening
+  score is not a pass/fail gate.
+- Add scoped service/version scans of observed open ports, provider and Docker
+  aware exposure checks, and a release gate based on reviewed expected ports.
+  Nmap default scripts (`-sC`), Nuclei and Greenbone/OpenVAS require separately
+  reviewed scan scope and scheduling. If fail2ban is adopted, test actual bans
+  without risking the administrator connection.
+- Persist audit runs and differences server-side, rerun after provisioning or
+  firewall changes, and attach independent scan evidence to production approval.
+
 The machine detail page shows connection state and verification time, owned
 projects, account roles, effective authority, job history and pending work.
 Provide **Retest**, **Rotate credentials**, **Change access**, **Repair setup**,

@@ -47,7 +47,7 @@ start a harness or widen its access.
 | **P11a — local bundles** | Import, pin, select, enable/disable, remove and update components. | Existing attachment ledger and P02 core. Prove shared-component removal, user-edit preservation and blocked dependencies. |
 | **P11b — workflow execution and evaluation** | Workflow steps, comparison evidence and the first Sandcastle adapter. | P11a plus relevant P05 agent/execution tools. Prove progress, cancellation, retained work, permission enforcement and matched task evaluation. P03 applies only to hosted execution. |
 | **P11c — marketplace** | Hosted catalog, provenance/review policy, discovery and reviewed updates. | P11a and the chosen registry operator/review keys. Prove pinned updates, staleness and offline operation. |
-| **P11d — conversational scaffolding** | A new-project conversation chooses a scaffold and components, then presents a concrete plan. | P11a and a defined conversation/output contract. Prove generated project and selected attachments with normal ownership/permission checks. |
+| **P11d — conversational scaffolding** | A new-project conversation chooses a scaffold and components, then presents a concrete plan. | P11a and a defined conversation/output contract; builds on [P19](p19-project-creation.md), which already covers compare → research → proposal → reviewed creation. Prove generated project and selected attachments with normal ownership/permission checks. |
 
 P10's rules/readiness metadata is reused as available; completing all governance
 or P09 maintenance is not required to import or evaluate a local workflow. Each

@@ -283,9 +283,28 @@ there is data.
 5. F6 on the new droplet via the MCP deploy flow.
 6. Raise F4's stage only from the measured numbers.
 
+## Proposed — a scope the result can be checked against
+
+Not built, and not yet decided. Both points come from an earlier workflow
+sketch (`docs/psm-agent-workflow.md`, removed 2026-11-10). They touch the triage
+verdict and job review, so they would change the P14 contract, not only P16.
+
+- **Acceptance criteria in the verdict.** Today a verdict has fit, size,
+  rationale and questions, and nothing a finished job can be checked against.
+  Triage would also propose a short list of acceptance criteria. Go approves
+  them along with the task. At review, the job's diff and checks are compared
+  with each criterion, so the human sees which ones are met before Accept.
+- **A scope rule for Revise.** A fix inside the approved criteria continues on
+  the same branch, as Revise does today. A comment that changes the agreed
+  outcome is new scope: it goes back to triage and needs a new Go before any
+  more work starts. Today Revise takes any comment and continues.
+
 ## Open questions
 
 - Should a duplicate attach to an existing *intake* (more evidence for a running
-  job) or only to the earlier feedback item?
+  job) or only to the earlier feedback item? Proposed answer, from the same
+  sketch: attach it to the intake. A second report of the same bug adds its
+  evidence to the first and creates no new intake, so the job that is queued
+  or running sees it.
 - Who else may review feedback: only the owner, or business members of the
   workspace? This affects `reviewer` and dapp permissions.

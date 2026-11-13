@@ -4,6 +4,10 @@ Written 2026-10-15 so the dapp hub, the Todo client and the PSM executor can be
 built in parallel. Plan: [ecosystem-intake-and-agent-jobs.md](ecosystem-intake-and-agent-jobs.md).
 Change this file first if the contract has to change.
 
+**2026-11-12:** psm now also implements this contract itself, in its own database
+(`src/server/executor/local-hub.ts`), and uses that by default. The hub described
+here is used when psm runs with `PSM_HUB=werewolf`. The rules below apply to both.
+
 All responses use dapp's envelope: `{ success: true, data }` or
 `{ success: false, code?, message }`.
 
@@ -100,6 +104,44 @@ PSM session plus a header `X-PSM-Executor: <executorId>` (`[a-z0-9-]{1,64}`).
   - Returns `409` if not held.
 - `GET /api/v1/psm/intake?status=&projectId=` lists the owner's intake for the
   hosted page. Returns `{ intake: [PsmIntake] }`, at most 200, newest first.
+- Tasks written in PSM itself (P17), all with `X-PSM-Executor`:
+  - `POST /api/v1/psm/intake`. Body
+    `{ projectId, text, sourceRef: { kind: "psm", key: "pst_<24 hex>" } }`.
+    `201` with `{ intake, created: true }`; a retry with the same key is `200`
+    with the same intake, unchanged. `text` is 1–20000 characters, trimmed.
+    A project that is unknown, archived or another owner's is the same `404`
+    (`project_not_found`).
+  - `PATCH /api/v1/psm/intake/:intakeId`. Body `{ text?, projectId? }`. A real
+    change resets the intake to `new` and clears the verdict.
+  - `DELETE /api/v1/psm/intake/:intakeId` sets it to `withdrawn`.
+  - Edit and withdraw are `409` (`job_active`) while the intake's job is
+    `queued`, `claimed` or `review`, and `403` (`not_psm_intake`) for Todo
+    intake, which only Todo changes.
+  - Such an intake lists with `source: "psm"` and
+    `sourceRef: { kind: "psm", key }`.
+
+## C2 — Questions (added 2026-11-10)
+
+`GET /api/v1/apps/todo/questions` (Todo session, `todo:read`) and
+`GET /api/v1/psm/questions` (PSM session), both platform apps; per user like
+`/projects` and `/events`. Returns `{ questions: [...] }`, newest first,
+at most 100: the caller's intake with `status: "triaged"` and
+`verdict.verdict: "needs_decision"`, minus any whose latest job is `queued`,
+`claimed` or `review` (Go was the decision). Each row:
+
+```text
+{ intakeId, kind: "task" | "note" | "psm", itemId | null, projectId, project | null,
+  text, workspace: "personal" | "business:<id>" | null, date: "YYYY-MM-DD" | null,
+  questions: [string], rationale, size, updatedAt }
+```
+
+A task or note deleted without a withdraw is left out. Todo shows the count in
+its header, refetches on every `event: intake`, and answers by appending the
+answer to the item's text (task) or body (note) in that item's workspace. That
+edit resets the intake to `new` (B2), so the executor triages it again with the
+answer in it. `psm`-kind rows are answered in PSM, whose Questions panel shows
+the same list beside session questions (one count), links Todo rows to Todo, and
+offers Go for both; MCP clients read it with `list_questions`.
 
 ## D — Verdict (validated on both sides; invalid = failed run)
 
