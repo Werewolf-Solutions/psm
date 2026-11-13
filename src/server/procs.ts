@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { Response } from "express";
 
 /** A managed process: a project's dev server, or a deploy to a target. */
-export type ProcKind = "run" | "deploy:staging" | "deploy:production" | `custom:${string}` | `script:${string}`;
+export type ProcKind = "run" | "deploy:staging" | "deploy:production" | `custom:${string}` | `script:${string}` | `unit:${string}`;
 export type ProcStatus = "running" | "exited" | "error";
 
 export interface LogLine {
@@ -34,6 +34,7 @@ interface ProcEntry {
 /** Ring-buffer cap per process. Exported so a capped download can say so. */
 export const MAX_LOG_LINES = 3000;
 const registry = new Map<string, ProcEntry>();
+const pendingRestarts = new Set<string>();
 
 /**
  * The full transcript, on disk.
@@ -137,6 +138,40 @@ export function allProcStates() {
   return out;
 }
 
+/**
+ * Every known process without its command, folder or log, for MCP clients.
+ * Commands and logs can carry credentials, so they never leave this module here.
+ */
+export function processSummaries() {
+  return [...registry.values()].map((p) => ({
+    name: p.name,
+    kind: p.kind,
+    status: p.status,
+    exitCode: p.exitCode,
+    startedAt: p.startedAt,
+    port: p.detectedPort,
+  }));
+}
+
+/**
+ * Every process psm started, for the local Agents page: the command with
+ * credentials in URLs masked, the folder name and the last log lines.
+ */
+export function processRoster(tail = 0) {
+  return [...registry.values()].map((p) => ({
+    name: p.name,
+    kind: p.kind,
+    command: redactCredentials(p.command),
+    folder: path.basename(p.cwd),
+    status: p.status,
+    exitCode: p.exitCode,
+    startedAt: p.startedAt,
+    port: p.detectedPort,
+    pid: p.child?.pid ?? null,
+    log: tail > 0 ? p.log.slice(-tail).map((entry) => ({ t: entry.t, stream: entry.stream, line: redactCredentials(entry.line) })) : [],
+  }));
+}
+
 /** Running project processes for the Working on lane. */
 export function activeProcesses() {
   return [...registry.values()]
@@ -200,6 +235,8 @@ export interface StartOptions {
   unsetEnv?: string[];
   /** Mask credentials in connection strings the process prints. */
   redact?: boolean;
+  /** Variables to set for this child only, such as a runbook unit's PORT. */
+  setEnv?: Record<string, string>;
 }
 
 export function start(name: string, kind: ProcKind, command: string, cwd: string, options: StartOptions = {}): ProcEntry {
@@ -240,7 +277,7 @@ export function start(name: string, kind: ProcKind, command: string, cwd: string
     cwd,
     shell: true,
     detached: true,
-    env: withoutVariables({ ...childEnv(), FORCE_COLOR: "0", NO_COLOR: "1" }, options.unsetEnv ?? []),
+    env: { ...withoutVariables({ ...childEnv(), FORCE_COLOR: "0", NO_COLOR: "1" }, options.unsetEnv ?? []), ...(options.setEnv ?? {}) },
   });
   p.child = child;
 
@@ -285,7 +322,7 @@ export function stop(name: string, kind: ProcKind): boolean {
   // hard-kill if it ignores SIGTERM
   const child = p.child;
   setTimeout(() => {
-    if (child.pid && p.status === "running") {
+    if (child.pid && p.child === child && p.status === "running") {
       try {
         process.kill(-child.pid, "SIGKILL");
       } catch {
@@ -294,6 +331,31 @@ export function stop(name: string, kind: ProcKind): boolean {
     }
   }, 4000);
   return true;
+}
+
+/** Restart a live project command after its previous process group exits. */
+export async function restart(name: string, kind: "run" | `custom:${string}`): Promise<ProcEntry> {
+  const key = keyOf(name, kind);
+  const p = registry.get(key);
+  if (pendingRestarts.has(key)) throw new Error("restart already in progress");
+  if (!p?.child || p.status !== "running") throw new Error("command is not running");
+  const child = p.child;
+  const { command, cwd, redact } = p;
+  pendingRestarts.add(key);
+  try {
+    if (!stop(name, kind)) throw new Error("command is no longer running");
+    const exited = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("command did not stop in time")), 6000);
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await exited;
+    return start(name, kind, command, cwd, { redact });
+  } finally {
+    pendingRestarts.delete(key);
+  }
 }
 
 /** Stop every managed run/deploy process for a project. */

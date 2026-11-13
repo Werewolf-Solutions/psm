@@ -18,7 +18,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "psm-procs-"));
 // Without this the suite would write transcripts into the repo's own .psm-logs.
 process.env.PSM_LOG_DIR = path.join(sandbox, "logs");
 
-const { MAX_LOG_LINES, getProc, logFile, start, stop, transcript } = await import("./procs.ts");
+const { MAX_LOG_LINES, getProc, logFile, restart, start, stop, transcript } = await import("./procs.ts");
 
 test.after(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
@@ -105,6 +105,22 @@ test("a restart truncates the transcript rather than appending to the last run",
   assert.ok(log);
   assert.ok(!log.text.includes("first-run"), "the previous run should not bleed into this one");
   assert.match(log.text, /out second-run$/m);
+});
+
+test("restart waits for the old process and starts the same command again", async () => {
+  const first = start("restart-live", "run", "sleep 10", sandbox);
+  const oldChild = first.child;
+  assert.ok(oldChild?.pid);
+  const next = await restart("restart-live", "run");
+  try {
+    assert.equal(next.status, "running");
+    assert.equal(next.command, "sleep 10");
+    assert.notEqual(next.child, oldChild);
+    assert.equal(first, next);
+    assert.equal(oldChild.exitCode === null && oldChild.signalCode === null, false);
+  } finally {
+    stop("restart-live", "run");
+  }
 });
 
 test("a project that never ran has no transcript", () => {
