@@ -13,6 +13,7 @@ import {
   HubError,
   backoffDelay,
   executorId,
+  forWerewolfHub,
   executorPaused,
   hubClient,
   runExecutor,
@@ -501,6 +502,38 @@ test("never two jobs at once for one project, even with a pool of two", async ()
   } finally {
     await hub.close();
   }
+});
+
+test("with the project lock off (psm's own queue), the hub's choice of jobs runs side by side on one project", async () => {
+  const hub = await fakeHub();
+  try {
+    const project = "prj_aaaaaaaaaaaaaaaaaaaa";
+    hub.jobs.push(job({ projectId: project }), job({ projectId: project }));
+    let running = 0;
+    let most = 0;
+    await runUntil(
+      hub,
+      async () => {
+        running++;
+        most = Math.max(most, running);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        running--;
+        return { status: "failed", error: "done" };
+      },
+      () => hub.results.length === 2,
+      { concurrency: 2, projectLock: false },
+    );
+    assert.equal(most, 2);
+  } finally {
+    await hub.close();
+  }
+});
+
+test("scope and changed files never reach the Werewolf hub", () => {
+  const verdict = { verdict: "fits", size: "S", dependsOn: [], conflictsWith: [], queue: { after: [], note: "" }, questions: [], rationale: "ok" } as any;
+  assert.deepEqual(forWerewolfHub({ status: "triaged", verdict, scope: ["a.js"] }), { status: "triaged", verdict });
+  const result = { branch: "psm/job/x", files: ["a.js"], commits: [] } as any;
+  assert.deepEqual(forWerewolfHub({ status: "review", result }), { status: "review", result: { branch: "psm/job/x", commits: [] } });
 });
 
 test("the kill switch stops claiming and abandons a running job", async () => {

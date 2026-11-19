@@ -58,8 +58,10 @@ test("lists the executor first, with its waiting queue and the jobs it runs as p
   assert.equal(todo.state, "working");
   assert.equal(todo.parent, "executor");
   assert.equal(todo.jobId, "job_1", "the running job, not the finished one");
-  assert.match(todo.where, /Docker clone/);
-  assert.ok(roster[0].connections.some((link) => link.agentId === agentId.project("todo-app")), "the executor links to the agent it called");
+  const sub = roster.find((agent) => agent.id === agentId.sub("job_1"))!;
+  assert.equal(sub.parent, todo.id, "the job runs as the project agent's sub-agent");
+  assert.match(sub.where, /Docker clone/);
+  assert.ok(roster[0].connections.some((link) => link.agentId === agentId.sub("job_1")), "the executor links to the sub-agent it runs");
 
 });
 
@@ -178,4 +180,50 @@ test("every project gets a project agent that idles until the executor calls it"
 
   const off = buildRoster(inputs({ jobs: [], executor: { ...inputs().executor, enabled: false } }));
   assert.ok(off.filter((agent) => agent.kind === "project-agent").every((agent) => agent.state === "off"), "nothing calls them while the executor is off");
+});
+
+test("a project agent spawns a sub-agent per job: running side by side, queued behind an overlap, in review", () => {
+  const roster = buildRoster(inputs({
+    jobs: [
+      { kind: "implement", jobId: "job_aaaaaa111111111111111111", projectId: "prj_todo", projectName: "todo-app", text: "Search the registry", state: "implementing", claimedAt: NOW - 20_000, finishedAt: null, error: null },
+      { kind: "implement", jobId: "job_bbbbbb222222222222222222", projectId: "prj_todo", projectName: "todo-app", text: "Filter strategies", state: "preparing", claimedAt: NOW - 10_000, finishedAt: null, error: null },
+    ],
+    queue: [
+      { intakeId: "int_c", projectId: "prj_todo", status: "triaged", text: "Also search by type", claim: null },
+      { intakeId: "int_d", projectId: "prj_todo", status: "triaged", text: "Health check", claim: null },
+    ],
+    hubJobs: [
+      { jobId: "job_aaaaaa111111111111111111", intakeId: "int_a", projectId: "prj_todo", status: "claimed", createdAt: new Date(NOW - 30_000).toISOString(), updatedAt: new Date(NOW).toISOString() },
+      { jobId: "job_cccccc333333333333333333", intakeId: "int_c", projectId: "prj_todo", status: "queued", createdAt: new Date(NOW - 5_000).toISOString(), updatedAt: new Date(NOW).toISOString(), waitingFor: [{ jobId: "job_aaaaaa111111111111111111", status: "claimed", paths: ["routes/registry.js"] }] },
+      { jobId: "job_dddddd444444444444444444", intakeId: "int_d", projectId: "prj_todo", status: "review", createdAt: new Date(NOW - 60_000).toISOString(), updatedAt: new Date(NOW - 1_000).toISOString() },
+    ],
+  }));
+  const parent = roster.find((agent) => agent.id === agentId.project("todo-app"))!;
+  assert.equal(parent.state, "working");
+  assert.equal(parent.type, "Project agent · 2 in parallel");
+  assert.equal(parent.queue, 1);
+  const subs = roster.filter((agent) => agent.kind === "sub-agent" && agent.project === "todo-app");
+  assert.deepEqual(subs.map((sub) => [sub.name, sub.state]).sort(), [
+    ["sub-agent aaaaaa", "working"], ["sub-agent bbbbbb", "working"], ["sub-agent cccccc", "idle"], ["sub-agent dddddd", "waiting"],
+  ]);
+  assert.ok(subs.every((sub) => sub.parent === parent.id));
+  const queued = subs.find((sub) => sub.name === "sub-agent cccccc")!;
+  assert.match(queued.activity, /^Waits for sub-agent aaaaaa \(working; routes\/registry\.js\): Also search by type/);
+  assert.ok(queued.connections.some((link) => link.agentId === agentId.sub("job_aaaaaa111111111111111111")));
+  assert.ok(roster[0].connections.some((link) => link.agentId === agentId.sub("job_bbbbbb222222222222222222")), "the executor links to the sub-agents it runs");
+});
+
+test("a queued sub-agent whose ticket builds on an unmerged one waits on you and names it", () => {
+  const roster = buildRoster(inputs({
+    queue: [{ intakeId: "int_e", projectId: "prj_todo", status: "triaged", text: "Drag the grid edges", claim: null }],
+    hubJobs: [
+      { jobId: "job_dddddd444444444444444444", intakeId: "int_d", projectId: "prj_todo", status: "review", createdAt: new Date(NOW - 60_000).toISOString(), updatedAt: new Date(NOW - 1_000).toISOString() },
+      { jobId: "job_eeeeee555555555555555555", intakeId: "int_e", projectId: "prj_todo", status: "queued", createdAt: new Date(NOW - 5_000).toISOString(), updatedAt: new Date(NOW).toISOString(), note: "Resumed: old note.",
+        needs: [{ intakeId: "int_d", title: "grid lab 2: Live preview.", jobId: "job_dddddd444444444444444444", status: "review" }] },
+    ],
+  }));
+  const queued = roster.find((agent) => agent.name === "sub-agent eeeeee")!;
+  assert.equal(queued.state, "waiting");
+  assert.match(queued.activity, /^Waiting for another ticket to be merged first: "grid lab 2: Live preview\." \(job_dddddd444444444444444444, ready for review: Accept it\)\. Drag the grid edges/);
+  assert.ok(queued.connections.some((link) => link.agentId === agentId.sub("job_dddddd444444444444444444") && /must be merged first/.test(link.detail ?? "")));
 });

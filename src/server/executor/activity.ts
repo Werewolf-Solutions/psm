@@ -30,6 +30,7 @@ export type ActivityState =
   | "merged"
   | "rejected"
   | "revising"
+  | "requeued"
   | "stalled"
   | "failed"
   | "abandoned";
@@ -263,10 +264,15 @@ export class ExecutorActivity {
     this.#touch(entry, label, "posting");
   }
 
-  posted(jobId: string, outcome: JobOutcome): void {
+  posted(jobId: string, outcome: JobOutcome, requeued?: string): void {
     const entry = this.#find(jobId);
     if (!entry) return;
     entry.finishedAt = this.now();
+    if (requeued) {
+      // Its branch collided with a job already in review: it runs again later, from the merged code.
+      this.#touch(entry, `Back in the queue: ${requeued}`, "requeued");
+      return;
+    }
     const posted: Record<JobOutcome["status"], [string, ActivityState]> = {
       triaged: ["Posted the verdict to the hub — Todo shows it now", "triaged"],
       review: ["Reported to the hub: waiting for your review in psm", "review"],

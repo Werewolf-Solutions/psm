@@ -21,7 +21,7 @@ import { runManagedAgent } from "../agent-permission-runtime.ts";
 import { databaseFile } from "../db.ts";
 import { executorId, executorPaused, runExecutor, type ExecutorEvent, type ExecutorJob, type JobKind, type JobOutcome } from "./client.ts";
 import { runBaseline } from "./baseline.ts";
-import { activeHub } from "./hub.ts";
+import { activeHub, hubMode } from "./hub.ts";
 import { primaryCheckouts } from "../mcp/primary-checkout.ts";
 import { implementJobRunner } from "./implement-job.ts";
 import { stepReporter } from "./progress.ts";
@@ -74,7 +74,7 @@ export function reviewCauses(): ReviewCauses {
 
 function track(event: ExecutorEvent): void {
   if (event.type === "claimed") executorActivity().claimed(event.job);
-  else if (event.type === "posted") executorActivity().posted(event.jobId, event.outcome);
+  else if (event.type === "posted") executorActivity().posted(event.jobId, event.outcome, event.requeued);
   else if (event.type === "abandoned") executorActivity().abandoned(event.jobId, event.reason);
   switch (event.type) {
     case "idle":
@@ -105,10 +105,15 @@ function track(event: ExecutorEvent): void {
   }
 }
 
-/** D3 sets the pool at two jobs; one is the default until triage has been watched in use. */
+/**
+ * Triage calls at once. Triage is one tool-less model call that reads the
+ * project and changes nothing, so a burst of requests (ten a minute) is
+ * triaged side by side instead of one after another: 4 by default, at most 8.
+ */
+export const DEFAULT_TRIAGE_POOL = 4;
 function concurrency(): number {
-  const value = Number(process.env.PSM_EXECUTOR_CONCURRENCY || 1);
-  return Number.isFinite(value) ? Math.min(2, Math.max(1, Math.floor(value))) : 1;
+  const value = Number(process.env.PSM_EXECUTOR_CONCURRENCY || DEFAULT_TRIAGE_POOL);
+  return Number.isFinite(value) ? Math.min(8, Math.max(1, Math.floor(value))) : DEFAULT_TRIAGE_POOL;
 }
 
 let handle: { stop: () => Promise<void> } | null = null;
@@ -150,6 +155,15 @@ function launch(): { stop: () => Promise<void> } {
 
   // The local queue by default; the Werewolf hub with PSM_HUB=werewolf (hub.ts).
   const hub = activeHub();
+  // Work this executor held when psm last stopped: back in the queue now, and continued in its copy.
+  try {
+    const recovered = hub.recoverInterrupted?.();
+    if (recovered && (recovered.jobs.length || recovered.intake.length)) {
+      console.log(`  → executor ${id}: picked up ${recovered.jobs.length} implement job${recovered.jobs.length === 1 ? "" : "s"} and ${recovered.intake.length} triage item${recovered.intake.length === 1 ? "" : "s"} psm was running when it stopped`);
+    }
+  } catch (err) {
+    console.error(`executor: could not recover interrupted work: ${(err as Error).message}`);
+  }
 
   const runJob = triageJobRunner({
     findProject: (projectId) => {
@@ -201,13 +215,14 @@ function launch(): { stop: () => Promise<void> } {
   };
 
   const controller = new AbortController();
-  const loop = (kinds: JobKind[], run: (job: ExecutorJob, signal: AbortSignal) => Promise<JobOutcome>, pool: number) =>
+  const loop = (kinds: JobKind[], run: (job: ExecutorJob, signal: AbortSignal) => Promise<JobOutcome>, pool: number, projectLock = true) =>
     runExecutor({
       hub,
       run,
       kinds,
       signal: controller.signal,
       concurrency: pool,
+      projectLock,
       killSwitch: () => executorPaused(),
       onEvent: track,
       log: (line) => console.log(line),
@@ -216,8 +231,11 @@ function launch(): { stop: () => Promise<void> } {
       status.lastError = (err as Error).message;
       console.error(`executor: stopped on an unexpected error: ${(err as Error).message}`);
     });
-  const loops = [loop(["triage"], runTriage, concurrency()), loop(["implement"], runImplement, implementConcurrency())];
-  console.log(`  → executor ${id}: claiming triage (pool ${concurrency()}) and implement jobs (pool ${implementConcurrency()})`);
+  // psm's own queue: triage changes nothing, so a project's requests are triaged side by side;
+  // implement jobs are scheduled around overlapping files, so several can run on one project.
+  const parallel = hubMode() === "local";
+  const loops = [loop(["triage"], runTriage, concurrency(), !parallel), loop(["implement"], runImplement, implementConcurrency(), !parallel)];
+  console.log(`  → executor ${id}: claiming triage (pool ${concurrency()}) and implement jobs (pool ${implementConcurrency()}${parallel ? ", side by side on one project when their files do not overlap" : ", one per project"})`);
 
   return {
     stop: async () => {
@@ -227,10 +245,16 @@ function launch(): { stop: () => Promise<void> } {
   };
 }
 
-/** Implement jobs at once, across projects. One per project always (the hub's lock). */
+/**
+ * Implement jobs at once on this machine. psm's own queue runs jobs on the same
+ * project side by side when their files do not overlap (overlap.ts); the
+ * Werewolf hub still holds one per project. Each job is a container of up to
+ * 2 GB, so the pool stays small: 3 by default, at most 6.
+ */
+export const DEFAULT_IMPLEMENT_POOL = 3;
 function implementConcurrency(): number {
-  const value = Number(process.env.PSM_IMPLEMENT_CONCURRENCY || 1);
-  return Number.isFinite(value) ? Math.min(3, Math.max(1, Math.floor(value))) : 1;
+  const value = Number(process.env.PSM_IMPLEMENT_CONCURRENCY || DEFAULT_IMPLEMENT_POOL);
+  return Number.isFinite(value) ? Math.min(6, Math.max(1, Math.floor(value))) : DEFAULT_IMPLEMENT_POOL;
 }
 
 /** Where job clones live. Kept out of the projects themselves. */

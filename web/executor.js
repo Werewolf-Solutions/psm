@@ -27,6 +27,7 @@
     merged: ["Merged", "ok"],
     rejected: ["Rejected", "warn"],
     revising: ["Sent back", "busy"],
+    requeued: ["Back in the queue", "warn"],
     stalled: ["Stalled", "warn"],
     failed: ["Failed", "bad"],
     abandoned: ["Stopped", "warn"],
@@ -364,6 +365,8 @@
     if (item.attempts > 1 || (item.status === "new" && item.attempts > 0)) meta.push(`attempt ${item.attempts}${item.status === "new" ? " failed, retrying" : ""}`);
     if (item.verdict) meta.push(`size ${item.verdict.size}`);
     row.append(node("div", meta.join(" · "), "exec-qmeta"));
+    // psm's own queue: what triage expects it to change, which decides what it can run beside.
+    if (item.status === "triaged" && "scope" in item) row.append(node("div", item.scope?.length ? `Expected to change: ${scopeText(item.scope)}` : "Expected to change: unknown, so it runs only when nothing else on this project does.", "exec-qscope"));
     if (item.status === "triaged" && item.verdict?.verdict === "needs_decision" && item.verdict.questions?.length) {
       const ul = node("ul", "", "exec-qquestions");
       for (const question of item.verdict.questions) ul.append(node("li", question));
@@ -453,6 +456,9 @@
       actions.append(open);
     }
     // Only a task written here can be changed here; a Todo item is changed in Todo.
+    if (item.status === "failed" || (item.status === "triaged" && item.verdict?.verdict === "doesnt_fit")) {
+      actions.append(actionButton("Triage again", row, () => send(`/api/executor/intake/${encodeURIComponent(item.intakeId)}/retriage`)));
+    }
     if (fromPsm) actions.append(...ownTaskButtons(item, row, text));
     if (actions.childElementCount) row.append(actions);
     return row;
@@ -525,6 +531,10 @@
   const JOB_LABEL = { queued: "queued", claimed: "implementing now", review: "ready for review", accepted: "merged", rejected: "rejected", stalled: "stalled", failed: "failed", cancelled: "cancelled" };
   let jobByIntake = new Map();
   let lastQueue = "";
+  // The last queue read, kept for the life of the page: switching tabs, agents or
+  // pages shows it at once and the next poll only updates it.
+  let queueCache = null;
+  let overlapModes = null; // { prj_…: "wait" | "conflict" }, or null when the hub cannot choose
   let editing = null; // the intake whose text is being edited in place
   let projectFilter = ""; // a prj_ id, or "" for every project
 
@@ -535,12 +545,35 @@
     return data;
   }
 
+  const scopeText = (paths, max = 4) => `${paths.slice(0, max).join(", ")}${paths.length > max ? ` and ${paths.length - max} more` : ""}`;
+
+  const NEED_STATE = {
+    review: "ready for review: Accept it",
+    claimed: "implementing now",
+    queued: "queued",
+    stalled: "stalled: resume or cancel it",
+    failed: "failed: retry or cancel it",
+    "not-started": "not started: click Go on it",
+  };
+  /** The tickets this job builds on that are not merged yet (psm's own queue, needs.ts). */
+  function needsNote(job, needs) {
+    const box = node("div", "", "exec-qneeds");
+    box.append(node("div", job.status === "queued"
+      ? `Waiting: merge ${needs.length === 1 ? "this ticket" : `these ${needs.length} tickets`} first. It starts by itself once they are accepted.`
+      : `Triage says it builds on ${needs.length === 1 ? "a ticket" : `${needs.length} tickets`} not merged yet. ${job.status === "stalled" || job.status === "failed" ? "Resume or Retry will wait for them." : ""}`, "exec-qneeds-head"));
+    const list = node("ul", "", "exec-qneeds-list");
+    for (const need of needs) list.append(node("li", `${need.title} — ${need.jobId ? `${need.jobId.slice(0, 14)}…, ` : ""}${NEED_STATE[need.status] || need.status}`));
+    box.append(list);
+    return box;
+  }
+
   function jobRow(job, textOf, extra = {}) {
     const row = node("div", "", "exec-qrow");
     const head = node("div", "", "exec-qhead");
     head.append(node("strong", job.projectName || job.projectId));
     if (extra.position) head.append(node("span", `#${extra.position}`, "exec-qpos"));
-    head.append(node("span", JOB_LABEL[job.status] || job.status, "exec-qkind"));
+    const needs = Array.isArray(job.needs) ? job.needs : [];
+    head.append(node("span", job.status === "queued" && needs.length ? "waiting for a merge" : JOB_LABEL[job.status] || job.status, "exec-qkind"));
     row.append(head, node("div", textOf(job.intakeId) || job.intakeId, "exec-qtext"));
     const meta = [ago(new Date(job.updatedAt || job.createdAt).getTime())];
     if (job.claim) meta.push(job.claim.executorId === extra.me ? "this machine" : `executor ${job.claim.executorId}`, leaseLeft(job.claim.leaseUntil));
@@ -551,7 +584,20 @@
     else meta.push("Auto model");
     if (job.result) meta.push(`${job.result.commits.length} commit${job.result.commits.length === 1 ? "" : "s"}, +${job.result.diffStat.insertions} −${job.result.diffStat.deletions}`);
     row.append(node("div", meta.join(" · "), "exec-qmeta"));
-    if (extra.waiting) row.append(node("div", "Waits: another job is implementing this project (one at a time per repo).", "exec-qnote"));
+    // Waiting for a merge says everything: the live list replaces a resume note
+    // that says the same, and "starts when a slot is free" would be wrong.
+    const waitingOnMerge = job.status === "queued" && needs.length > 0;
+    if (job.note && !waitingOnMerge) row.append(node("div", job.note, "exec-qnote"));
+    if (needs.length) row.append(needsNote(job, needs));
+    if (waitingOnMerge) {
+      if (job.waitingFor?.length) row.append(node("div", `Also overlaps ${job.waitingFor.map((blocker) => blocker.jobId.slice(0, 10)).join(", ")} on files.`, "exec-qnote"));
+    } else if (Array.isArray(job.waitingFor)) {
+      // psm's own queue says exactly what a queued job waits for.
+      if (job.status === "queued") row.append(node("div", job.waitingFor.length
+        ? `Waits for ${job.waitingFor.map((blocker) => `${blocker.jobId.slice(0, 10)} (${blocker.status === "review" ? "in review" : blocker.status === "claimed" ? "implementing" : "queued ahead"}) on ${scopeText(blocker.paths, 2)}`).join("; ")}.`
+        : "Starts as soon as a slot is free: nothing it touches is being worked on.", "exec-qnote"));
+    } else if (extra.waiting) row.append(node("div", "Waits: another job is implementing this project (one at a time per repo).", "exec-qnote"));
+    if (job.scope?.length && ["queued", "claimed"].includes(job.status)) row.append(node("div", `Touches: ${scopeText(job.scope)}`, "exec-qscope"));
     if (job.error && ["stalled", "failed", "queued"].includes(job.status)) row.append(node("div", job.error, "exec-qerror"));
     const actions = node("div", "", "exec-qactions");
     if (job.status === "review") {
@@ -570,6 +616,12 @@
         void select(job.jobId);
       };
       actions.append(open);
+    }
+    if (job.status === "stalled" || job.status === "failed") {
+      // A fresh job for the same ticket, or the ticket back through triage (it may need rewording or splitting).
+      if (job.resumeHere) actions.append(actionButton("Resume", row, () => send(`/api/executor/jobs/${encodeURIComponent(job.jobId)}/resume`), true));
+      actions.append(actionButton(job.resumeHere ? "Start over" : "Retry", row, () => send(`/api/executor/jobs/${encodeURIComponent(job.jobId)}/retry`), !job.resumeHere));
+      actions.append(actionButton("Triage again", row, () => send(`/api/executor/intake/${encodeURIComponent(job.intakeId)}/retriage`)));
     }
     if (["queued", "stalled", "failed"].includes(job.status)) {
       const cancel = node("button", "Cancel", "btn exec-qopen");
@@ -591,38 +643,185 @@
     return row;
   }
 
-  const DONE_KEY = "psm.executor.doneOpen";
-  let doneOpen = (() => { try { return localStorage.getItem(DONE_KEY) === "1"; } catch { return false; } })();
-
-  function renderJobs(root, jobList, items, me) {
-    const textOf = (intakeId) => items.find((item) => item.intakeId === intakeId)?.text;
-    const sections = [
-      { title: "Implementing now", list: jobList.filter((job) => job.status === "claimed") },
-      { title: "Queued to implement", list: jobList.filter((job) => job.status === "queued").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)), queued: true },
-      { title: "Ready for review", list: jobList.filter((job) => job.status === "review") },
-      { title: "Stalled or failed", list: jobList.filter((job) => job.status === "stalled" || job.status === "failed") },
-      { title: "Done recently", list: jobList.filter((job) => ["accepted", "rejected", "cancelled"].includes(job.status)).slice(0, 8), collapsible: true },
-    ];
-    const busy = new Set(jobList.filter((job) => job.status === "claimed").map((job) => job.projectId));
-    for (const section of sections) {
-      if (!section.list.length) continue;
-      const className = `exec-qsection exec-q-job-${section.title.split(" ")[0].toLowerCase()}`;
-      if (section.collapsible) {
-        // Finished work stays out of the way: closed unless you opened it.
-        const block = node("details", "", `${className} exec-qfold`);
-        block.open = doneOpen;
-        const summary = node("summary", `${section.title} (${section.list.length})`, "procs-group exec-qfold-head");
-        summary.onclick = () => { doneOpen = !block.open; try { localStorage.setItem(DONE_KEY, doneOpen ? "1" : "0"); } catch { /* private window */ } };
-        block.append(summary);
-        section.list.forEach((job) => block.append(jobRow(job, textOf, { me, position: 0, waiting: false })));
-        root.append(block);
-        continue;
+  /** A button that runs one queue action, refreshes, and shows its error on the row. */
+  function actionButton(label, row, run, primary = false) {
+    const button = node("button", label, `btn exec-qopen${primary ? " btn-primary" : ""}`);
+    button.type = "button";
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await run();
+        lastQueue = "";
+        await pollQueue();
+      } catch (error) {
+        button.disabled = false;
+        row.append(node("div", error.message, "exec-qerror"));
       }
-      const block = node("section", "", className);
-      block.append(node("h3", `${section.title} (${section.list.length})`, "procs-group"));
-      section.list.forEach((job, index) => block.append(jobRow(job, textOf, { me, position: section.queued ? index + 1 : 0, waiting: section.queued && busy.has(job.projectId) })));
+    };
+    return button;
+  }
+
+  /**
+   * Merge every branch waiting for review here, oldest first, one at a time.
+   * A merge that would conflict, or touch your uncommitted changes, is skipped
+   * and its branch kept, exactly as with its own Accept; the rest still merge.
+   */
+  function mergeAllButton(list) {
+    const mine = list.filter((job) => job.reviewHere).sort((a, b) => new Date(a.updatedAt) - new Date(b.updatedAt));
+    const wrap = node("div", "", "exec-qgoall");
+    if (mine.length < 2) return wrap;
+    const button = node("button", `Merge all ${mine.length}`, "btn btn-primary");
+    button.type = "button";
+    button.title = "Accept each branch in turn into the checked-out branch of its project. One that conflicts is skipped and kept for you.";
+    const note = node("span", "", "hint");
+    button.onclick = async () => {
+      const projects = [...new Set(mine.map((job) => job.projectName || job.projectId))].join(", ");
+      if (!await window.psmConfirm(`Merge ${mine.length} branches into ${projects}?\n\nEach is merged into the branch checked out there, as with its own Accept. One that conflicts or would touch uncommitted changes is skipped and kept for review.`, "Merge all")) return;
+      button.disabled = true;
+      let merged = 0;
+      let redone = 0;
+      const skipped = [];
+      for (const job of mine) {
+        note.textContent = `Merging ${merged + redone + skipped.length + 1} of ${mine.length}…`;
+        try {
+          const result = await send(`/api/executor/jobs/${encodeURIComponent(job.jobId)}/accept`);
+          if (result.redone) redone++;
+          else merged++;
+        } catch (error) {
+          skipped.push(`${job.jobId.slice(0, 10)}: ${error.message}`);
+        }
+      }
+      const again = redone ? `; ${redone} conflicted and start${redone === 1 ? "s" : ""} again from the merged code` : "";
+      note.textContent = skipped.length ? `Merged ${merged}${again}; kept ${skipped.length} for review — ${skipped.join("; ")}` : `Merged ${merged}${again}.`;
+      lastQueue = "";
+      await pollQueue();
+    };
+    wrap.append(button, note);
+    return wrap;
+  }
+
+  /*
+   * Every queue section folds. What you open or close is remembered in this
+   * browser, so the 3-second refresh never undoes it. Finished work and items
+   * that do not fit start closed; everything else starts open.
+   */
+  const FOLDS_KEY = "psm.executor.sections";
+  const CLOSED_BY_DEFAULT = new Set(["job-done", "doesnt_fit"]);
+  const folds = (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(FOLDS_KEY) || "{}");
+      if (localStorage.getItem("psm.executor.doneOpen") === "1" && !("job-done" in saved)) saved["job-done"] = true; // the earlier, single switch
+      return saved && typeof saved === "object" ? saved : {};
+    } catch { return {}; }
+  })();
+
+  function fold(id, title, count, className) {
+    const block = node("details", "", `exec-qsection exec-qfold ${className}`);
+    block.open = id in folds ? folds[id] === true : !CLOSED_BY_DEFAULT.has(id);
+    const summary = node("summary", `${title} (${count})`, "procs-group exec-qfold-head");
+    // Recorded before the browser toggles it.
+    summary.onclick = () => {
+      folds[id] = !block.open;
+      try { localStorage.setItem(FOLDS_KEY, JSON.stringify(folds)); } catch { /* private window */ }
+    };
+    block.append(summary);
+    return block;
+  }
+
+  const JOB_SECTIONS = [
+    { id: "job-review", title: "Ready for review", match: (job) => job.status === "review", top: true },
+    { id: "job-implementing", title: "Implementing now", match: (job) => job.status === "claimed" },
+    { id: "job-queued", title: "Queued to implement", match: (job) => job.status === "queued", queued: true },
+    { id: "job-stalled", title: "Stalled or failed", match: (job) => job.status === "stalled" || job.status === "failed" },
+    { id: "job-done", title: "Done recently", match: (job) => ["accepted", "rejected", "cancelled"].includes(job.status), limit: 8 },
+  ];
+
+  /** The implement jobs: `top` is what waits on you (review), the rest follows the triage line. */
+  function renderJobs(root, jobList, items, me, top) {
+    const textOf = (intakeId) => items.find((item) => item.intakeId === intakeId)?.text;
+    const busy = new Set(jobList.filter((job) => job.status === "claimed").map((job) => job.projectId));
+    // A stalled or failed job whose ticket has a newer job (a retry, a fresh Go) is history, not work.
+    const newest = new Map();
+    for (const job of jobList) if (!newest.has(job.intakeId) || new Date(job.createdAt) > new Date(newest.get(job.intakeId).createdAt)) newest.set(job.intakeId, job);
+    const superseded = (job) => (job.status === "stalled" || job.status === "failed") && newest.get(job.intakeId) !== job;
+    for (const section of JOB_SECTIONS) {
+      if (Boolean(section.top) !== top) continue;
+      let list = jobList.filter((job) => section.match(job) && !superseded(job));
+      if (section.queued) list = list.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+      if (section.limit) list = list.slice(0, section.limit);
+      if (!list.length) continue;
+      const block = fold(section.id, section.title, list.length, `exec-q-${section.id}`);
+      if (section.id === "job-review") block.append(mergeAllButton(list));
+      if (section.queued || section.id === "job-implementing") block.append(overlapSwitch(list));
+      list.forEach((job, index) => block.append(jobRow(job, textOf, { me, position: section.queued ? index + 1 : 0, waiting: section.queued && busy.has(job.projectId) })));
       root.append(block);
     }
+  }
+
+  /**
+   * Per project: overlapping jobs one after another (each from the code the
+   * last one merged), or side by side, with a job redone only when its Accept
+   * conflicts. Shown for the projects in the list.
+   */
+  function overlapSwitch(list) {
+    const wrap = node("div", "", "exec-overlap");
+    if (!overlapModes) return wrap;
+    const projects = new Map();
+    for (const job of list) if (job.projectId && !projects.has(job.projectId)) projects.set(job.projectId, job.projectName || job.projectId);
+    for (const [projectId, name] of projects) {
+      const row = node("label", "", "exec-overlap-row hint");
+      const select = node("select", "", "exec-overlap-select");
+      select.append(node("option", "one after another", ""), node("option", "side by side, redo on conflict", ""));
+      select.options[0].value = "wait";
+      select.options[1].value = "conflict";
+      select.value = overlapModes[projectId] === "conflict" ? "conflict" : "wait";
+      select.title = "One after another: a job that shares files waits for the other to be merged. Side by side: they run at once, and one whose Accept conflicts starts again from the merged code.";
+      select.onchange = async () => {
+        select.disabled = true;
+        try {
+          await send(`/api/executor/overlap/${encodeURIComponent(projectId)}`, { mode: select.value });
+          lastQueue = "";
+          await pollQueue();
+        } catch (error) {
+          toast(error.message);
+          select.disabled = false;
+        }
+      };
+      row.append(`${name}: jobs that share files run `, select);
+      wrap.append(row);
+    }
+    return wrap;
+  }
+
+  /**
+   * Go on every ready item at once, each with Auto (project provider and task
+   * size). The queue then runs what does not overlap side by side and holds the rest.
+   */
+  function goAllButton(list) {
+    const wrap = node("div", "", "exec-qgoall");
+    const button = node("button", `Go on all ${list.length} — Auto`, "btn btn-primary");
+    button.type = "button";
+    button.title = "Queue an implement job for each ready item, with Auto models. Jobs whose files overlap wait for each other.";
+    const note = node("span", "", "hint");
+    button.onclick = async () => {
+      button.disabled = true;
+      let queued = 0;
+      const failures = [];
+      for (const item of list) {
+        note.textContent = `Queuing ${queued + failures.length + 1} of ${list.length}…`;
+        try {
+          await send("/api/executor/jobs", { intakeId: item.intakeId, selection: { mode: "auto" } });
+          queued++;
+        } catch (error) {
+          failures.push(`${item.projectName || item.projectId}: ${error.message}`);
+        }
+      }
+      note.textContent = failures.length ? `Queued ${queued}; ${failures.length} refused: ${failures.join("; ")}` : `Queued ${queued}.`;
+      lastQueue = "";
+      await pollQueue();
+    };
+    wrap.append(button, note);
+    return wrap;
   }
 
   function renderQueue(allItems, executorId, allJobs = []) {
@@ -637,43 +836,61 @@
     for (const item of items) {
       // An item with a job under way is shown with its job, not again under its verdict.
       const job = jobByIntake.get(item.intakeId);
-      // A merged one is done and listed under "Done recently"; a rejected or cancelled one can Go again.
-      if (job && ["queued", "claimed", "review", "accepted"].includes(job.status)) continue;
+      // A merged one is done and listed under "Done recently"; a stalled or failed one is under
+      // "Stalled or failed" with Retry and Triage again; a rejected or cancelled one can Go again.
+      if (job && ["queued", "claimed", "review", "accepted", "stalled", "failed"].includes(job.status)) continue;
       groups.get(sectionOf(item))?.push(item);
     }
     // Claim order is oldest first, so that is the order they will be picked up in.
     groups.get("waiting").sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     const counts = QUEUE_SECTIONS.map((section) => `${groups.get(section.id).length} ${section.title.split(" —")[0].toLowerCase()}`).filter((text) => !text.startsWith("0 "));
     root.append(node("p", `${counts.join(" · ") || "The queue is empty."}${executorId ? ` · this machine is ${executorId}` : ""}`, "exec-qsummary"));
+    // What waits on you first: branches to review, then items ready for Go or a decision.
+    renderJobs(root, jobList, allItems, executorId, true);
     for (const section of QUEUE_SECTIONS) {
       const list = groups.get(section.id);
       if (!list.length && !section.empty) continue;
-      const block = node("section", "", `exec-qsection exec-q-${section.id}`);
-      block.append(node("h3", `${section.title} (${list.length})`, "procs-group"));
+      const block = fold(section.id, section.title, list.length, `exec-q-${section.id}`);
       if (section.note && list.length) block.append(node("p", section.note, "exec-qsection-note"));
+      if (section.id === "fits" && list.length > 1) block.append(goAllButton(list));
       if (!list.length) block.append(node("div", section.empty, "procs-empty"));
       list.forEach((item, index) => block.append(queueRow(item, section.id === "waiting" ? index + 1 : 0)));
       root.append(block);
       // Implement jobs follow the triage line.
-      if (section.id === "waiting") renderJobs(root, jobList, allItems, executorId);
+      if (section.id === "waiting") renderJobs(root, jobList, allItems, executorId, false);
     }
   }
 
   async function pollQueue() {
     if (!ctx || view !== "queue") return;
     try {
-      const [data, jobData] = await Promise.all([get("/api/executor/queue"), get("/api/executor/jobs").catch(() => ({ jobs: [] }))]);
+      const [data, jobData, overlap] = await Promise.all([
+        get("/api/executor/queue"),
+        get("/api/executor/jobs").catch(() => ({ jobs: [] })),
+        get("/api/executor/overlap").catch(() => ({ modes: null })),
+      ]);
+      overlapModes = overlap.modes ?? null;
       ctx.onJobs?.(jobData.jobs || []); // the header's count
+      queueCache = { data, jobData };
       if (view !== "queue" || editing) return; // a review opened meanwhile, or a task is being edited
       // Redraw only on a real change, so a button never moves under the pointer
       // and the scroll position holds. Lease countdowns refresh every 30 s.
-      const fingerprint = JSON.stringify([data, jobData, projectFilter, Math.floor(Date.now() / 30000)]);
+      const fingerprint = JSON.stringify([data, jobData, overlapModes, projectFilter, Math.floor(Date.now() / 30000)]);
       if (fingerprint === lastQueue && ctx.queue.childElementCount) return;
       lastQueue = fingerprint;
       renderQueue(data.items || [], data.executorId, jobData.jobs || []);
     } catch (error) {
-      ctx.queue.replaceChildren(node("div", error.message || "Could not read the queue.", "procs-empty"));
+      // A missed poll keeps what is on screen; only an empty pane says why.
+      if (view === "queue" && !queueCache) ctx.queue.replaceChildren(node("div", error.message || "Could not read the queue.", "procs-empty"));
     }
+  }
+
+  function renderQueueFromCache() {
+    if (!queueCache || editing) return false;
+    const { data, jobData } = queueCache;
+    lastQueue = JSON.stringify([data, jobData, overlapModes, projectFilter, Math.floor(Date.now() / 30000)]);
+    renderQueue(data.items || [], data.executorId, jobData.jobs || []);
+    return true;
   }
 
   /* ---------- Review: the job's change, Accept / Reject / Revise ---------- */
@@ -745,7 +962,7 @@
         for (const b of [accept, reject, revise]) b.disabled = false;
       }
     };
-    accept.onclick = () => act(accept, `/api/executor/jobs/${encodeURIComponent(jobId)}/accept`, {}, (r) => `Merged into ${r.merged.into} (${r.merged.mergeCommit.slice(0, 8)}). The job's clone is removed.`);
+    accept.onclick = () => act(accept, `/api/executor/jobs/${encodeURIComponent(jobId)}/accept`, {}, (r) => r.redone ? r.message : `Merged into ${r.merged.into} (${r.merged.mergeCommit.slice(0, 8)}). The job's clone is removed.`);
     // The cause tag: is this a one-off, or will the next job make the same mistake?
     const causeBox = node("div", "", "exec-cause");
     const causeNote = node("input", "", "exec-cause-note");
@@ -992,6 +1209,7 @@
   }
 
   function setView(next) {
+    const was = view;
     view = next;
     ctx.activityPane.hidden = next !== "activity";
     ctx.queue.hidden = next !== "queue" && next !== "review";
@@ -1004,8 +1222,13 @@
     }
     clearInterval(queueTimer);
     if (next === "queue") {
-      lastQueue = "";
-      ctx.queue.replaceChildren(node("div", "Reading the queue from the hub…", "procs-empty"));
+      // Already showing the queue: leave it. Otherwise show the last one read, at once.
+      if (was !== "queue" || !ctx.queue.childElementCount) {
+        if (!renderQueueFromCache()) {
+          lastQueue = "";
+          ctx.queue.replaceChildren(node("div", "Reading the queue…", "procs-empty"));
+        }
+      }
       void pollQueue();
       queueTimer = setInterval(() => {
         if (!watching()) return; // hidden tab or closed page: no polling

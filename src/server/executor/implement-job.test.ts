@@ -10,7 +10,7 @@ import { taskInputs } from "../agent-task-inputs.ts";
 import { PermissionError } from "../agent-permissions.ts";
 import { ExecutorActivity } from "./activity.ts";
 import type { ImplementJob } from "./client.ts";
-import { branchFor, clonePath, declaredPreviewServices, hydrateLocalSubmodules, implementJobRunner, jobGit, prepareClone, type ImplementDeps } from "./implement-job.ts";
+import { branchFor, clonePath, declaredPreviewServices, hydrateLocalSubmodules, implementJobRunner, jobGit, prepareClone, type ImplementDeps, implementPrompt } from "./implement-job.ts";
 import { JobPermissions, jobSnapshot, previewServiceSnapshot } from "./job-permissions.ts";
 import { previewServiceChecker } from "../agent-permission-runtime.ts";
 
@@ -335,4 +335,12 @@ test("an implement job offers its declared preview services, and only those that
   const run = implementJobRunner({ ...base, findProjectByName: (name) => (name === "werewolf-dapp" ? { id: "prj_dapp", name, path: fx.root } : null) });
   await run(job(), new AbortController().signal);
   assert.deepEqual(seen, ["werewolf-dapp"]);
+});
+
+test("a resumed job's prompt tells the agent to carry on from the clone's state", () => {
+  const prompt = implementPrompt(job({ continueClone: true, resumed: true }), "app");
+  assert.match(prompt, /stopped part-way/);
+  assert.match(prompt, /git status and git log/);
+  assert.doesNotMatch(implementPrompt(job(), "app"), /stopped part-way/);
+  assert.match(prompt, new RegExp(`pass project "${job().projectId}"`));
 });

@@ -1245,6 +1245,11 @@ body.exec-open .topbar { position: static; }
 .exec-qfold > .exec-qfold-head::before { content: "▸"; font-size: 10px; transition: transform .12s; }
 .exec-qfold[open] > .exec-qfold-head::before { transform: rotate(90deg); }
 .exec-qfold > .exec-qfold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.exec-qscope { font-size: 11.5px; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); margin-top: 4px; overflow-wrap: anywhere; }
+.exec-qgoall { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 0 10px; }
+.exec-overlap { display: flex; flex-direction: column; gap: 4px; margin: 2px 0 8px; }
+.exec-overlap-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.exec-overlap-select { font: inherit; }
 .exec-filter { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .exec-filter[hidden], .exec-composer[hidden] { display: none; }
 .exec-filter .exec-qchoice { margin: 0; max-width: 240px; }
@@ -1435,6 +1440,9 @@ body.exec-open .topbar { position: static; }
 .exec-qtext { font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
 .exec-qmeta { font-size: 11px; color: var(--faint); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .exec-qnote { font-size: 12px; color: var(--muted); }
+.exec-qneeds { font-size: 12px; border-left: 2px solid var(--st-paused); padding: 2px 0 2px 8px; }
+.exec-qneeds-head { font-weight: 650; }
+.exec-qneeds-list { margin: 2px 0 0; padding-left: 18px; color: var(--muted); overflow-wrap: anywhere; }
 .exec-qquestions { margin: 2px 0 0; padding-left: 18px; font-size: 12.5px; }
 .exec-qerror { font-size: 12px; color: #f0a58a; }
 .exec-qopen { align-self: flex-start; padding: 3px 10px; font-size: 11.5px; }

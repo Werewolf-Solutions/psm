@@ -60,6 +60,6 @@ export function triageJobRunner(deps: TriageJobDeps) {
       signal,
       onStep: (step) => deps.onStep?.(job, step),
     });
-    return result.ok ? { status: "triaged", verdict: result.verdict } : { status: "failed", error: result.reason };
+    return result.ok ? { status: "triaged", verdict: result.verdict, scope: result.scope } : { status: "failed", error: result.reason };
   };
 }

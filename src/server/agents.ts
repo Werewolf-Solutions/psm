@@ -10,7 +10,9 @@
  * carries commands (credentials in URLs masked), folders and log tails.
  */
 
-export type AgentKind = "executor" | "project-agent" | "remote-executor" | "ai-session" | "process" | "mcp-client";
+import { describeNeeds, type Need } from "./executor/needs.ts";
+
+export type AgentKind = "executor" | "project-agent" | "sub-agent" | "remote-executor" | "ai-session" | "process" | "mcp-client";
 export type AgentGroup = "executor" | "project" | "ai" | "process" | "mcp";
 export type AgentState = "working" | "waiting" | "idle" | "off" | "error" | "stopped";
 
@@ -84,6 +86,12 @@ export interface RosterInputs {
   }>;
   /** The hub's queue, when it answered: unclaimed items and other executors' claims. */
   queue: Array<{ intakeId: string; projectId: string; status: string; text: string; claim: { executorId: string } | null }> | null;
+  /**
+   * The hub's implement jobs, when it answered: queued ones (with what they
+   * wait for, from psm's own queue) and ones in review become sub-agents of
+   * their project agent.
+   */
+  hubJobs?: Array<{ jobId: string; intakeId: string; projectId: string; status: string; createdAt: string; updatedAt: string; waitingFor?: { jobId: string; status: string; paths: string[] }[]; needs?: Need[]; note?: string | null; scope?: string[] | null }> | null;
   sessions: Array<{
     name: string;
     role: string;
@@ -141,6 +149,7 @@ const MCP_ACTIVE_MS = 5 * 60_000;
 export const agentId = {
   executor: () => "executor",
   project: (name: string) => `project:${encodeURIComponent(name)}`,
+  sub: (jobId: string) => `job:${jobId}`,
   remote: (executorId: string) => `remote:${executorId}`,
   session: (name: string) => `ai:${encodeURIComponent(name)}`,
   process: (name: string, kind: string) => `proc:${encodeURIComponent(name)}:${encodeURIComponent(kind)}`,
@@ -169,7 +178,9 @@ function executorAgent(input: RosterInputs, waiting: number): AgentSummary {
           { kind: "psm", label: input.signedIn ? "Signed in with Werewolf" : "Not signed in", state: input.signedIn ? "ok" : "bad" } as AgentConnection,
         ]),
     { kind: "sandbox", label: "Implement jobs run in isolated Docker clones", detail: "no network inside the container" },
-    ...running.map((job): AgentConnection => ({ kind: "agent", label: `${job.projectName}-agent`, detail: job.kind, agentId: agentId.project(job.projectName) })),
+    ...running.map((job): AgentConnection => (job.kind === "implement"
+      ? { kind: "agent", label: `${job.projectName} sub-agent ${job.jobId.replace(/^job_/, "").slice(0, 6)}`, detail: "implement", agentId: agentId.sub(job.jobId) }
+      : { kind: "agent", label: `${job.projectName}-agent`, detail: job.kind, agentId: agentId.project(job.projectName) })),
   ];
   return {
     id: agentId.executor(),
@@ -195,56 +206,121 @@ function executorAgent(input: RosterInputs, waiting: number): AgentSummary {
  * that job runs (triage as a tool-less call, implement in a Docker clone),
  * then goes idle again. Nothing runs while it is idle.
  */
+const short = (jobId: string) => jobId.replace(/^job_/, "").slice(0, 6);
+const oneLine = (text: string, max: number) => text.replace(/\s+/g, " ").trim().slice(0, max);
+
 function projectAgents(input: RosterInputs): AgentSummary[] {
   const ex = input.executor;
   const projects = new Map<string, string | null>();
   for (const project of input.projects) projects.set(project.name, project.id ?? null);
   for (const job of input.jobs) if (!projects.has(job.projectName)) projects.set(job.projectName, job.projectId);
+  const texts = new Map((input.queue ?? []).map((item) => [item.intakeId, item.text]));
   const executorUp = ex.enabled && !ex.paused;
-  return [...projects].map(([name, projectId]): AgentSummary => {
+  const out: AgentSummary[] = [];
+  for (const [name, projectId] of projects) {
     const jobs = input.jobs.filter((job) => job.projectName === name).sort((a, b) => b.claimedAt - a.claimedAt);
-    const job = jobs.find((entry) => RUNNING_JOB.has(entry.state) && !entry.finishedAt);
-    const last = job ?? jobs[0];
-    const sandbox = { kind: "sandbox" as const, label: "Isolated clone", detail: "branch comes back for review" };
-    const connections: AgentConnection[] = [
-      { kind: "agent", label: "executor", detail: "calls it when a task for this project arrives", agentId: agentId.executor(), state: executorUp ? "ok" : "off" },
-      ...(job?.kind === "implement" ? [sandbox] : []),
-    ];
+    const running = jobs.filter((entry) => RUNNING_JOB.has(entry.state) && !entry.finishedAt);
+    const triaging = running.filter((entry) => entry.kind !== "implement");
+    const implementing = running.filter((entry) => entry.kind === "implement");
+    const hubJobs = (input.hubJobs ?? []).filter((job) => job.projectId === projectId);
+    const queued = hubJobs.filter((job) => job.status === "queued" && !implementing.some((entry) => entry.jobId === job.jobId));
+    const review = hubJobs.filter((job) => job.status === "review");
+    const last = jobs[0];
+    const parentId = agentId.project(name);
+
+    // Sub-agents: one per implement job on this project, each in its own clone.
+    const subs: AgentSummary[] = [];
+    for (const job of implementing) {
+      subs.push({
+        id: agentId.sub(job.jobId), kind: "sub-agent", group: "project", name: `sub-agent ${short(job.jobId)}`, type: "Sub-agent · implement",
+        project: name, projectId, where: `Docker clone on this machine (${input.machine})`, state: "working",
+        activity: `${job.state.replace(/-/g, " ")}: ${oneLine(job.text, 140)}`, since: job.claimedAt, queue: 0, parent: parentId,
+        connections: [
+          { kind: "agent", label: `${name}-agent`, detail: "spawned it for this ticket", agentId: parentId },
+          { kind: "sandbox", label: "Isolated clone", detail: "branch comes back for review" },
+        ],
+        related: [], jobId: job.jobId,
+      });
+    }
+    for (const job of queued) {
+      const waits = job.waitingFor ?? [];
+      const needs = job.needs ?? [];
+      // A resume note already says what it waits for; the live list wins over it.
+      const why = job.note && !needs.length ? `${job.note} ` : "";
+      const activity = needs.length
+        ? `${describeNeeds(needs)} ${oneLine(texts.get(job.intakeId) ?? "", 100)}`
+        : waits.length
+        ? `${why}Waits for ${waits.map((blocker) => `sub-agent ${short(blocker.jobId)} (${blocker.status === "review" ? "in review" : blocker.status === "claimed" ? "working" : "queued"}; ${blocker.paths.slice(0, 2).join(", ")})`).join(", ")}: ${oneLine(texts.get(job.intakeId) ?? "", 100)}`
+        : `${why}Queued, starts when a slot is free: ${oneLine(texts.get(job.intakeId) ?? "", 100)}`;
+      subs.push({
+        id: agentId.sub(job.jobId), kind: "sub-agent", group: "project", name: `sub-agent ${short(job.jobId)}`, type: "Sub-agent · queued",
+        project: name, projectId, where: `Queued on this machine (${input.machine})`, state: needs.length ? "waiting" : "idle", activity,
+        since: Date.parse(job.createdAt) || null, queue: 0, parent: parentId,
+        connections: [
+          { kind: "agent", label: `${name}-agent`, detail: "queued it", agentId: parentId },
+          ...needs.filter((need) => need.jobId).map((need): AgentConnection => ({ kind: "agent", label: `sub-agent ${short(need.jobId!)}`, detail: `must be merged first: ${need.title}`, agentId: agentId.sub(need.jobId!), state: "off" })),
+          ...waits.map((blocker): AgentConnection => ({ kind: "agent", label: `sub-agent ${short(blocker.jobId)}`, detail: `overlaps on ${blocker.paths.slice(0, 3).join(", ")}`, agentId: agentId.sub(blocker.jobId), state: "off" })),
+        ],
+        related: [], jobId: job.jobId,
+      });
+    }
+    for (const job of review) {
+      subs.push({
+        id: agentId.sub(job.jobId), kind: "sub-agent", group: "project", name: `sub-agent ${short(job.jobId)}`, type: "Sub-agent · in review",
+        project: name, projectId, where: `Branch psm/job/${job.jobId} on this machine`, state: "waiting",
+        activity: `${job.note ? `${job.note} ` : ""}Ready for your review: ${oneLine(texts.get(job.intakeId) ?? "", 100)}`,
+        since: Date.parse(job.updatedAt) || null, queue: 0, parent: parentId,
+        connections: [{ kind: "agent", label: `${name}-agent`, detail: "spawned it for this ticket", agentId: parentId }],
+        related: [], jobId: job.jobId,
+      });
+    }
+
     let state: AgentState = "idle";
     let activity: string;
     let where = `This machine (${input.machine}) · called by the executor`;
-    if (job) {
+    if (implementing.length || triaging.length) {
       state = "working";
-      activity = `${job.state.replace(/-/g, " ")}: ${job.text.replace(/\s+/g, " ").slice(0, 140)}`;
-      where = job.kind === "implement" ? `Docker clone on this machine (${input.machine})` : `This machine (${input.machine}) · tool-less Claude call`;
+      const parts: string[] = [];
+      if (triaging.length) parts.push(`triaging: ${oneLine(triaging[0].text, 80)}`);
+      if (implementing.length) parts.push(`${implementing.length} sub-agent${implementing.length === 1 ? "" : "s"} implementing`);
+      if (queued.length) parts.push(`${queued.length} queued`);
+      if (review.length) parts.push(`${review.length} in review`);
+      activity = `Working: ${parts.join(" · ")}`;
+      if (!implementing.length) where = `This machine (${input.machine}) · tool-less Claude call`;
     } else if (!projectId) {
       state = "off";
       activity = "Needs a stable project id (assign one on the project card) before the executor can send it tasks.";
     } else if (!executorUp) {
       state = "off";
       activity = "Off while the executor is off.";
+    } else if (queued.length || review.length) {
+      activity = `Idle: ${[queued.length ? `${queued.length} queued` : "", review.length ? `${review.length} waiting for your review` : ""].filter(Boolean).join(" · ")}.`;
     } else {
-      activity = last ? `Idle. Last task (${last.kind}, ${last.error ? "failed" : last.state.replace(/-/g, " ")}): ${last.text.replace(/\s+/g, " ").slice(0, 100)}` : "Idle. The executor calls it when a task for this project arrives.";
+      activity = last ? `Idle. Last task (${last.kind}, ${last.error ? "failed" : last.state.replace(/-/g, " ")}): ${oneLine(last.text, 100)}` : "Idle. The executor calls it when a task for this project arrives.";
     }
-    return {
-      id: agentId.project(name),
+    out.push({
+      id: parentId,
       kind: "project-agent",
       group: "project",
       name: `${name}-agent`,
-      type: job ? `Project agent · ${job.kind}` : "Project agent",
+      type: implementing.length > 1 ? `Project agent · ${implementing.length} in parallel` : "Project agent",
       project: name,
       projectId,
       where,
       state,
       activity,
-      since: job ? job.claimedAt : last ? last.finishedAt ?? last.claimedAt : null,
-      queue: 0,
+      since: running[0]?.claimedAt ?? (last ? last.finishedAt ?? last.claimedAt : null),
+      queue: queued.length,
       parent: agentId.executor(),
-      connections,
+      connections: [
+        { kind: "agent", label: "executor", detail: "calls it when a task for this project arrives", agentId: agentId.executor(), state: executorUp ? "ok" : "off" },
+        ...subs.map((sub): AgentConnection => ({ kind: "agent", label: sub.name, detail: sub.type.replace(/^Sub-agent · /, ""), agentId: sub.id })),
+      ],
       related: [],
-      ...(last ? { jobId: last.jobId } : {}),
-    };
-  });
+      ...(last ? { jobId: (running[0] ?? last).jobId } : {}),
+    }, ...subs);
+  }
+  return out;
 }
 
 function remoteAgents(input: RosterInputs, names: Map<string, string>): AgentSummary[] {

@@ -387,7 +387,7 @@ export class McpOperations {
     if (!this.deps.agents) return { state: "unavailable", reason: "This psm does not report agents." };
     const all = client.projects === "all";
     const visible = new Map(this.#visible(client).map((project) => [project.name, project.id]));
-    const kindName: Record<string, string> = { executor: "executor", "project-agent": "project agent", "remote-executor": "executor on another machine", "ai-session": "AI session", process: "process", "mcp-client": "MCP client" };
+    const kindName: Record<string, string> = { executor: "executor", "project-agent": "project agent", "sub-agent": "sub-agent of a project agent", "remote-executor": "executor on another machine", "ai-session": "AI session", process: "process", "mcp-client": "MCP client" };
     const agents = (await this.deps.agents()).filter((agent) => {
       if (agent.kind === "executor") return true;
       if (agent.kind === "mcp-client" || agent.kind === "remote-executor") return all;
@@ -403,7 +403,7 @@ export class McpOperations {
       since: agent.since,
       queue: agent.queue,
       scriptAgent: agent.agentLike === true,
-      where: agent.kind === "remote-executor" ? "another machine" : agent.kind === "mcp-client" ? "an MCP client calling psm" : agent.kind === "project-agent" && /Docker/.test(agent.where) ? "an isolated Docker clone on this machine" : "this machine",
+      where: agent.kind === "remote-executor" ? "another machine" : agent.kind === "mcp-client" ? "an MCP client calling psm" : (agent.kind === "project-agent" || agent.kind === "sub-agent") && /Docker/.test(agent.where) ? "an isolated Docker clone on this machine" : "this machine",
       connections: agent.connections
         .filter((link) => link.kind !== "repo" && !(link.kind === "project" && !visible.has(link.label) && !all))
         .map((link) => ({ kind: link.kind, label: link.kind === "hub" ? "Werewolf hub" : link.label, state: link.state ?? null })),

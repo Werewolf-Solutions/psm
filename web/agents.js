@@ -38,9 +38,9 @@
     ["process", "Processes", (agent) => agent.group === "process" && !agent.agentLike],
     ["mcp", "MCP clients", (agent) => agent.group === "mcp"],
   ];
-  // Inside a project: its project agent, then AI sessions, script agents, other processes.
+  // Inside a project: its project agent and the sub-agents it spawned, then AI sessions, script agents, other processes.
   const IN_PROJECT = { project: 0, ai: 1, process: 3 };
-  const projectRank = (agent) => (agent.group === "process" && agent.agentLike ? 2 : IN_PROJECT[agent.group] ?? 4);
+  const projectRank = (agent) => (agent.kind === "sub-agent" ? 0.5 : agent.group === "process" && agent.agentLike ? 2 : IN_PROJECT[agent.group] ?? 4);
   const STATE_RANK = { waiting: 0, error: 1, working: 2, idle: 3, stopped: 4, off: 5 };
 
   // Which project folders are open: the user's own choice wins, remembered per browser.
@@ -154,7 +154,8 @@
   }
 
   function row(agent) {
-    const button = node("button", "", `exec-job agents-row${agent.id === selected ? " on" : ""}${agent.parent && agent.group === "executor" ? " agents-child" : ""}`);
+    const child = agent.kind === "sub-agent" || (agent.parent && agent.group === "executor");
+    const button = node("button", "", `exec-job agents-row${agent.id === selected ? " on" : ""}${child ? " agents-child" : ""}`);
     button.type = "button";
     button.dataset.agent = agent.id;
     const head = node("div", "", "exec-job-head");
@@ -459,6 +460,8 @@
     }
     if (agent.kind === "process" && agent.project) actions.append(actionButton(agent.state === "off" ? "Open scripts" : "Open logs", () => ctx.openProject(agent.project, agent.state === "off" ? "scripts" : "logs")));
     if (agent.kind === "project-agent" && detail.jobId) actions.append(actionButton(agent.state === "working" ? "Open in executor activity" : "Last task in executor activity", () => { select("executor", true); ctx.showJob(detail.jobId); }));
+    if (agent.kind === "sub-agent" && detail.lines) actions.append(actionButton("Open in executor activity", () => { select("executor", true); ctx.showJob(detail.jobId); }));
+    if (agent.kind === "sub-agent" && agent.parent) actions.append(actionButton("Project agent", () => select(agent.parent, true)));
     head.append(title, actions);
 
     const facts = node("dl", "", "agents-facts");
@@ -502,6 +505,13 @@
       if (detail.error) parts.push(section("Error", pre([detail.error])));
     }
     if (detail.items) parts.push(section("Working on", pre(detail.items.map((item) => `${item.project}: ${item.text}`))));
+    if (agent.kind === "sub-agent") {
+      if (detail.note) parts.push(section("Queue note", node("div", detail.note, "agents-turn-text")));
+      if (detail.needs?.length) parts.push(section("Merge these first", pre(detail.needs.map((need) => `${need.title} — ${need.jobId ?? "no job yet"} (${need.status === "review" ? "ready for review: Accept it" : need.status === "not-started" ? "not started: click Go on it" : need.status})`))));
+      if (detail.waitingFor?.length) parts.push(section("Waits for", pre(detail.waitingFor.map((blocker) => `${blocker.jobId} (${blocker.status === "review" ? "in review" : blocker.status === "claimed" ? "working" : "queued ahead"}) — overlaps on ${blocker.paths.join(", ")}`))));
+      if ("scope" in detail) parts.push(section("Expected to change", detail.scope?.length ? pre(detail.scope) : node("div", "Triage could not say, so it waits for every other job on this project.", "procs-empty")));
+      if (!detail.lines && detail.text) parts.push(section("Ticket", node("div", detail.text, "agents-turn-text")));
+    }
     if (detail.log) parts.push(section("Last log lines", detail.log.length ? pre(detail.log.map((line) => `${time(line.t)} ${line.line}`)) : node("div", "No output yet.", "procs-empty")));
     if (detail.calls) parts.push(section("Recent calls", detail.calls.length ? pre(detail.calls.map((call) => `${time(call.at)}  ${call.tool}${call.projectId ? ` · ${call.projectId}` : ""}  ${call.outcome}`)) : node("div", "No calls yet.", "procs-empty")));
     ctx.detail.replaceChildren(...parts);

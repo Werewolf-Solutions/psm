@@ -15,7 +15,14 @@
  *
  *   - a lease is 120 s and is kept by heartbeats; one that runs out returns the
  *     item to the queue (twice, for a job, and it is stalled);
- *   - at most one claimed implement job per project (the repo lock);
+ *   - implement jobs on one project run side by side when their scopes do not
+ *     overlap (overlap.ts); an overlapping one waits for the job it overlaps to
+ *     finish, and one whose scope is unknown waits for all of them. A project
+ *     set to "conflict" runs overlapping jobs side by side too, and a job whose
+ *     Accept conflicts goes back to start again from the merged code;
+ *   - a finished job whose files were merged by another job while it ran has
+ *     code older than that merge: it starts again from the merged code, or,
+ *     side by side, reaches review with a warning to test after merging;
  *   - Go needs a triaged intake whose verdict fits or needs a decision.
  *
  * node:sqlite is synchronous and psm is one process, so each step below is
@@ -26,11 +33,17 @@ import type { DatabaseSync } from "node:sqlite";
 
 import { db } from "../db.ts";
 import { validateVerdict, type Verdict } from "../triage/verdict.ts";
-import { HubError, type ExecutorJob, type Hub, type HubJob, type HubQuestion, type ImplementResult, type JobKind, type QueueItem } from "./client.ts";
+import { HubError, type ExecutorJob, type Hub, type HubJob, type HubQuestion, type ImplementResult, type JobKind, type OverlapMode, type QueueItem } from "./client.ts";
 import type { JobSelection } from "./model-selection.ts";
+import { blockersFor, collisionsAfter, mergedSince, normalizeScope, unionScope, widenScope, type Blocker, type Scope, type ScheduledJob } from "./overlap.ts";
+import { describeNeeds, needsFor, type Need, type NeedIntake } from "./needs.ts";
 
 export const LEASE_MS = 120_000;
 export const MAX_ATTEMPTS = 2; // one retry
+/** Job states whose listing says which unmerged tickets they wait for (needs.ts). */
+const NEEDS_SHOWN = new Set(["queued", "stalled", "failed"]);
+/** A job that keeps colliding after it finishes goes to review with a warning instead of round again. */
+export const MAX_REQUEUES = 3;
 const MAX_TEXT = 20_000;
 const CLAIM_WAIT_MS = 25_000;
 const CLAIM_POLL_MS = 1_000;
@@ -74,6 +87,7 @@ function shapeIntake(row: any): QueueItem {
     error: row.error ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+    scope: json<Scope>(row.scope ?? null, null),
   };
 }
 
@@ -93,6 +107,7 @@ function shapeJob(row: any): HubJob {
     error: row.error ?? null,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
+    note: row.note ?? null,
   };
 }
 
@@ -155,16 +170,72 @@ export function localHub(options: LocalHubOptions): Hub {
     return { jobId: row.intake_id, kind: "triage", intakeId: row.intake_id, projectId: row.project_id, projectName: projectName(row.project_id) as string, text: row.text, attempt: row.attempts + 1, leaseUntil: iso(leaseUntil) };
   }
 
+  /** A job's scope: what its branch changed once it has one, with what triage expected. */
+  function jobScope(row: any): Scope {
+    const intake = intakeRow(row.intake_id);
+    const expected = json<Scope>(intake?.scope ?? null, null);
+    const files = json<Scope>(row.files ?? null, null);
+    return files ? (expected ? unionScope(files, expected) : files) : expected;
+  }
+  const scheduled = (row: any): ScheduledJob => ({ jobId: row.job_id, projectId: row.project_id, status: row.status, createdAt: row.created_at, seq: row.seq, scope: jobScope(row) });
+  /** Every live job on these projects, for the overlap checks. */
+  function liveJobs(projectIds: string[]): ScheduledJob[] {
+    if (!projectIds.length) return [];
+    const marks = projectIds.map(() => "?").join(",");
+    return (sql(`SELECT rowid AS seq, * FROM hub_jobs WHERE status IN ${ACTIVE} AND project_id IN (${marks}) ORDER BY created_at, rowid`).all(...projectIds) as any[]).map(scheduled);
+  }
+  /**
+   * Jobs on this job's project merged since its code was taken that change the
+   * same files. A merged job counts with what its branch really changed.
+   */
+  function mergedMeanwhile(row: any, scope: Scope): Blocker[] {
+    if (row.based_at == null) return [];
+    const merged = (sql("SELECT * FROM hub_jobs WHERE project_id = ? AND status = 'accepted' AND accepted_at >= ?").all(row.project_id, row.based_at) as any[])
+      .map((other) => ({ jobId: other.job_id, projectId: other.project_id, acceptedAt: other.accepted_at, scope: json<Scope>(other.files ?? null, null) ?? jobScope(other) }));
+    return mergedSince({ jobId: row.job_id, projectId: row.project_id, scope }, row.based_at, merged);
+  }
+
+  const overlapMode = (projectId: string): OverlapMode =>
+    (sql("SELECT overlap FROM hub_project_settings WHERE project_id = ?").get(projectId) as any)?.overlap === "conflict" ? "conflict" : "wait";
+  /** What a queued job waits for; nothing on a project that runs overlapping jobs side by side. */
+  const waitsFor = (row: any, live: ScheduledJob[]): Blocker[] => (overlapMode(row.project_id) === "conflict" ? [] : blockersFor(scheduled(row), live));
+
+  /**
+   * The tickets each job's ticket needs merged first (needs.ts), for these
+   * projects. Applies in both overlap modes: it is about missing code, not files.
+   */
+  function needsLookup(projectIds: string[]): (row: any) => Need[] {
+    if (!projectIds.length) return () => [];
+    const marks = projectIds.map(() => "?").join(",");
+    const intakes = new Map<string, NeedIntake>();
+    for (const row of sql(`SELECT rowid AS seq, intake_id, project_id, status, created_at, text, verdict FROM hub_intake WHERE project_id IN (${marks})`).all(...projectIds) as any[]) {
+      intakes.set(row.intake_id, { intakeId: row.intake_id, projectId: row.project_id, status: row.status, createdAt: row.created_at, seq: row.seq, text: row.text ?? "", verdict: json<NeedIntake["verdict"]>(row.verdict, null) });
+    }
+    const newest = new Map<string, { jobId: string; status: string }>();
+    for (const row of sql(`SELECT job_id, intake_id, status FROM hub_jobs WHERE project_id IN (${marks}) ORDER BY created_at, rowid`).all(...projectIds) as any[]) {
+      newest.set(row.intake_id, { jobId: row.job_id, status: row.status });
+    }
+    return (row: any) => needsFor(row.intake_id, intakes, newest);
+  }
+
   function claimImplement(at: number): ExecutorJob | null {
-    // The repo lock: skip a project that already has a claimed job.
-    const row = sql(`SELECT * FROM hub_jobs AS job WHERE status = 'queued' AND (pinned_executor IS NULL OR pinned_executor = ?)
-                     AND NOT EXISTS (SELECT 1 FROM hub_jobs AS busy WHERE busy.project_id = job.project_id AND busy.status = 'claimed')
-                     ORDER BY created_at, rowid LIMIT 1`).get(me) as any;
+    // Oldest first; a job waits while an overlapping one runs, is in review, or is
+    // queued ahead of it, and while a ticket it builds on is not merged yet.
+    const queued = sql(`SELECT rowid AS seq, * FROM hub_jobs WHERE status = 'queued' AND (pinned_executor IS NULL OR pinned_executor = ?) ORDER BY created_at, rowid`).all(me) as any[];
+    if (!queued.length) return null;
+    const projects = [...new Set(queued.map((job) => job.project_id as string))];
+    const live = liveJobs(projects);
+    const needs = needsLookup(projects);
+    const row = queued.find((job) => !waitsFor(job, live).length && !needs(job).length);
     if (!row) return null;
     const leaseUntil = at + LEASE_MS;
-    sql("UPDATE hub_jobs SET status = 'claimed', claim_executor = ?, lease_until = ?, attempts = attempts + 1, error = NULL, progress = NULL, updated_at = ? WHERE job_id = ?").run(me, leaseUntil, at, row.job_id);
-    const intake = intakeRow(row.intake_id);
     const revisions = json<{ comment: string; at: string }[]>(row.revisions, []);
+    const continueClone = row.pinned_executor === me && (revisions.length > 0 || row.resume === 1);
+    // A fresh clone takes the code as it is now; a continued one keeps the code it started from.
+    const basedAt = continueClone ? (row.based_at ?? at) : at;
+    sql("UPDATE hub_jobs SET status = 'claimed', claim_executor = ?, lease_until = ?, attempts = attempts + 1, error = NULL, progress = NULL, note = NULL, based_at = ?, updated_at = ? WHERE job_id = ?").run(me, leaseUntil, basedAt, at, row.job_id);
+    if (row.resume) sql("UPDATE hub_jobs SET resume = 0 WHERE job_id = ?").run(row.job_id);
+    const intake = intakeRow(row.intake_id);
     return {
       jobId: row.job_id,
       kind: "implement",
@@ -176,7 +247,8 @@ export function localHub(options: LocalHubOptions): Hub {
       selection: json<JobSelection>(row.selection, { mode: "auto" }),
       revisions,
       attempt: row.attempts + 1,
-      continueClone: row.pinned_executor === me && revisions.length > 0,
+      continueClone,
+      resumed: row.pinned_executor === me && row.resume === 1,
       leaseUntil: iso(leaseUntil),
     };
   }
@@ -184,6 +256,7 @@ export function localHub(options: LocalHubOptions): Hub {
   const heldIntake = (jobId: string, at: number) => sql("SELECT * FROM hub_intake WHERE intake_id = ? AND status = 'claimed' AND claim_executor = ? AND lease_until > ?").get(jobId, me, at) as any;
   const heldJob = (jobId: string, at: number) => sql("SELECT * FROM hub_jobs WHERE job_id = ? AND status = 'claimed' AND claim_executor = ? AND lease_until > ?").get(jobId, me, at) as any;
   const notHeld = () => new HubError("This job is no longer claimed by this executor", 409, "not_held");
+  const describe = (blockers: Blocker[]) => blockers.map((blocker) => `${blocker.jobId} (${blocker.paths.slice(0, 3).join(", ")}${blocker.paths.length > 3 ? ", …" : ""})`).join(" and ");
 
   return {
     async claim(kinds: JobKind[], signal?: AbortSignal) {
@@ -234,8 +307,41 @@ export function localHub(options: LocalHubOptions): Hub {
           const result = outcome.result;
           if (!result || typeof result.branch !== "string" || !/^psm\/job\/job_[0-9a-f]{24}$/.test(result.branch)) throw new HubError("result.branch must be psm/job/<jobId>", 400, "bad_result");
           if (!Array.isArray(result.commits) || !result.commits.length) throw new HubError("result.commits must list at least one commit", 400, "bad_result");
-          sql("UPDATE hub_jobs SET status = 'review', result = ?, error = NULL, claim_executor = NULL, lease_until = NULL, progress = NULL, pinned_executor = ?, updated_at = ? WHERE job_id = ?")
-            .run(JSON.stringify(result), me, at, jobId);
+          // Widened rather than dropped when it is long: what the branch changed
+          // is known, and a guess in its place would hide most of it.
+          const files = widenScope(result.files);
+          const scope = files ?? jobScope(held);
+          // The prediction can be wrong: if the real changes collide with a job
+          // already in review, or with one merged while this ran (its code is
+          // older than that merge), this one goes back and starts again from
+          // the merged code. After MAX_REQUEUES it goes to review anyway, with a warning.
+          // A project set to "conflict" sends it to review anyway: Accept finds out.
+          const sideBySide = overlapMode(held.project_id) === "conflict";
+          const collisions = collisionsAfter({ ...scheduled(held), scope }, liveJobs([held.project_id]));
+          const merged = mergedMeanwhile(held, scope);
+          if ((collisions.length || merged.length) && !sideBySide && held.requeues < MAX_REQUEUES) {
+            const changed = [
+              ...(collisions.length ? [`the same files as ${describe(collisions)}`] : []),
+              ...(merged.length ? [`the same files as ${describe(merged)}, merged while it ran`] : []),
+            ].join(", and ");
+            const note = `Changed ${changed}. ${collisions.length ? "Waits for it to finish, then starts" : "Starts"} again from the merged code.`;
+            sql(`UPDATE hub_jobs SET status = 'queued', result = NULL, files = ?, requeues = requeues + 1, attempts = 0, error = NULL, note = ?,
+                 claim_executor = NULL, lease_until = NULL, progress = NULL, pinned_executor = NULL, updated_at = ? WHERE job_id = ?`)
+              .run(files ? JSON.stringify(files) : null, note, at, jobId);
+            return { requeued: `changed ${changed}; it starts again from the merged code${collisions.length ? " once that job is finished" : ""}` };
+          }
+          const notes: string[] = [];
+          if (collisions.length) {
+            notes.push(sideBySide
+              ? `Overlaps ${describe(collisions)}. If Accept conflicts, it starts again from the merged code.`
+              : `Overlaps ${describe(collisions)}; merge that first and this one may conflict.`);
+          }
+          if (merged.length) {
+            notes.push(`Started before ${describe(merged)} was merged, and changes the same files: ${sideBySide ? "if Accept conflicts, it starts again from the merged code, and" : "Accept may conflict, and"} even a clean merge has not been tested with that code, so run the tests after merging.`);
+          }
+          const note = notes.length ? notes.join(" ") : null;
+          sql("UPDATE hub_jobs SET status = 'review', result = ?, files = ?, note = ?, error = NULL, claim_executor = NULL, lease_until = NULL, progress = NULL, pinned_executor = ?, updated_at = ? WHERE job_id = ?")
+            .run(JSON.stringify(result), files ? JSON.stringify(files) : null, note, me, at, jobId);
           return;
         }
         if (outcome.status !== "stalled" && outcome.status !== "failed") throw new HubError("status must be review, stalled or failed", 400, "bad_result");
@@ -250,7 +356,9 @@ export function localHub(options: LocalHubOptions): Hub {
       if (outcome.status === "triaged") {
         const checked = validateVerdict(outcome.verdict);
         if (!checked.ok) throw new HubError(`Invalid verdict: ${checked.error}`, 400, "invalid_verdict");
-        sql("UPDATE hub_intake SET status = 'triaged', verdict = ?, error = NULL, claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE intake_id = ?").run(JSON.stringify(checked.verdict), at, jobId);
+        const scope = normalizeScope(outcome.scope);
+        sql("UPDATE hub_intake SET status = 'triaged', verdict = ?, scope = ?, error = NULL, claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE intake_id = ?")
+          .run(JSON.stringify(checked.verdict), scope ? JSON.stringify(scope) : null, at, jobId);
         return;
       }
       if (outcome.status !== "failed") throw new HubError("status must be triaged or failed", 400, "bad_result");
@@ -311,7 +419,7 @@ export function localHub(options: LocalHubOptions): Hub {
       if (projectId !== found.project_id) requireProject(projectId);
       refuseDuringJob(found.intake_id);
       // A real change sends it back to triage.
-      sql("UPDATE hub_intake SET text = ?, project_id = ?, status = 'new', verdict = NULL, error = NULL, attempts = 0, claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE intake_id = ?")
+      sql("UPDATE hub_intake SET text = ?, project_id = ?, status = 'new', verdict = NULL, scope = NULL, error = NULL, attempts = 0, claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE intake_id = ?")
         .run(text, projectId, now(), found.intake_id);
       return shapeIntake(intakeRow(found.intake_id));
     },
@@ -324,9 +432,79 @@ export function localHub(options: LocalHubOptions): Hub {
       return shapeIntake(intakeRow(found.intake_id));
     },
 
+    recoverInterrupted() {
+      const at = now();
+      const jobs = (sql("SELECT job_id FROM hub_jobs WHERE status = 'claimed' AND claim_executor = ?").all(me) as any[]).map((row) => row.job_id as string);
+      // Not counted as an attempt: nothing failed, psm stopped.
+      sql(`UPDATE hub_jobs SET status = 'queued', resume = 1, pinned_executor = ?, attempts = MAX(attempts - 1, 0), claim_executor = NULL, lease_until = NULL, progress = NULL,
+           note = 'psm restarted while this ran. It continues where it left off, in its own copy.', updated_at = ? WHERE status = 'claimed' AND claim_executor = ?`).run(me, at, me);
+      const intake = (sql("SELECT intake_id FROM hub_intake WHERE status = 'claimed' AND claim_executor = ?").all(me) as any[]).map((row) => row.intake_id as string);
+      sql("UPDATE hub_intake SET status = 'new', attempts = MAX(attempts - 1, 0), claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE status = 'claimed' AND claim_executor = ?").run(at, me);
+      return { jobs, intake };
+    },
+
+    async resumeJob(jobId) {
+      const job = jobRow(jobId);
+      if (!job) throw new HubError("No such job", 404, "not_found");
+      if (job.status !== "stalled" && job.status !== "failed") throw new HubError(`This job is ${job.status}; only a stalled or failed job can be resumed`, 409, "not_resumable");
+      const needs = needsLookup([job.project_id])(job);
+      const note = needs.length
+        ? `Resumed. ${describeNeeds(needs)} Then it continues where it stopped, in its own copy.`
+        : "Resumed: it continues where it stopped, in its own copy.";
+      sql(`UPDATE hub_jobs SET status = 'queued', resume = 1, pinned_executor = ?, attempts = 0, error = NULL, claim_executor = NULL, lease_until = NULL, progress = NULL,
+           note = ?, updated_at = ? WHERE job_id = ?`).run(me, note, now(), jobId);
+      return shapeJob(jobRow(jobId));
+    },
+
+    overlapModes() {
+      const rows = sql("SELECT project_id, overlap FROM hub_project_settings").all() as any[];
+      return Object.fromEntries(rows.map((row) => [row.project_id, row.overlap === "conflict" ? "conflict" : "wait"]));
+    },
+
+    setOverlapMode(projectId, mode) {
+      requireProject(projectId);
+      if (mode !== "wait" && mode !== "conflict") throw new HubError("mode must be wait or conflict", 400, "bad_mode");
+      const at = now();
+      sql("INSERT INTO hub_project_settings(project_id, overlap, updated_at) VALUES (?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET overlap = excluded.overlap, updated_at = excluded.updated_at").run(projectId, mode, at);
+      return mode;
+    },
+
+    redoAfterConflict(jobId) {
+      const job = jobRow(jobId);
+      if (!job) throw new HubError("No such job", 404, "not_found");
+      if (job.status !== "review") throw new HubError(`This job is ${job.status}, not waiting for review`, 409, "not_in_review");
+      if (job.requeues >= MAX_REQUEUES) return null;
+      // A fresh clone from the branch you merged into: no pin, no resume, the old result gone.
+      sql(`UPDATE hub_jobs SET status = 'queued', result = NULL, requeues = requeues + 1, attempts = 0, error = NULL, resume = 0,
+           note = 'Its Accept conflicted with what was merged meanwhile. It starts again from the merged code.',
+           claim_executor = NULL, lease_until = NULL, progress = NULL, pinned_executor = NULL, updated_at = ? WHERE job_id = ?`).run(now(), jobId);
+      return shapeJob(jobRow(jobId));
+    },
+
+    async retriageIntake(intakeId) {
+      const found = ownIntake(intakeId);
+      if (found.status === "withdrawn") throw new HubError("This task was withdrawn", 409, "withdrawn");
+      if (found.status === "new" || found.status === "claimed") return shapeIntake(found);
+      refuseDuringJob(found.intake_id);
+      sql("UPDATE hub_intake SET status = 'new', verdict = NULL, scope = NULL, error = NULL, attempts = 0, claim_executor = NULL, lease_until = NULL, updated_at = ? WHERE intake_id = ?").run(now(), found.intake_id);
+      return shapeIntake(intakeRow(found.intake_id));
+    },
+
     async listJobs() {
       releaseExpired(now());
-      return (sql("SELECT * FROM hub_jobs ORDER BY created_at DESC, rowid DESC LIMIT 200").all() as any[]).map(shapeJob);
+      const rows = sql("SELECT rowid AS seq, * FROM hub_jobs ORDER BY created_at DESC, rowid DESC LIMIT 200").all() as any[];
+      const live = liveJobs([...new Set(rows.filter((row) => row.status === "queued").map((row) => row.project_id))]);
+      // Stalled and failed jobs too: what a Resume or Retry would wait for.
+      const needs = needsLookup([...new Set(rows.filter((row) => NEEDS_SHOWN.has(row.status)).map((row) => row.project_id as string))]);
+      return rows.map((row) => {
+        const job = shapeJob(row);
+        const scope = jobScope(row);
+        return {
+          ...job, scope,
+          ...(row.status === "queued" ? { waitingFor: waitsFor(row, live) } : {}),
+          ...(NEEDS_SHOWN.has(row.status) ? { needs: needs(row) } : {}),
+        };
+      });
     },
 
     async goJob(intakeId, selection) {
@@ -350,7 +528,8 @@ export function localHub(options: LocalHubOptions): Hub {
       if (job.status !== "review") throw new HubError(`This job is ${job.status}, not waiting for review`, 409, "not_in_review");
       const at = now();
       if (action === "accept" || action === "reject") {
-        sql("UPDATE hub_jobs SET status = ?, updated_at = ? WHERE job_id = ?").run(action === "accept" ? "accepted" : "rejected", at, jobId);
+        if (action === "accept") sql("UPDATE hub_jobs SET status = 'accepted', accepted_at = ?, updated_at = ? WHERE job_id = ?").run(at, at, jobId);
+        else sql("UPDATE hub_jobs SET status = 'rejected', updated_at = ? WHERE job_id = ?").run(at, jobId);
       } else if (action === "revise") {
         const text = typeof comment === "string" ? comment.trim().slice(0, 4000) : "";
         if (!text) throw new HubError("Say what to change", 400, "comment_required");

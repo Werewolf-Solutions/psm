@@ -221,7 +221,7 @@ export function jobChangedFiles(dir: string, base: string): string[] {
 }
 
 /** The branch as a review result, or why it cannot be one. */
-export function collectResult(dir: string, jobId: string, base: string): { ok: true; result: Omit<ImplementResult, "checks" | "summary" | "model"> } | { ok: false; reason: string } {
+export function collectResult(dir: string, jobId: string, base: string): { ok: true; result: Omit<ImplementResult, "checks" | "summary" | "model"> & { files: string[] } } | { ok: false; reason: string } {
   const head = jobGit(dir, ["rev-parse", "HEAD"]).trim();
   const log = jobGit(dir, ["log", "--format=%H%x09%s", `${base}..${head}`]).trim();
   const commits = log ? log.split("\n").map((line) => ({ sha: line.split("\t")[0], subject: line.split("\t").slice(1).join("\t").slice(0, 200) })) : [];
@@ -241,6 +241,8 @@ export function collectResult(dir: string, jobId: string, base: string): { ok: t
       headCommit: head,
       commits: commits.reverse(),
       diffStat: { files: number(/(\d+) files? changed/), insertions: number(/(\d+) insertions?/), deletions: number(/(\d+) deletions?/) },
+      // What the branch changes, for psm's queue to schedule other jobs around (overlap.ts).
+      files: jobGit(dir, ["diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", `${base}..${head}`]).split("\0").filter(Boolean),
     },
   };
 }
@@ -260,7 +262,8 @@ End with a short summary for the reviewer: what changed, which checks passed, an
 
 export function implementPrompt(job: ImplementJob, projectName: string, baseline: Baseline | null = null): string {
   const verdict = job.verdict;
-  const lines = [`Project: ${projectName}`, "", "<task>", job.text.trim(), "</task>"];
+  // PSM tools take the project id; name it here so the agent does not guess.
+  const lines = [`Project: ${projectName} (pass project "${job.projectId}" to the PSM tools)`, "", "<task>", job.text.trim(), "</task>"];
   if (verdict) {
     lines.push("", "Triage (from the project's AI manager):", `- verdict: ${verdict.verdict}, size ${verdict.size}`);
     if (verdict.rationale) lines.push(`- rationale: ${verdict.rationale}`);
@@ -269,10 +272,14 @@ export function implementPrompt(job: ImplementJob, projectName: string, baseline
     if (verdict.queue?.note) lines.push(`- note: ${verdict.queue.note}`);
     if (verdict.questions?.length) lines.push(`- open questions (the owner clicked Go, so use your best judgement and say what you chose): ${verdict.questions.join("; ")}`);
   }
+  if (job.resumed) {
+    lines.push("", "An earlier run of this job was stopped part-way (psm restarted, or the owner resumed it after it stopped). This clone holds what it did so far: commits on this branch and any uncommitted changes. Start with git status and git log in sandbox_shell, keep what is right, and carry on from there rather than starting over.");
+  }
   if (job.revisions.length) {
     lines.push("", "The owner reviewed an earlier attempt on this branch and asked for changes (newest last):");
     for (const revision of job.revisions) lines.push(`- ${revision.comment}`);
-    lines.push("Build on the commits already on this branch.");
+    // A job redone after a conflicting Accept starts from fresh code: the feedback still applies, the old commits do not.
+    lines.push(job.continueClone ? "Build on the commits already on this branch." : "That attempt was set aside and this one starts from fresh code, so apply those changes as part of the task.");
   }
   if (baseline?.status === "fail") {
     lines.push("", `psm ran the project's tests at the starting commit and they fail (${baseline.summary}).${baseline.failing.length ? ` Failing: ${baseline.failing.join("; ")}.` : ""} This task is about making them pass: find the cause and fix it, without deleting, skipping or weakening tests. The clone's node_modules already has the project's packages for sandbox_shell; the PSM checks run in their own sandbox, so call install_packages before run_tests. The job reaches review only when every test passes.`);
@@ -334,7 +341,9 @@ export function implementJobRunner(deps: ImplementDeps) {
       base = fs.readFileSync(baseFile, "utf8").trim();
       try { hydrateLocalSubmodules(project.path, dir); }
       catch (err) { return { status: "failed", error: `could not prepare submodules: ${(err as Error).message}` }; }
-      deps.activity?.note(job.jobId, `Continuing in the job's clone (${job.revisions.length} revision request${job.revisions.length === 1 ? "" : "s"})`);
+      deps.activity?.note(job.jobId, job.resumed
+        ? "Resuming in the job's own copy, where the earlier run stopped"
+        : `Continuing in the job's clone (${job.revisions.length} revision request${job.revisions.length === 1 ? "" : "s"})`);
     } else {
       try {
         base = prepareClone(project.path, dir, job.jobId);

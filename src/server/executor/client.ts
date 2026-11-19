@@ -7,7 +7,8 @@
  * worker, and its stop rules (D3, E2) are enforced here, never by a prompt:
  *
  *   - every job has a timeout (triage: five minutes);
- *   - at most one job per project runs at a time;
+ *   - at most one job per project runs at a time, unless the hub schedules
+ *     around overlapping files itself (psm's own queue, overlap.ts);
  *   - hub errors back off exponentially, capped at sixty seconds;
  *   - a kill switch stops claiming and abandons running jobs;
  *   - aborting stops the loop cleanly.
@@ -24,6 +25,7 @@ import { statePath } from "../../store.ts";
 import type { OpenIntake } from "../triage/context.ts";
 import type { Verdict } from "../triage/verdict.ts";
 import type { JobSelection, ResolvedJobModel } from "./model-selection.ts";
+import type { Need } from "./needs.ts";
 
 export type JobKind = "triage" | "implement";
 
@@ -49,8 +51,10 @@ export interface ImplementJob extends JobBase {
   verdict: Verdict | null;
   /** Revise comments, oldest first. */
   revisions: { comment: string; at: string }[];
-  /** A revised job continues in the clone this executor already holds. */
+  /** A revised or resumed job continues in the clone this executor already holds. */
   continueClone: boolean;
+  /** It was stopped part-way (psm restarted, or the owner pressed Resume): pick up where it left off. */
+  resumed?: boolean;
 }
 
 export type ExecutorJob = TriageJob | ImplementJob;
@@ -65,10 +69,13 @@ export interface ImplementResult {
   diffStat: { files: number; insertions: number; deletions: number };
   checks: { name: string; ok: boolean }[];
   summary: string;
+  /** The files the branch changes. psm's own queue schedules on it; never sent to the Werewolf hub. */
+  files?: string[];
 }
 
 export type JobOutcome =
-  | { status: "triaged"; verdict: Verdict }
+  /** `scope`: the files and folders triage expects the work to change (overlap.ts). psm's own queue only. */
+  | { status: "triaged"; verdict: Verdict; scope?: string[] | null }
   | { status: "review"; result: ImplementResult }
   | { status: "stalled"; error: string }
   | { status: "failed"; error: string };
@@ -89,6 +96,26 @@ export interface HubJob {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * psm's own queue only (overlap.ts): what the job is expected to touch, and,
+   * while queued, the overlapping jobs it waits for. The Werewolf hub keeps one
+   * job per project instead and sends none of these.
+   */
+  scope?: string[] | null;
+  waitingFor?: { jobId: string; status: string; paths: string[] }[];
+  /** psm's own queue only (needs.ts): tickets triage said this one builds on that are not merged yet. */
+  needs?: Need[];
+  note?: string | null;
+}
+
+/** The hub's contract has no scope or file list: keep psm's scheduling fields to psm. */
+export function forWerewolfHub(outcome: JobOutcome): JobOutcome {
+  if (outcome.status === "triaged") return { status: "triaged", verdict: outcome.verdict };
+  if (outcome.status === "review") {
+    const { files: _files, ...result } = outcome.result;
+    return { status: "review", result };
+  }
+  return outcome;
 }
 
 export const HEARTBEAT_MS = 30_000;
@@ -193,7 +220,8 @@ export interface Hub {
   claim(kinds: JobKind[], signal?: AbortSignal): Promise<ExecutorJob | null>;
   /** Extend the lease; `step` also tells the hub (and Todo) what the job is doing now. */
   heartbeat(jobId: string, step?: string): Promise<{ leaseUntil: string }>;
-  result(jobId: string, outcome: JobOutcome): Promise<void>;
+  /** psm's own queue may send a finished job back to wait for an overlapping one (overlap.ts): `requeued` says why. */
+  result(jobId: string, outcome: JobOutcome): Promise<void | { requeued: string }>;
   /** The owner's intake for one project — context for triage. */
   listIntake(projectId: string): Promise<OpenIntake[]>;
   /** Implement jobs (phase E), newest first. */
@@ -213,9 +241,35 @@ export interface Hub {
   updateIntake(intakeId: string, change: { text?: string; projectId?: string }): Promise<QueueItem>;
   /** Withdraw a PSM-made intake. */
   withdrawIntake(intakeId: string): Promise<QueueItem>;
+  /** Send an intake back through triage, as it is. psm's own queue only; the Werewolf hub refuses. */
+  retriageIntake(intakeId: string): Promise<QueueItem>;
+  /** Queue a stalled or failed job again in the clone it already has. psm's own queue only. */
+  resumeJob(jobId: string): Promise<HubJob>;
+  /**
+   * At executor start: jobs and triage this executor held when psm stopped go
+   * back to the queue now, instead of when their lease runs out, and an
+   * implement job continues in its clone. psm's own queue only.
+   */
+  recoverInterrupted?(): { jobs: string[]; intake: string[] };
+  /** How overlapping jobs on each project are scheduled (overlap.ts). psm's own queue only. */
+  overlapModes?(): Record<string, OverlapMode>;
+  setOverlapMode?(projectId: string, mode: OverlapMode): OverlapMode;
+  /**
+   * A job in review whose Accept conflicted: back to the queue, to start again
+   * from the merged code. Null once it has been redone too often; it then stays
+   * in review for a hand merge. psm's own queue only.
+   */
+  redoAfterConflict?(jobId: string): HubJob | null;
   /** Replace this executor's share of the project registry the `@` picker reads. */
   publishProjects(projects: HubProject[]): Promise<{ count: number; archived: number }>;
 }
+
+/**
+ * Overlapping jobs on one project: "wait" runs them one after another, each
+ * from the code the last one merged; "conflict" runs them side by side and
+ * redoes one only when its Accept actually conflicts.
+ */
+export type OverlapMode = "wait" | "conflict";
 
 /** One intake item as the hub lists it (GET /psm/intake). */
 export interface QueueItem {
@@ -232,6 +286,8 @@ export interface QueueItem {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /** psm's own queue only: the files and folders triage expects the work to change; null when it could not say. */
+  scope?: string[] | null;
 }
 
 /** One entry of the hub's project registry (contract: p14-hub-contract.md). */
@@ -301,7 +357,7 @@ export function hubClient(options: HubOptions): Hub {
       return { leaseUntil: String(data?.leaseUntil || "") };
     },
     async result(jobId, outcome) {
-      await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/result`, outcome, REQUEST_TIMEOUT_MS);
+      await call("POST", `/psm/executor/jobs/${encodeURIComponent(jobId)}/result`, forWerewolfHub(outcome), REQUEST_TIMEOUT_MS);
     },
     async listJobs() {
       const { data } = await call("GET", "/psm/jobs", undefined, REQUEST_TIMEOUT_MS);
@@ -323,6 +379,12 @@ export function hubClient(options: HubOptions): Hub {
       const { data } = await call("GET", "/psm/intake", undefined, REQUEST_TIMEOUT_MS);
       const items: any[] = Array.isArray(data?.intake) ? data.intake : [];
       return items.filter((item) => item && typeof item.intakeId === "string" && typeof item.status === "string") as QueueItem[];
+    },
+    async resumeJob() {
+      throw new HubError("Resume works with psm's own queue; use Retry on the Werewolf hub.", 409, "not_supported");
+    },
+    async retriageIntake() {
+      throw new HubError("Triage again works with psm's own queue; on the Werewolf hub, edit the task in Todo instead.", 409, "not_supported");
     },
     async listQuestions() {
       const { data } = await call("GET", "/psm/questions", undefined, REQUEST_TIMEOUT_MS);
@@ -360,7 +422,7 @@ export function hubClient(options: HubOptions): Hub {
 export type ExecutorEvent =
   | { type: "claimed"; job: ExecutorJob }
   | { type: "heartbeat"; jobId: string; leaseUntil: string }
-  | { type: "posted"; jobId: string; outcome: JobOutcome }
+  | { type: "posted"; jobId: string; outcome: JobOutcome; requeued?: string }
   | { type: "abandoned"; jobId: string; reason: string }
   | { type: "hub-error"; error: string; retryInMs: number }
   | { type: "idle" }
@@ -373,8 +435,13 @@ export interface ExecutorOptions {
   run: (job: ExecutorJob, signal: AbortSignal) => Promise<JobOutcome>;
   signal: AbortSignal;
   kinds?: JobKind[];
-  /** Jobs at once across all projects. One per project, always. */
+  /** Jobs at once across all projects. */
   concurrency?: number;
+  /**
+   * Hold one job per project on this side too (the default). psm's own queue
+   * only hands out jobs whose files do not overlap, so it turns this off.
+   */
+  projectLock?: boolean;
   heartbeatMs?: number;
   timeoutsMs?: Partial<Record<JobKind, number>>;
   backoffBaseMs?: number;
@@ -459,8 +526,9 @@ export async function runExecutor(options: ExecutorOptions): Promise<void> {
   async function postResult(job: ExecutorJob, outcome: JobOutcome, jobSignal: AbortSignal): Promise<void> {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        await hub.result(job.jobId, outcome);
-        emit({ type: "posted", jobId: job.jobId, outcome });
+        const answer = await hub.result(job.jobId, outcome);
+        const requeued = answer && typeof answer === "object" && typeof answer.requeued === "string" ? answer.requeued : undefined;
+        emit({ type: "posted", jobId: job.jobId, outcome, ...(requeued ? { requeued } : {}) });
         log(`executor: ${job.jobId} ${outcome.status}${outcome.status === "failed" ? ` (${outcome.error})` : ""}`);
         return;
       } catch (err) {
@@ -503,7 +571,7 @@ export async function runExecutor(options: ExecutorOptions): Promise<void> {
     let release: (() => void) | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     try {
-      release = await locks.acquire(job.projectId, controller.signal);
+      release = options.projectLock === false ? () => {} : await locks.acquire(job.projectId, controller.signal);
       if (!release) return;
 
       const timeoutMs = timeouts[job.kind];

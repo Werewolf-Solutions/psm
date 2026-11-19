@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findCalendarDate, parseVerdictAnswer, validateVerdict } from "./verdict.ts";
+import { findCalendarDate, parseTriageAnswer, parseVerdictAnswer, validateVerdict } from "./verdict.ts";
 
 function base(overrides: Record<string, unknown> = {}) {
   return {
@@ -148,4 +148,19 @@ test("the answer parser refuses everything else", () => {
   assert.match((parseVerdictAnswer("{\"verdict\": \"fits\"") as any).error, /not valid JSON/);
   assert.match((parseVerdictAnswer("```json\n[1, 2]\n```") as any).error, /must be a JSON object/);
   assert.match((parseVerdictAnswer(JSON.stringify(base({ rationale: "ship tomorrow" }))) as any).error, /calendar date/);
+});
+
+test("touches is split off the verdict; a bad list is an unknown scope, never a refused verdict", () => {
+  const base = { verdict: "fits", size: "S", dependsOn: [], conflictsWith: [], queue: { after: [], note: "" }, questions: [], rationale: "ok" };
+  const good = parseTriageAnswer(JSON.stringify({ ...base, touches: ["./routes/registry.js", "routes/__tests__/"] }));
+  assert.ok(good.ok);
+  assert.deepEqual(good.ok && good.scope, ["routes/__tests__/", "routes/registry.js"]);
+  assert.equal(good.ok && "touches" in good.verdict, false, "the verdict stays the hub's shape");
+  for (const touches of [[], ["../x"], "routes/", undefined]) {
+    const answer = parseTriageAnswer(JSON.stringify({ ...base, ...(touches === undefined ? {} : { touches }) }));
+    assert.ok(answer.ok);
+    assert.equal(answer.ok && answer.scope, null);
+  }
+  assert.equal(parseTriageAnswer(JSON.stringify({ ...base, verdict: "maybe", touches: ["a.js"] })).ok, false);
+  assert.equal(parseVerdictAnswer(JSON.stringify({ ...base, touches: ["a.js"] })).ok, false, "the hub's own validator still refuses unknown keys");
 });

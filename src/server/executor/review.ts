@@ -55,7 +55,7 @@ function git(cwd: string, args: string[]): { ok: boolean; out: string } {
 
 export type AcceptOutcome =
   | { ok: true; into: string; mergeCommit: string }
-  | { ok: false; reason: string; branchKept: boolean };
+  | { ok: false; reason: string; branchKept: boolean; conflicted?: boolean };
 
 /** Fetch the job's branch into your checkout and merge it into the current branch. */
 export function acceptJob(realPath: string, clone: string, jobId: string, message: string): AcceptOutcome {
@@ -76,9 +76,14 @@ export function acceptJob(realPath: string, clone: string, jobId: string, messag
       : conflicted
         ? "it conflicts with what is on your branch"
         : merged.out.split("\n").filter(Boolean).pop() || "git refused";
-    return { ok: false, reason: `Not merged: ${why}. Your checkout is unchanged, and ${branch} is in your repo to merge by hand.`, branchKept: true };
+    return { ok: false, reason: `Not merged: ${why}. Your checkout is unchanged, and ${branch} is in your repo to merge by hand.`, branchKept: true, conflicted };
   }
   return { ok: true, into: current.out, mergeCommit: git(realPath, ["rev-parse", "HEAD"]).out };
+}
+
+/** Drop a job's branch that Accept brought into your repo, when the job is redone instead. */
+export function dropFetchedBranch(realPath: string, jobId: string): void {
+  git(realPath, ["branch", "-D", branchFor(jobId)]);
 }
 
 export function discardClone(clone: string): void {

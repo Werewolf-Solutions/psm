@@ -7,6 +7,8 @@
  * posted back as the job's `error`.
  */
 
+import { normalizeScope, type Scope } from "../executor/overlap.ts";
+
 export type VerdictKind = "fits" | "doesnt_fit" | "needs_decision";
 export type VerdictSize = "S" | "M" | "L" | "XL";
 
@@ -207,6 +209,31 @@ const FENCE_RE = /```[ \t]*(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?[ \t]*```/gi;
  * invalid — guessing which object was meant is how a fake verdict gets in.
  */
 export function parseVerdictAnswer(answer: string): VerdictResult {
+  const parsed = parseAnswerObject(answer);
+  return parsed.ok ? validateVerdict(parsed.value) : parsed;
+}
+
+/**
+ * The triage answer: the verdict, plus `touches`, the files and folders the
+ * work is expected to change. `touches` is psm's own (executor/overlap.ts) and
+ * never part of the verdict the hub sees. A missing or unusable list is an
+ * unknown scope, never a reason to refuse the verdict.
+ */
+export function parseTriageAnswer(answer: string): { ok: true; verdict: Verdict; scope: Scope } | { ok: false; error: string } {
+  const parsed = parseAnswerObject(answer);
+  if (!parsed.ok) return parsed;
+  let scope: Scope = null;
+  let value = parsed.value;
+  if (isPlainObject(value) && "touches" in value) {
+    const { touches, ...rest } = value as Record<string, unknown>;
+    scope = normalizeScope(touches);
+    value = rest;
+  }
+  const checked = validateVerdict(value);
+  return checked.ok ? { ok: true, verdict: checked.verdict, scope } : checked;
+}
+
+function parseAnswerObject(answer: string): { ok: true; value: unknown } | { ok: false; error: string } {
   const text = String(answer ?? "").trim();
   if (!text) return { ok: false, error: "the engine returned an empty answer" };
 
@@ -226,11 +253,9 @@ export function parseVerdictAnswer(answer: string): VerdictResult {
     body = fences[0][1].trim();
   }
 
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
+    return { ok: true, value: JSON.parse(body) };
   } catch (err) {
     return { ok: false, error: `the answer is not valid JSON: ${(err as Error).message}` };
   }
-  return validateVerdict(parsed);
 }

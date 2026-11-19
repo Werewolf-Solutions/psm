@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** Bump when the pack's shape changes, so old cache entries stop matching. */
-export const CONTEXT_VERSION = 1;
+export const CONTEXT_VERSION = 2;
 
 export const PACK_MAX_BYTES = 60 * 1024;
 
@@ -29,6 +29,7 @@ export const SECTION_LIMITS = {
   branches: 3 * 1024,
   intake: 6 * 1024,
   recap: 3 * 1024,
+  files: 8 * 1024,
 };
 
 const ROADMAP_FILE_LIMIT = 40;
@@ -214,6 +215,29 @@ function baseBranch(projectDir: string, branches: string[]): string | null {
   return head?.trim() || null;
 }
 
+/**
+ * The committed files, so triage can say which ones a task touches. A big tree
+ * folds into folders with their file counts until it fits.
+ */
+export function filesSection(projectDir: string, limit = SECTION_LIMITS.files): string {
+  const out = git(projectDir, ["ls-files", "-z"]);
+  if (!out) return "";
+  const files = out.split("\0").filter(Boolean).sort();
+  const fits = (lines: string[]) => Buffer.byteLength(lines.join("\n"), "utf8") <= limit;
+  if (fits(files)) return files.join("\n");
+  for (const depth of [3, 2, 1]) {
+    const groups = new Map<string, number>();
+    for (const file of files) {
+      const parts = file.split("/");
+      const key = parts.length > depth ? `${parts.slice(0, depth).join("/")}/` : file;
+      groups.set(key, (groups.get(key) ?? 0) + 1);
+    }
+    const lines = [...groups].map(([key, count]) => (key.endsWith("/") ? `${key} (${count} files)` : key));
+    if (fits(lines)) return lines.join("\n");
+  }
+  return truncateBytes(files.join("\n"), limit).text;
+}
+
 function branchesSection(projectDir: string): string {
   const out = git(projectDir, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
   if (!out) return "";
@@ -266,6 +290,7 @@ export function buildContextPack(input: ContextInput): ContextPack {
     { title: readme ? path.basename(readme) : "README", body: readme ? readCapped(readme, SECTION_LIMITS.readme) || "" : "" },
     { title: claude ? path.basename(claude) : "CLAUDE.md", body: claude ? readCapped(claude, SECTION_LIMITS.claude) || "" : "" },
     { title: "Roadmaps (docs/roadmaps)", body: roadmapsSection(projectDir) },
+    { title: "Files (committed)", body: filesSection(projectDir) },
     { title: "Git log, last 30 days", body: gitLogSection(projectDir) },
     { title: "Local branches", body: branchesSection(projectDir) },
     { title: "Other open intake for this project", body: formatIntake(input.openIntake || [], input.intakeId) },

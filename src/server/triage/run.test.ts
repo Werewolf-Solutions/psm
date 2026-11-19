@@ -117,6 +117,17 @@ test("identical triage is served from cache; a changed text or context is not", 
   assert.equal(engine.calls.length, 3);
 });
 
+test("the predicted scope comes back with the verdict, cached or not", async () => {
+  const cache = memoryTriageCache();
+  const engine = fakeEngine(JSON.stringify({ ...VERDICT, touches: ["routes/registry.js"] }));
+  const run = () => runTriage({ projectDir: dir, projectName: "demo", intakeText: "Search the registry", pack, engine, cache });
+  const first = await run();
+  const second = await run();
+  assert.deepEqual(first.ok && first.scope, ["routes/registry.js"]);
+  assert.deepEqual(second.ok && second.cached && second.scope, ["routes/registry.js"]);
+  assert.equal(engine.calls.length, 1);
+});
+
 test("failed runs are never cached", async () => {
   const cache = memoryTriageCache();
   let answer = "nope";

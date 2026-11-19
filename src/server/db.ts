@@ -489,6 +489,25 @@ const MIGRATIONS: readonly string[] = [
    );
    CREATE INDEX hub_jobs_by_status ON hub_jobs (status, created_at);
    CREATE INDEX hub_jobs_by_intake ON hub_jobs (intake_id);`,
+  // Parallel implement jobs on one repo (executor/overlap.ts): what triage
+  // expects an intake to touch, what a job's branch really changed, how often a
+  // job went back to the queue for colliding with another, and why it waits.
+  `ALTER TABLE hub_intake ADD COLUMN scope TEXT;
+   ALTER TABLE hub_jobs ADD COLUMN files TEXT;
+   ALTER TABLE hub_jobs ADD COLUMN requeues INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE hub_jobs ADD COLUMN note TEXT;`,
+  // A job psm stopped part-way (a restart, or the owner's Resume) continues in
+  // the clone it already has instead of starting over.
+  `ALTER TABLE hub_jobs ADD COLUMN resume INTEGER NOT NULL DEFAULT 0;`,
+  // How overlapping jobs on one project are scheduled (executor/overlap.ts):
+  // 'wait' runs them one after another; 'conflict' runs them side by side and
+  // redoes one only when its Accept conflicts.
+  `CREATE TABLE hub_project_settings (project_id TEXT PRIMARY KEY, overlap TEXT NOT NULL DEFAULT 'wait', updated_at INTEGER NOT NULL);`,
+  // When a job's code was taken (its fresh clone) and when its Accept merged
+  // it, so a finished job can tell which overlapping merges its branch predates
+  // (executor/overlap.ts mergedSince).
+  `ALTER TABLE hub_jobs ADD COLUMN based_at INTEGER;
+   ALTER TABLE hub_jobs ADD COLUMN accepted_at INTEGER;`,
 ];
 
 /** The schema version a database is brought up to by `openDatabase`. */

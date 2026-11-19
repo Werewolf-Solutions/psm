@@ -147,7 +147,7 @@ import { isUnitKind, mcpUnitControl, parseTargets, planUnits, portOpen, startUni
 import { executorActivity, executorForcedByEnv, executorStatus, jobsDirectory, reviewCauses, setExecutorRunning, startExecutorService } from "./executor/service.ts";
 import { causeLabel, parseReviewCause } from "./executor/review-causes.ts";
 import { clonePath } from "./executor/implement-job.ts";
-import { acceptJob, discardClone, readJobDiff } from "./executor/review.ts";
+import { acceptJob, discardClone, dropFetchedBranch, readJobDiff } from "./executor/review.ts";
 import { readSwitches, writeSwitches } from "./switches.ts";
 import { executorId, hubClient } from "./executor/client.ts";
 import { intakeRoutes } from "./executor/intake-routes.ts";
@@ -3011,21 +3011,23 @@ local.get("/api/executor/queue", async (_req, res) => {
 /* ---- the Agents page: everything working on this machine's projects ---- */
 // The hub's queue and target are read at most every 15 s, and a slow hub never
 // holds the page up for more than 2.5 s: it shows what it had last.
-let agentHubCache: { at: number; signedIn: boolean; hub: { target: string; reachable: boolean } | null; queue: Awaited<ReturnType<ReturnType<typeof hubClient>["listQueue"]>> | null } | null = null;
+let agentHubCache: { at: number; signedIn: boolean; hub: { target: string; reachable: boolean } | null; queue: Awaited<ReturnType<ReturnType<typeof hubClient>["listQueue"]>> | null; jobs: Awaited<ReturnType<ReturnType<typeof hubClient>["listJobs"]>> | null } | null = null;
 let agentHubRefresh: Promise<void> | null = null;
 async function agentHubState() {
-  if (agentHubCache && Date.now() - agentHubCache.at < 15_000) return agentHubCache;
+  // psm's own queue is a local read: fresh enough to follow sub-agents as they queue and start.
+  if (agentHubCache && Date.now() - agentHubCache.at < (hubMode() === "local" ? 3_000 : 15_000)) return agentHubCache;
   agentHubRefresh ??= (async () => {
     const signedIn = await hubReady();
     const hub = hubMode() === "local"
       ? { target: LOCAL_HUB_TARGET, reachable: true }
       : await refreshWerewolfRuntime().then((api) => ({ target: `${api.source} (${api.activeUrl})`, reachable: api.reachable })).catch(() => null);
     const queue = signedIn ? await hubForCockpit().listQueue().catch(() => null) : null;
-    agentHubCache = { at: Date.now(), signedIn, hub, queue };
+    const jobs = signedIn ? await hubForCockpit().listJobs().catch(() => null) : null;
+    agentHubCache = { at: Date.now(), signedIn, hub, queue, jobs };
   })().finally(() => { agentHubRefresh = null; });
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, 2_500).unref());
   await Promise.race([agentHubRefresh, timeout]);
-  return agentHubCache ?? { at: 0, signedIn: false, hub: null, queue: null };
+  return agentHubCache ?? { at: 0, signedIn: false, hub: null, queue: null, jobs: null };
 }
 
 const AGENT_HISTORY_MS = 24 * 60 * 60_000;
@@ -3056,6 +3058,7 @@ async function agentRoster(): Promise<AgentSummary[]> {
     localQueue: hubMode() === "local",
     jobs: executorActivity().list(),
     queue: hub.queue,
+    hubJobs: hub.jobs,
     sessions: sessionRoster(Date.now() - AGENT_HISTORY_MS),
     rooms: openWorkrooms().map((room) => ({ id: room.id, title: room.title, projects: room.projects })),
     processes: processRoster(),
@@ -3078,9 +3081,15 @@ local.get("/api/agents/:id", async (req, res) => {
   const agent = (await agentRoster()).find((entry) => entry.id === id);
   if (!agent) return res.status(404).json({ error: "That agent is not running any more." });
   let detail: Record<string, unknown> = {};
-  if (agent.kind === "project-agent") {
+  if (agent.kind === "project-agent" || agent.kind === "sub-agent") {
     const entry = agent.jobId ? executorActivity().get(agent.jobId) : null;
     if (entry) detail = { jobId: entry.jobId, jobKind: entry.kind, text: entry.text, attempt: entry.attempt, timeline: entry.timeline.slice(-30), lines: entry.agent.slice(-40), error: entry.error };
+    // What the queue knows about a sub-agent's job: what it is expected to touch and what it waits for.
+    const queued = agent.kind === "sub-agent" ? agentHubCache?.jobs?.find((job) => job.jobId === agent.jobId) : null;
+    if (queued) {
+      const intake = agentHubCache?.queue?.find((item) => item.intakeId === queued.intakeId);
+      detail = { ...detail, jobId: queued.jobId, text: (detail.text as string | undefined) ?? intake?.text ?? "", status: queued.status, scope: queued.scope ?? intake?.scope ?? null, waitingFor: queued.waitingFor ?? [], needs: queued.needs ?? [], note: queued.note ?? null };
+    }
   } else if (agent.kind === "remote-executor") {
     const executor = id.slice("remote:".length);
     const names = new Map(primaryCheckouts(getProjects()).filter((project) => project.id).map((project) => [project.id!, project.name]));
@@ -3138,6 +3147,8 @@ local.get("/api/executor/jobs", jobRoute(async (_req, res) => {
     projectName: projectById(job.projectId)?.name ?? null,
     // Only the machine holding the branch can review it.
     reviewHere: job.status === "review" && job.pinnedExecutor === me && !!localClone(job),
+    // A stalled or failed job whose copy is still here can continue where it stopped.
+    resumeHere: (job.status === "stalled" || job.status === "failed") && !!localClone(job),
   }));
   res.json({ executorId: me, jobs });
 }));
@@ -3169,7 +3180,20 @@ local.post("/api/executor/jobs/:jobId/accept", jobRoute(async (req, res) => {
   if (job.status !== "review") return res.status(409).json({ error: `This job is ${job.status}, not waiting for review.` });
   const subject = job.result?.commits?.[0]?.subject || "implement job";
   const merged = acceptJob(clone.project.path, clone.dir, job.jobId, `Merge ${job.result?.branch ?? job.jobId}: ${subject}`);
-  if (!merged.ok) return res.status(409).json({ error: merged.reason, branchKept: merged.branchKept });
+  if (!merged.ok) {
+    // A project that runs overlapping jobs side by side redoes a conflicting one from the merged code.
+    const hub = hubForCockpit();
+    if (merged.conflicted && hub.overlapModes?.()[job.projectId] === "conflict") {
+      const redone = hub.redoAfterConflict?.(job.jobId);
+      if (redone) {
+        executorActivity().reviewed(job.jobId, "revise", "Accept conflicted with what was merged meanwhile; it starts again from the merged code");
+        dropFetchedBranch(clone.project.path, job.jobId);
+        discardClone(clone.dir);
+        return res.json({ job: redone, redone: true, message: "It conflicted with what was merged meanwhile, so it starts again from the merged code. Your checkout is unchanged." });
+      }
+    }
+    return res.status(409).json({ error: merged.reason, branchKept: merged.branchKept });
+  }
   // Recorded before telling the hub: the merge happened whatever the hub says.
   executorActivity().reviewed(job.jobId, "accept", `${merged.into} (${merged.mergeCommit.slice(0, 8)})`);
   const saved = await hubForCockpit().reviewJob(job.jobId, "accept");
@@ -3198,6 +3222,48 @@ local.post("/api/executor/jobs/:jobId/revise", jobRoute(async (req, res) => {
   executorActivity().reviewed(req.params.jobId, "revise", `${comment.slice(0, 300)} (${causeLabel(why.cause, why.note)})`);
   res.json({ job: saved });
 }));
+// How overlapping jobs on each project are scheduled: one after another, or side by side.
+local.get("/api/executor/overlap", jobRoute(async (_req, res) => {
+  res.json({ modes: hubForCockpit().overlapModes?.() ?? null });
+}));
+local.post("/api/executor/overlap/:projectId", jobRoute(async (req, res) => {
+  const hub = hubForCockpit();
+  if (!hub.setOverlapMode) return res.status(409).json({ error: "Only psm's own queue can run overlapping jobs side by side." });
+  res.json({ projectId: req.params.projectId, mode: hub.setOverlapMode(req.params.projectId, req.body?.mode) });
+}));
+
+// A stalled or failed job, again: a fresh job for the same ticket, with the same model choice.
+local.post("/api/executor/jobs/:jobId/retry", jobRoute(async (req, res) => {
+  const job = await findJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "No such job." });
+  if (job.status !== "stalled" && job.status !== "failed") return res.status(409).json({ error: `This job is ${job.status}; only a stalled or failed job can be retried.` });
+  const hub = hubForCockpit();
+  await hub.cancelJob(job.jobId);
+  const clone = localClone(job);
+  if (clone) discardClone(clone.dir);
+  res.status(201).json({ job: await hub.goJob(job.intakeId, job.selection) });
+}));
+
+// Continue a stalled or failed job where it stopped, in the copy it already has.
+local.post("/api/executor/jobs/:jobId/resume", jobRoute(async (req, res) => {
+  const job = await findJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "No such job." });
+  if (!localClone(job)) return res.status(409).json({ error: "This job's copy is not on this machine any more. Use Retry to start it again." });
+  res.json({ job: await hubForCockpit().resumeJob(job.jobId) });
+}));
+
+// Back through triage: for a ticket that failed triage, did not fit, or whose job stalled or failed.
+local.post("/api/executor/intake/:intakeId/retriage", jobRoute(async (req, res) => {
+  const hub = hubForCockpit();
+  const jobs = (await hub.listJobs()).filter((job) => job.intakeId === req.params.intakeId);
+  for (const job of jobs.filter((entry) => entry.status === "stalled" || entry.status === "failed")) {
+    await hub.cancelJob(job.jobId);
+    const clone = localClone(job);
+    if (clone) discardClone(clone.dir);
+  }
+  res.json({ intake: await hub.retriageIntake(req.params.intakeId) });
+}));
+
 local.post("/api/executor/jobs/:jobId/cancel", jobRoute(async (req, res) => {
   const job = await hubForCockpit().cancelJob(req.params.jobId);
   const clone = localClone(job);
