@@ -86,7 +86,7 @@ import { PlanConflictError, PlanNotFoundError, PlanValidationError, planStore } 
 import { McpClientError, McpClientStore, MCP_TOKEN_ENV } from "./mcp/clients.ts";
 import { McpOperations } from "./mcp/operations.ts";
 import { MCP_PATH, mcpHandler } from "./mcp/server.ts";
-import { McpRequestStore, REQUESTS_PER_DAY } from "./mcp/requests.ts";
+import { McpRequestStore, requestsPerDay } from "./mcp/requests.ts";
 import { connectCommand, connectionFile, connectionName, installInto, isDescendantOf, isProviderId, listProviders, removeConnection, snippets, uninstallFrom, writeConnection, type ProviderId } from "./mcp/connect.ts";
 import { NOTE_KINDS, NoteNotFoundError, NoteValidationError, noteStore } from "./notes.ts";
 import { ensurePreviewProxy } from "./preview.ts";
@@ -278,6 +278,7 @@ const mcpOperations = new McpOperations({
     queue: () => hubForCockpit().listQueue(),
     jobs: () => hubForCockpit().listJobs(),
     store: mcpRequests,
+    perDay: () => requestsPerDay(psmMode()),
   },
   // P18. runbookFor is hoisted; stackStore is read per call, after startup.
   runbook: (name) => runbookFor(name),
@@ -392,7 +393,7 @@ local.get("/api/mcp/clients", (req, res) => {
   res.json({
     endpoint: `http://127.0.0.1:${PORT}${MCP_PATH}`,
     tokenEnv: MCP_TOKEN_ENV,
-    requestsPerDay: REQUESTS_PER_DAY,
+    requestsPerDay: requestsPerDay(psmMode()),
     clients: mcpClients.list().map((client) => ({ ...client, mayRequest: client.mayRequest === true, requestsToday: mcpRequests.recentCount(client.id), recent: mcpClients.recent(client.id, 5) })),
   });
 });

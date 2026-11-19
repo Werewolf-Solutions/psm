@@ -21,6 +21,20 @@ export type RequestKind = (typeof REQUEST_KINDS)[number];
 
 /** Triage spends model credit, so each client gets a daily number of new requests. */
 export const REQUESTS_PER_DAY = 20;
+
+/**
+ * New requests per client in 24 hours, or null for no limit.
+ * PSM_MCP_REQUESTS_PER_DAY sets it: a whole number, or "off" for no limit.
+ * Unset, the local cockpit (dev mode) has no limit, since the operator is the
+ * one sending and pays for it; an agent paired with a hosted page keeps REQUESTS_PER_DAY.
+ */
+export function requestsPerDay(mode: string, setting: string | undefined = process.env.PSM_MCP_REQUESTS_PER_DAY): number | null {
+  const value = (setting ?? "").trim().toLowerCase();
+  if (["off", "none", "unlimited", "0"].includes(value)) return null;
+  const number = Number(value);
+  if (value && Number.isInteger(number) && number > 0) return number;
+  return mode === "dev" ? null : REQUESTS_PER_DAY;
+}
 export const REQUEST_TEXT_MAX = 8_000;
 const DAY_MS = 24 * 60 * 60_000;
 

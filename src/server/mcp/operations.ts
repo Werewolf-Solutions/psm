@@ -117,6 +117,8 @@ export interface McpRequestControl {
     list: (clientId: string | null, limit?: number) => McpRequestRow[];
     recentCount: (clientId: string, now?: number) => number;
   };
+  /** New requests per client in 24 hours, or null for no limit (requests.ts requestsPerDay). Defaults to REQUESTS_PER_DAY. */
+  perDay?: () => number | null;
   now?: () => number;
 }
 
@@ -681,8 +683,9 @@ export class McpOperations {
     const now = (control.now ?? Date.now)();
     const key = requestKey(client.id, input.idempotencyKey);
     const earlier = control.store.byKey(client.id, key);
-    if (!earlier && control.store.recentCount(client.id, now) >= REQUESTS_PER_DAY) {
-      return { state: "denied", reason: `This client already sent ${REQUESTS_PER_DAY} requests in the last 24 hours. Triage spends model credit; try again later.` };
+    const limit = control.perDay ? control.perDay() : REQUESTS_PER_DAY;
+    if (!earlier && limit !== null && control.store.recentCount(client.id, now) >= limit) {
+      return { state: "denied", reason: `This client already sent ${limit} requests in the last 24 hours. Triage spends model credit; try again later.` };
     }
     if (!(await control.signedIn())) return { state: "unavailable", reason: "psm is set to use the Werewolf hub (PSM_HUB=werewolf) and is not signed in. The operator signs in from psm." };
     let made;
@@ -702,7 +705,7 @@ export class McpOperations {
         kind,
         created: made.created && !earlier,
         stage: requestStage({ intakeId: made.intakeId, projectId: found.data.id, status: made.status, verdict: null, error: null, updatedAt: "" }, null),
-        remainingToday: Math.max(0, REQUESTS_PER_DAY - control.store.recentCount(client.id, now)),
+        remainingToday: limit === null ? null : Math.max(0, limit - control.store.recentCount(client.id, now)),
         notes: [
           "The request is queued for triage. Nothing is implemented until the operator presses Go in psm or Todo.",
           `Follow it with get_request. Stages: ${REQUEST_STAGES}.`,
@@ -731,7 +734,7 @@ export class McpOperations {
       data: {
         requests: rows.map((row) => this.#requestView(row, client, names, state.data.intake.get(row.intakeId) ?? null, state.data.jobs.get(row.intakeId) ?? null)),
         mayRequest: client.mayRequest === true,
-        remainingToday: Math.max(0, REQUESTS_PER_DAY - control.store.recentCount(client.id, (control.now ?? Date.now)())),
+        remainingToday: ((limit) => (limit === null ? null : Math.max(0, limit - control.store.recentCount(client.id, (control.now ?? Date.now)()))))(control.perDay ? control.perDay() : REQUESTS_PER_DAY),
         stages: REQUEST_STAGES,
       },
     };
@@ -789,7 +792,7 @@ export class McpOperations {
         projectsWithoutStableId: client.projects === "all" ? all.filter((project) => !project.id).length : undefined,
         tools: [...MCP_TOOLS],
         requests: this.deps.requests
-          ? { allowed: client.mayRequest === true, perDay: REQUESTS_PER_DAY, note: client.mayRequest === true ? "submit_request queues a request for triage; the operator starts the work with Go." : "Not allowed for this client. The operator can allow it in psm (Linked folders → AI clients)." }
+          ? { allowed: client.mayRequest === true, perDay: this.deps.requests.perDay ? this.deps.requests.perDay() : REQUESTS_PER_DAY, note: client.mayRequest === true ? "submit_request queues a request for triage; the operator starts the work with Go." : "Not allowed for this client. The operator can allow it in psm (Linked folders → AI clients)." }
           : { allowed: false, perDay: REQUESTS_PER_DAY, note: "This psm does not take requests over MCP." },
         unavailable: MCP_UNAVAILABLE,
         notes: [

@@ -503,11 +503,11 @@ test("list_agents mirrors the Agents page within the client's scope, without com
 
 /* ---------- requests over MCP: submit_request, list_requests, get_request, withdraw_request ---------- */
 
-import { McpRequestStore, REQUESTS_PER_DAY, requestKey, requestText } from "./requests.ts";
+import { McpRequestStore, REQUESTS_PER_DAY, requestKey, requestsPerDay, requestText } from "./requests.ts";
 import { requestStage, type McpRequestIntake, type McpRequestJob } from "./operations.ts";
 
 /** A fake hub: intake keyed like the real one (idempotent on `key`), plus jobs a test can add. */
-function requestHarness(options: { signedIn?: boolean } = {}) {
+function requestHarness(options: { signedIn?: boolean; perDay?: () => number | null } = {}) {
   const { store, handle } = newStore();
   const requests = new McpRequestStore(() => handle);
   const intake = new Map<string, McpRequestIntake & { key: string; text: string }>();
@@ -535,6 +535,7 @@ function requestHarness(options: { signedIn?: boolean } = {}) {
       queue: async () => [...intake.values()],
       jobs: async () => jobs,
       store: requests,
+      ...(options.perDay ? { perDay: options.perDay } : {}),
       now: () => clock,
     },
   });
@@ -748,5 +749,21 @@ test("over HTTP: an allowed client submits a request and reads it back; schema l
   } finally {
     await mcp.close().catch(() => {});
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("the local cockpit has no request limit unless one is set; an agent keeps the default", async () => {
+  assert.equal(requestsPerDay("dev", undefined), null);
+  assert.equal(requestsPerDay("agent", undefined), REQUESTS_PER_DAY);
+  assert.equal(requestsPerDay("agent", "off"), null);
+  assert.equal(requestsPerDay("dev", "5"), 5);
+  assert.equal(requestsPerDay("agent", "lots"), REQUESTS_PER_DAY, "an unreadable setting keeps the default");
+
+  const h = requestHarness({ perDay: () => null });
+  const client = h.allowed("agent", ["prj_alpha"]);
+  for (let index = 0; index < REQUESTS_PER_DAY + 3; index++) {
+    const sent = await h.ops.submitRequest(client, submit(`fh-item-${2000 + index}`));
+    assert.equal(sent.state, "succeeded");
+    assert.equal((sent as any).data.remainingToday, null);
   }
 });
