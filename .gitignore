@@ -33,6 +33,7 @@ host-helper/host-helper
 .psm-executor-activity.json
 .psm-jobs/
 .psm-switches.json
+.psm-review-causes.json
 
 # Stamped by the deploy workflow so the page can spot an out-of-date agent.
 web/version.json
