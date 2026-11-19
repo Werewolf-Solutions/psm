@@ -41,6 +41,9 @@ test("SDK MCP transport stages and commits without approval and cannot self-gran
   assert.equal((await call("git_commit", { message: "repair through MCP" })).isError, undefined);
   assert.equal(git("show", "HEAD:app.txt"), "fixed\n");
   assert.equal((await call("read", { project: "prj_other", file: "app.txt" })).isError, true);
+  // Agents often pass the project's name; it resolves when unambiguous.
+  assert.match(JSON.stringify((await call("read", { project: project.name, file: "app.txt" })).content), /fixed/);
+  assert.match(JSON.stringify((await call("read", { project: "other", file: "app.txt" })).content), /Projects in scope: test \(prj_test\)/);
   fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ scripts: { build: "tsc && vite build" }, dependencies: { react: "19" } }));
   git("add", "package.json"); git("commit", "-qm", "website manifest");
   await call("write", { file: "app.txt", content: "unverified website edit\n" });

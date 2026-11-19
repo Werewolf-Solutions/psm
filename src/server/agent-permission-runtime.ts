@@ -95,17 +95,26 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
   const tasks = new Map([...repositories].map(([id, repo]) => [id, new ManagedTaskRunner(repo, checker, signal.signal, undefined, undefined, byName, { checkoutDeps: policy.profile === "implement", ...(policy.profile === "implement" ? { taskImage: agentImage() } : {}) })]));
   signal.signal.addEventListener("abort", () => { for (const task of tasks.values()) task.close(); }, { once: true });
   const directory = z.string().default(".").describe("Repository-relative package directory, e.g. client; defaults to project root");
-  const project = z.string().describe("Registered project ID from the session scope");
+  const project = z.string().describe("Registered project ID (prj_…) from the session scope; the project name is also accepted");
+  // Agents often pass the project's name instead of its id. Accept a name only
+  // when exactly one scoped project carries it; preview services never match.
+  const resolve = (key: string) => {
+    const byId = repositories.get(key);
+    if (byId) return byId;
+    const named = [...repositories.values()].filter((repo) => repo.snapshot.project.name === key);
+    return named.length === 1 ? named[0] : undefined;
+  };
+  const scopeList = () => [...repositories.values()].map((repo) => `${repo.snapshot.project.name} (${repo.snapshot.project.id})`).join(", ") || "none";
   const invoke = async (id: string, action: (repository: RepositoryTools) => unknown) => {
     try {
       if (input.signal.signal.aborted) throw new Error("This turn was stopped.");
-      const repository = repositories.get(id);
-      if (!repository) throw new Error("This project is outside the workroom scope.");
+      const repository = resolve(id);
+      if (!repository) throw new Error(`This project is outside the workroom scope. Projects in scope: ${scopeList()}.`);
       const result = await action(repository);
       return { content: [{ type: "text" as const, text: typeof result === "string" ? result : JSON.stringify(result) }] };
     } catch (error) {
       if (error instanceof ReviewRequiredError) {
-        const snapshot = repositories.get(id)?.snapshot;
+        const snapshot = resolve(id)?.snapshot;
         if (snapshot && input.policy.reviews) {
           const review = input.policy.reviews.request(snapshot, error.permission, error.context, error.summary, error.message);
           const kind = error instanceof GrantRequiredError ? "Access request" : "Operator review";
@@ -130,17 +139,17 @@ export function createManagedRepositoryServer(policy: ManagedAgentPolicy, signal
       tool("attached_call_result", "Read the outcome of an operator-reviewed attached MCP call.", { project, request: z.string() }, ({ project, request }) => invoke(project, (repo) => policy.mcp!.result(repo.snapshot, request))),
     ] : []),
     ...(policy.machines ? [
-      tool("server_environments", "List servers connected to a project, by environment, with the unprivileged account and directory commands run as.", { project }, ({ project }) => invoke(project, () => policy.machines!.environments(project))),
+      tool("server_environments", "List servers connected to a project, by environment, with the unprivileged account and directory commands run as.", { project }, ({ project }) => invoke(project, (repo) => policy.machines!.environments(repo.snapshot.project.id))),
       tool("server_command", "Run one shell command on a project's connected server for an environment, as that environment's own command account (no sudo, its own working directory). May need operator review.", { project, environment: z.string(), command: z.string(), timeoutSeconds: z.number().int().min(5).max(600).optional() }, ({ project, environment, command, timeoutSeconds }) => invoke(project, (repo) => policy.machines!.run({ snapshot: repo.snapshot, permissions: input.policy.store, environmentId: environment, command, timeoutSeconds, signal: input.signal.signal }))),
     ] : []),
     ...(policy.explain ? [
       tool("access_status", "Explain what you can and cannot do in a project right now, and for each gap whether it needs a grant, a review, a connection or a runner, or is unsupported. Check this before telling the operator something is impossible.", { project }, ({ project }) => invoke(project, (repo) => policy.explain!(repo.snapshot))),
     ] : []),
     tool("verification_status", "List package directories requiring a build or browser check before a code commit. If verification is blocked, report the task as unverified and incomplete.", { project }, ({ project }) => invoke(project, repo => repo.verificationStatus())),
-    tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, () => tasks.get(project)!.tests(script))),
-    tool("run_script", "Run a package.json script (build, typecheck, lint, …) offline in the disposable sandbox and return its output. Install dependencies first if it needs them.", { project, script: z.string(), directory }, ({ project, script, directory }) => invoke(project, () => tasks.get(project)!.script(script, directory))),
-    tool("preview_check", "Load each app route in Chromium inside the offline sandbox. Fails on JavaScript errors, failed local requests, Vite error overlays or blank app content. Requires the preloaded PSM browser image. Install dependencies first. An app whose own API is absent offline can declare canned fetch responses in psm-preview.json beside its package.json, or (schema v2) declare its real backend as a service from another in-scope project, started on an internal network with empty databases; the result lists each fixture and expected answer used. A listening dev server alone is not verification.", { project, script: z.string(), port: z.number().int(), paths: z.array(z.string()).max(10).default(["/"]), directory, signedIn: z.boolean().default(false).describe("Load the routes signed in, using the session psm-preview.json declares; the cookie carries across routes") }, ({ project, script, port, paths, directory, signedIn }) => invoke(project, () => tasks.get(project)!.preview(script, port, paths, directory, signedIn))),
-    tool("install_packages", "Install the public npm lockfile for the selected package directory into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project, directory }, ({ project, directory }) => invoke(project, () => tasks.get(project)!.install(directory))),
+    tool("run_tests", "Run node --test or a test/test:… npm script offline in the disposable sandbox. Install dependencies first if needed.", { project, script: z.string().default("test") }, ({ project, script }) => invoke(project, (repo) => tasks.get(repo.snapshot.project.id)!.tests(script))),
+    tool("run_script", "Run a package.json script (build, typecheck, lint, …) offline in the disposable sandbox and return its output. Install dependencies first if it needs them.", { project, script: z.string(), directory }, ({ project, script, directory }) => invoke(project, (repo) => tasks.get(repo.snapshot.project.id)!.script(script, directory))),
+    tool("preview_check", "Load each app route in Chromium inside the offline sandbox. Fails on JavaScript errors, failed local requests, Vite error overlays or blank app content. Requires the preloaded PSM browser image. Install dependencies first. An app whose own API is absent offline can declare canned fetch responses in psm-preview.json beside its package.json, or (schema v2) declare its real backend as a service from another in-scope project, started on an internal network with empty databases; the result lists each fixture and expected answer used. A listening dev server alone is not verification.", { project, script: z.string(), port: z.number().int(), paths: z.array(z.string()).max(10).default(["/"]), directory, signedIn: z.boolean().default(false).describe("Load the routes signed in, using the session psm-preview.json declares; the cookie carries across routes") }, ({ project, script, port, paths, directory, signedIn }) => invoke(project, (repo) => tasks.get(repo.snapshot.project.id)!.preview(script, port, paths, directory, signedIn))),
+    tool("install_packages", "Install the public npm lockfile for the selected package directory into the disposable turn sandbox. Requires pkg.install; no lifecycle scripts or checkout changes.", { project, directory }, ({ project, directory }) => invoke(project, (repo) => tasks.get(repo.snapshot.project.id)!.install(directory))),
     tool("files", "List ordinary project files.", { project }, ({ project }) => invoke(project, (repo) => repo.list())),
     tool("read", "Read one project text file.", { project, file: z.string() }, ({ project, file }) => invoke(project, (repo) => repo.read(file))),
     tool("search", "Search project files for literal text.", { project, text: z.string() }, ({ project, text }) => invoke(project, (repo) => repo.search(text))),
